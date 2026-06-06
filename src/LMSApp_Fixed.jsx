@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it","llama-3.1-8b-instant"];
+const GROQ_MODELS = ["llama-3.1-8b-instant"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral","codellama","phi3","gemma2","deepseek-coder"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
