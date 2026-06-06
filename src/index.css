@@ -1,0 +1,80 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
+  background: #f8fafc;
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── LMS button base ── */
+.lms-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 9px; font-size: 13.5px;
+  font-weight: 600; cursor: pointer; border: none;
+  font-family: inherit; transition: opacity .12s, box-shadow .12s;
+  white-space: nowrap;
+}
+.lms-btn:disabled { opacity: .5; cursor: not-allowed; }
+.lms-btn-dark  { background: #0f172a; color: #fff; }
+.lms-btn-dark:hover:not(:disabled)  { opacity: .85; }
+.lms-btn-blue  { background: #3b82f6; color: #fff; }
+.lms-btn-blue:hover:not(:disabled)  { opacity: .88; }
+.lms-btn-rose  { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.lms-btn-rose:hover:not(:disabled)  { background: #fee2e2; }
+.lms-btn-ghost { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.lms-btn-ghost:hover:not(:disabled) { background: #e2e8f0; }
+
+/* ── Inputs ── */
+.lms-input, .lms-textarea {
+  width: 100%; padding: 9px 12px; border: 1.5px solid #e2e8f0;
+  border-radius: 9px; font-size: 13.5px; font-family: inherit;
+  outline: none; transition: border-color .12s;
+  background: #fff; color: #0f172a;
+}
+.lms-input:focus, .lms-textarea:focus { border-color: #3b82f6; }
+.lms-textarea { resize: vertical; min-height: 80px; }
+
+/* ── Nav ── */
+.lms-nav {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px; border-radius: 10px; font-size: 13px;
+  font-weight: 600; cursor: pointer; border: none;
+  background: transparent; color: #475569; width: 100%;
+  font-family: inherit; transition: background .1s, color .1s;
+}
+.lms-nav:hover { background: #f1f5f9; color: #0f172a; }
+.lms-nav.on    { background: #eff6ff; color: #2563eb; }
+
+/* ── CoursesPage card ── */
+.cp-card {
+  background: #fff; border-radius: 16px;
+  border: 1.5px solid #e8edf3;
+  box-shadow: 0 2px 8px rgba(0,0,0,.04);
+}
+.cp-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 9px; font-size: 13px;
+  font-weight: 600; cursor: pointer; border: none;
+  font-family: inherit; transition: opacity .12s;
+  background: #0f172a; color: #fff;
+}
+.cp-btn:disabled { opacity:.5; cursor:not-allowed; }
+.cp-btn-ghost { background:#f1f5f9; color:#475569; border:1px solid #e2e8f0; }
+.cp-btn-rose  { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+.cp-input {
+  width:100%; padding:10px 13px; border:1.5px solid #e2e8f0;
+  border-radius:9px; font-size:13.5px; font-family:inherit;
+  outline:none; background:#fff; color:#0f172a;
+}
+.cp-input:focus { border-color:#667eea; }
+
+/* ── Animations ── */
+@keyframes lms-spin  { to { transform: rotate(360deg); } }
+@keyframes lms-slide { from { transform: translateX(-16px); opacity:0; } to { transform: none; opacity:1; } }
+@keyframes cp-in     { from { transform: scale(.96); opacity:0; } to { transform: none; opacity:1; } }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:99px; }
