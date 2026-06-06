@@ -662,7 +662,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.guide && teachingGuide)         files.push("🧑‍🏫 teaching guide (.md)");
 
   folder.file("README.md",
-    `# Day ${day.dayNum}: ${day.topic}\n\nExported from LearnAI LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
+    `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI with ARBAZ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
 
   return zip.generateAsync({ type: "blob" });
 }
@@ -2616,7 +2616,7 @@ Rules:
             <div style={{ width:32, height:32, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
               <Ic n="brain" s={17} c="#fff" />
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>LearnAI</span>}
+            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI with ARBAZ</span>}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -2673,7 +2673,7 @@ Rules:
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
             <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color:"#475569" }}>LearnAI</span>{" › "}
+              <span style={{ color:"#475569" }}>AI with ARBAZ</span>{" › "}
               <span style={{ color:"#0f172a", fontWeight:600 }}>
                 {page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
