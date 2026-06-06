@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama-3.1-8b-instant"];
+const GROQ_MODELS = ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it","llama-3.1-8b-instant"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral","codellama","phi3","gemma2","deepseek-coder"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -17,7 +17,10 @@ const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
 
 // ─── Supabase credentials stored in sessionStorage (cleared on tab close)
 // Users enter URL+key once in Settings; we cache them for the session only.
-const SB_CREDS_KEY = "lms_sb_creds";
+// ── Supabase credentials come from .env (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
+// Students and trainers share the same DB connection — no manual credential entry needed.
+const _SB_URL  = import.meta.env.VITE_SUPABASE_URL  || "";
+const _SB_KEY  = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const SB_AUTH_KEY  = "lms_sb_auth";
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -75,12 +78,8 @@ function getAuthState() {
 function saveAuthState(state) {
   try { sessionStorage.setItem(SB_AUTH_KEY, JSON.stringify(state)); } catch {}
 }
-function getSbCreds() {
-  try { const s = sessionStorage.getItem(SB_CREDS_KEY); return s ? JSON.parse(s) : { url: "", key: "" }; } catch { return { url: "", key: "" }; }
-}
-function saveSbCreds(url, key) {
-  try { sessionStorage.setItem(SB_CREDS_KEY, JSON.stringify({ url, key })); } catch {}
-}
+function getSbCreds() { return { url: _SB_URL, key: _SB_KEY }; }
+function saveSbCreds() { /* no-op: credentials are in .env */ }
 
 /* ═══════════════════════════════════════════════════════════════════
    ID GENERATOR
@@ -1128,9 +1127,7 @@ function LoginScreen({ onLogin, sb }) {
   const [loading, setLoading] = useState(false);
   const [allCourses, setAllCourses] = useState([]);
   const [trainersMap, setTrainersMap] = useState({});
-  // Inline Supabase creds for trainer registration (sb may be null at this point)
-  const [regSbUrl, setRegSbUrl] = useState(() => getSbCreds().url);
-  const [regSbKey, setRegSbKey] = useState(() => getSbCreds().key);
+
 
   useEffect(() => {
     if (!sb) return;
@@ -1148,14 +1145,8 @@ function LoginScreen({ onLogin, sb }) {
     setError(""); setLoading(true);
     try {
       if (!trainerUsername.trim() || !trainerPass.trim()) throw new Error("Enter username and password");
-      if (!regSbUrl.trim() || !regSbKey.trim()) throw new Error("Enter your Supabase URL and Anon Key");
-      let activeSb = sb;
-      if (!activeSb) {
-        activeSb = makeSupabase(regSbUrl.trim(), regSbKey.trim());
-        await sbGetTrainers(activeSb); // verify connection
-        saveSbCreds(regSbUrl.trim(), regSbKey.trim());
-      }
-      const trainer = await sbLoginTrainer(activeSb, trainerUsername.trim(), trainerPass);
+      if (!sb) throw new Error("Database not configured — check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env");
+      const trainer = await sbLoginTrainer(sb, trainerUsername.trim(), trainerPass);
       if (!trainer) throw new Error("Invalid username or password");
       saveAuthState({ role: "trainer", id: trainer.id, name: trainer.name, username: trainer.username, loginTime: new Date().toISOString() });
       onLogin();
@@ -1167,20 +1158,8 @@ function LoginScreen({ onLogin, sb }) {
     setError(""); setLoading(true);
     try {
       if (!newTrainerName.trim() || !newTrainerUsername.trim() || !newTrainerPass.trim()) throw new Error("Fill in all fields");
-      if (!regSbUrl.trim() || !regSbKey.trim()) throw new Error("Enter your Supabase URL and Anon Key to create an account");
-      // Connect Supabase inline if not already connected
-      let activeSb = sb;
-      if (!activeSb) {
-        try {
-          const payload = JSON.parse(atob(regSbKey.trim().split(".")[1]));
-          if (payload?.role === "service_role") throw new Error("Use the anon/public key, not the service_role key");
-        } catch (jwtErr) { if (jwtErr.message.includes("service_role")) throw jwtErr; }
-        activeSb = makeSupabase(regSbUrl.trim(), regSbKey.trim());
-        // Verify connection
-        await sbGetTrainers(activeSb);
-        saveSbCreds(regSbUrl.trim(), regSbKey.trim());
-      }
-      const trainer = await sbRegisterTrainer(activeSb, newTrainerName, newTrainerUsername, newTrainerPass);
+      if (!sb) throw new Error("Database not configured — check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env");
+      const trainer = await sbRegisterTrainer(sb, newTrainerName, newTrainerUsername, newTrainerPass);
       saveAuthState({ role: "trainer", id: trainer.id, name: trainer.name, username: trainer.username, loginTime: new Date().toISOString() });
       onLogin();
     } catch (e) { setError(e.message); }
@@ -1275,14 +1254,9 @@ function LoginScreen({ onLogin, sb }) {
         )}
 
         {mode === "trainer" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
             <input type="text" value={trainerUsername} onChange={e=>setTrainerUsername(e.target.value)} placeholder="Username" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <div style={{ borderTop:"1px solid #e2e8f0", paddingTop:12, display:"flex", flexDirection:"column", gap:10 }}>
-              <p style={{ fontSize:12, fontWeight:700, color:"#64748b", margin:0 }}>☁️ Supabase Database</p>
-              <input type="url" value={regSbUrl} onChange={e=>setRegSbUrl(e.target.value)} placeholder="https://xxxx.supabase.co" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:13 }} />
-              <input type="password" value={regSbKey} onChange={e=>setRegSbKey(e.target.value)} placeholder="Anon / Public Key (eyJhbGci…)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:13 }} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
-            </div>
+            <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
             <button onClick={handleTrainerLogin} disabled={loading} style={{ padding:12, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
             <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
@@ -1294,11 +1268,7 @@ function LoginScreen({ onLogin, sb }) {
             <input type="text" value={newTrainerName} onChange={e=>setNewTrainerName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
             <input type="text" value={newTrainerUsername} onChange={e=>setNewTrainerUsername(e.target.value)} placeholder="Username (unique)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
             <input type="password" value={newTrainerPass} onChange={e=>setNewTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <div style={{ borderTop:"1px solid #e2e8f0", paddingTop:12, display:"flex", flexDirection:"column", gap:10 }}>
-              <p style={{ fontSize:12, fontWeight:700, color:"#64748b", margin:0 }}>☁️ Supabase Database (required)</p>
-              <input type="url" value={regSbUrl} onChange={e=>setRegSbUrl(e.target.value)} placeholder="https://xxxx.supabase.co" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:13 }} />
-              <input type="password" value={regSbKey} onChange={e=>setRegSbKey(e.target.value)} placeholder="Anon / Public Key (eyJhbGci…)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:13 }} onKeyDown={e=>e.key==="Enter"&&handleTrainerRegister()} />
-            </div>
+
             <button onClick={handleTrainerRegister} disabled={loading} style={{ padding:12, background:"#4f46e5", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Creating...":"Create Account & Login"}</button>
             <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
@@ -4972,15 +4942,10 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
    MAIN APP — Supabase credentials entered here, then passed down
 ═══════════════════════════════════════════════════════════════════ */
 export default function LMSApp() {
-  const [sbUrl, setSbUrl]   = useState(() => getSbCreds().url);
-  const [sbKey, setSbKey]   = useState(() => getSbCreds().key);
-  const [sb, setSb]         = useState(() => {
-    const creds = getSbCreds();
-    return creds.url && creds.key ? makeSupabase(creds.url, creds.key) : null;
-  });
-  const [showSbSetup, setShowSbSetup] = useState(false);
-  const [sbError, setSbError]     = useState("");
-  const [sbTesting, setSbTesting] = useState(false);
+  // Supabase client — created once from env vars, shared by all roles
+  const [sb, setSb] = useState(() =>
+    _SB_URL && _SB_KEY ? makeSupabase(_SB_URL, _SB_KEY) : null
+  );
 
   const [auth, setAuth]                       = useState(getAuthState());
   const [currentCourseId, setCurrentCourseId] = useState(null);
@@ -4999,34 +4964,7 @@ export default function LMSApp() {
     }
   }, [sb, auth?.id]);
 
-  const connectSupabase = async () => {
-    setSbError(""); setSbTesting(true);
-    try {
-      if (!sbUrl.trim() || !sbKey.trim()) throw new Error("Enter both Supabase URL and Anon Key");
-      // FIX 7: Warn if user pastes the service_role key instead of the anon key
-      try {
-        const payload = JSON.parse(atob(sbKey.trim().split(".")[1]));
-        if (payload?.role === "service_role") {
-          throw new Error(
-            "⚠️ You pasted the service_role key — this grants full admin access to your database and must NEVER be used in a browser. " +
-            "Go to Supabase → Settings → API and use the anon / public key instead."
-          );
-        }
-      } catch (jwtErr) {
-        if (jwtErr.message.startsWith("⚠️")) throw jwtErr; // re-throw our warning
-        // Not a valid JWT at all — let the connection test catch it below
-      }
-      const client = makeSupabase(sbUrl.trim(), sbKey.trim());
-      // Test connection
-      await sbGetTrainers(client);
-      saveSbCreds(sbUrl.trim(), sbKey.trim());
-      setSb(client);
-      setShowSbSetup(false);
-    } catch(e) {
-      setSbError(e.message);
-    }
-    setSbTesting(false);
-  };
+
 
   const handleLogout = () => {
     try { sessionStorage.removeItem(SB_AUTH_KEY); } catch {}
@@ -5044,65 +4982,10 @@ export default function LMSApp() {
     }
   };
 
-  // ── Supabase setup screen (trainer only — shown after login) ──
-  if (isTrainer && showSbSetup) {
-    return (
-      <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#667eea 0%,#764ba2 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif" }}>
-        <div style={{ background:"white", borderRadius:20, padding:44, maxWidth:520, width:"100%", boxShadow:"0 25px 70px rgba(0,0,0,.25)" }}>
-          <div style={{ textAlign:"center", marginBottom:32 }}>
-            <div style={{ fontSize:52, marginBottom:12 }}>☁️</div>
-            <h1 style={{ fontSize:26, fontWeight:800, color:"#1a202c", margin:0 }}>Connect Your Database</h1>
-            <p style={{ color:"#64748b", fontSize:13.5, margin:"10px 0 0 0", lineHeight:1.7 }}>
-              Welcome, {auth?.name}! One last step — connect your Supabase project to store courses and student data.
-            </p>
-          </div>
-
-          {sbError && <div style={{ background:"#fed7d7", color:"#c53030", padding:"10px 14px", borderRadius:8, marginBottom:18, fontSize:13 }}>{sbError}</div>}
-
-          <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:20 }}>
-            <div>
-              <label style={{ fontSize:12.5, fontWeight:700, color:"#374151", display:"block", marginBottom:6 }}>Supabase Project URL</label>
-              <input type="url" value={sbUrl} onChange={e=>setSbUrl(e.target.value)} placeholder="https://xxxxxxxxxxxx.supabase.co" style={{ width:"100%", padding:"10px 13px", border:"1.5px solid #e2e8f0", borderRadius:8, fontSize:13.5, outline:"none", boxSizing:"border-box" }} />
-            </div>
-            <div>
-              <label style={{ fontSize:12.5, fontWeight:700, color:"#374151", display:"block", marginBottom:6 }}>Anon / Public Key</label>
-              <input type="password" value={sbKey} onChange={e=>setSbKey(e.target.value)} placeholder="eyJhbGci…" style={{ width:"100%", padding:"10px 13px", border:"1.5px solid #e2e8f0", borderRadius:8, fontSize:13.5, outline:"none", boxSizing:"border-box" }} onKeyDown={e=>e.key==="Enter"&&connectSupabase()} />
-            </div>
-          </div>
-
-          <button onClick={connectSupabase} disabled={sbTesting} style={{ width:"100%", padding:"13px", background:"linear-gradient(135deg,#667eea,#764ba2)", color:"white", border:"none", borderRadius:10, fontWeight:700, fontSize:15, cursor:"pointer", opacity:sbTesting?0.7:1 }}>
-            {sbTesting ? "Connecting…" : "Connect & Continue"}
-          </button>
-
-          <div style={{ marginTop:22, background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:10, padding:"14px 16px" }}>
-            <p style={{ fontSize:12.5, fontWeight:700, color:"#374151", margin:"0 0 8px 0" }}>📋 Setup Steps</p>
-            <ol style={{ fontSize:12.5, color:"#64748b", lineHeight:1.85, paddingLeft:18, margin:0 }}>
-              <li>Create a free project at <a href="https://supabase.com" target="_blank" rel="noreferrer" style={{ color:"#764ba2" }}>supabase.com</a></li>
-              <li>Run the SQL schema provided (supabase_schema.sql)</li>
-              <li>Copy your Project URL and Anon Key from Settings → API</li>
-              <li>Paste them above and click Connect</li>
-            </ol>
-          </div>
-
-          <p style={{ fontSize:11.5, color:"#94a3b8", textAlign:"center", marginTop:14 }}>
-            Credentials are stored in sessionStorage only — cleared when you close the tab.
-          </p>
-        </div>
-      </div>
-    );
-  }
 
   // ── Login screen ──────────────────────────────────────────────
   if (!auth) {
-    return <LoginScreen onLogin={() => {
-      const a = getAuthState();
-      setAuth(a);
-      // Auto-show Supabase setup for trainers who haven't connected yet
-      if (a?.role === "trainer") {
-        const creds = getSbCreds();
-        if (!creds.url || !creds.key) setShowSbSetup(true);
-      }
-    }} sb={sb} />;
+    return <LoginScreen onLogin={() => setAuth(getAuthState())} sb={sb} />;
   }
 
   // ── Trainer view ──────────────────────────────────────────────
@@ -5120,7 +5003,7 @@ export default function LMSApp() {
                 ← Switch Course
               </button>
             )}
-            <button onClick={()=>setShowSbSetup(true)} title="Supabase Settings" style={{ padding:"8px 12px", background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:6, cursor:"pointer", fontSize:12, fontWeight:600 }}>☁️ DB</button>
+
             <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ef4444", color:"white", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
           </div>
         </div>
