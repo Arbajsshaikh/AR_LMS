@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it","llama-3.1-8b-instant"];
+const GROQ_MODELS = ["llama-3.1-8b-instant"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral","codellama","phi3","gemma2","deepseek-coder"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -662,7 +662,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.guide && teachingGuide)         files.push("🧑‍🏫 teaching guide (.md)");
 
   folder.file("README.md",
-    `# Day ${day.dayNum}: ${day.topic}\n\nExported from LearnAI LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
+    `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI with ARBAZ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
 
   return zip.generateAsync({ type: "blob" });
 }
@@ -2616,7 +2616,7 @@ Rules:
             <div style={{ width:32, height:32, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
               <Ic n="brain" s={17} c="#fff" />
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>LearnAI</span>}
+            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI with ARBAZ</span>}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -2673,7 +2673,7 @@ Rules:
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
             <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color:"#475569" }}>LearnAI</span>{" › "}
+              <span style={{ color:"#475569" }}>AI with ARBAZ</span>{" › "}
               <span style={{ color:"#0f172a", fontWeight:600 }}>
                 {page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
@@ -3384,7 +3384,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
   })();
 
   return (
-    <div style={{ animation:"lms-in .3s ease", display:"flex", flexDirection:"column", gap:16, paddingBottom:40 }}>
+    <div style={{ animation:"lms-in .3s ease", display:"flex", flexDirection:"column", gap:16 ,paddingBottom:40 }}>
 
       {/* Inline confirm dialog — replaces window.confirm which is blocked in sandboxed iframes */}
       {confirmWeek && (
@@ -4961,7 +4961,10 @@ export default function LMSApp() {
     const creds = getSbCreds();
     return creds.url && creds.key ? makeSupabase(creds.url, creds.key) : null;
   });
-  const [showSbSetup, setShowSbSetup] = useState(false);
+  const [showSbSetup, setShowSbSetup] = useState(() => {
+    const creds = getSbCreds();
+    return !creds.url || !creds.key;
+  });
   const [sbError, setSbError]     = useState("");
   const [sbTesting, setSbTesting] = useState(false);
 
@@ -5027,16 +5030,16 @@ export default function LMSApp() {
     }
   };
 
-  // ── Supabase setup screen (trainer only — shown after login) ──
-  if (isTrainer && showSbSetup) {
+  // ── Supabase setup screen ──────────────────────────────────────
+  if (showSbSetup) {
     return (
       <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#667eea 0%,#764ba2 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif" }}>
         <div style={{ background:"white", borderRadius:20, padding:44, maxWidth:520, width:"100%", boxShadow:"0 25px 70px rgba(0,0,0,.25)" }}>
           <div style={{ textAlign:"center", marginBottom:32 }}>
             <div style={{ fontSize:52, marginBottom:12 }}>☁️</div>
-            <h1 style={{ fontSize:26, fontWeight:800, color:"#1a202c", margin:0 }}>Connect Your Database</h1>
+            <h1 style={{ fontSize:26, fontWeight:800, color:"#1a202c", margin:0 }}>Connect Supabase</h1>
             <p style={{ color:"#64748b", fontSize:13.5, margin:"10px 0 0 0", lineHeight:1.7 }}>
-              Welcome, {auth?.name}! One last step — connect your Supabase project to store courses and student data.
+              This LMS stores all data in your Supabase project. Enter your project URL and anon key below.
             </p>
           </div>
 
@@ -5077,15 +5080,7 @@ export default function LMSApp() {
 
   // ── Login screen ──────────────────────────────────────────────
   if (!auth) {
-    return <LoginScreen onLogin={() => {
-      const a = getAuthState();
-      setAuth(a);
-      // Auto-show Supabase setup for trainers who haven't connected yet
-      if (a?.role === "trainer") {
-        const creds = getSbCreds();
-        if (!creds.url || !creds.key) setShowSbSetup(true);
-      }
-    }} sb={sb} />;
+    return <LoginScreen onLogin={() => setAuth(getAuthState())} sb={sb} />;
   }
 
   // ── Trainer view ──────────────────────────────────────────────
