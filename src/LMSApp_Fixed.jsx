@@ -3,8 +3,8 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it","llama-3.1-8b-instant"];
-const OLLAMA_MODELS = ["llama3","llama3.1","mistral","codellama","phi3","gemma2","deepseek-coder"];
+const GROQ_MODELS = ["llama-3.1-8b-instant"];
+const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -27,7 +27,7 @@ const SB_AUTH_KEY  = "lms_sb_auth";
    ADMIN CREDENTIALS — hardcoded, never stored in DB
    Change these to your own username/password.
 ═══════════════════════════════════════════════════════════════════ */
-const ADMIN_USERNAME = "arbaj";
+const ADMIN_USERNAME = "ADMIN";
 const ADMIN_PASSWORD = "649633";
 const ADMIN_USER     = { id: "admin_1", name: "Admin", role: "admin", approved: true };
 
@@ -673,7 +673,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.guide && teachingGuide)         files.push("🧑‍🏫 teaching guide (.md)");
 
   folder.file("README.md",
-    `# Day ${day.dayNum}: ${day.topic}\n\nExported from LearnAI LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
+    `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI With ARBAJ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
 
   return zip.generateAsync({ type: "blob" });
 }
@@ -2643,7 +2643,7 @@ Rules:
             <div style={{ width:32, height:32, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
               <Ic n="brain" s={17} c="#fff" />
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>LearnAI</span>}
+            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI With ARBAJ</span>}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -2700,7 +2700,7 @@ Rules:
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
             <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color:"#475569" }}>LearnAI</span>{" › "}
+              <span style={{ color:"#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color:"#0f172a", fontWeight:600 }}>
                 {page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
