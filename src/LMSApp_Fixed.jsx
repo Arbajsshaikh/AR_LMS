@@ -3,15 +3,15 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama-3.1-8b-instant"];
+const GROQ_MODELS = ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it","llama-3.1-8b-instant"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral","codellama","phi3","gemma2","deepseek-coder"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const STATUS_CFG = {
-  "Not Started": { bg:"#f8fafc", border:"#e2e8f0", text:"#64748b", dot:"#cbd5e1", label:"Not Started" },
-  "In Progress": { bg:"#fffbeb", border:"#fde68a", text:"#92400e", dot:"#f59e0b", label:"In Progress" },
-  "Completed":   { bg:"#f0fdf4", border:"#bbf7d0", text:"#166534", dot:"#22c55e", label:"Completed"  },
+  "Not Started": { bg:"rgba(255,255,255,.04)", border:"rgba(255,255,255,.1)", text:"#4a6278", dot:"#2a3f5f", label:"Not Started" },
+  "In Progress": { bg:"rgba(245,166,35,.08)", border:"rgba(245,166,35,.35)", text:"#f5a623", dot:"#f5a623", label:"In Progress" },
+  "Completed":   { bg:"rgba(20,217,164,.08)", border:"rgba(20,217,164,.35)", text:"#14d9a4", dot:"#14d9a4", label:"Completed"  },
 };
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
 
@@ -661,7 +661,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.guide && teachingGuide)         files.push("🧑‍🏫 teaching guide (.md)");
 
   folder.file("README.md",
-    `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI With ARBAJ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
+    `# Day ${day.dayNum}: ${day.topic}\n\nExported from LearnAI LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
 
   return zip.generateAsync({ type: "blob" });
 }
@@ -751,12 +751,12 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
 
   if (totalAvailable === 0) {
     return (
-      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
         onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
-        <div style={{ background:"#fff", borderRadius:20, padding:28, maxWidth:400, width:"100%", textAlign:"center" }}>
+        <div style={{ background:"#0a0f1a", borderRadius:20, padding:28, maxWidth:400, width:"100%", textAlign:"center" }}>
           <p style={{ fontSize:32, marginBottom:12 }}>📭</p>
-          <p style={{ fontWeight:700, fontSize:16, color:"#0f172a", marginBottom:8 }}>Nothing to export yet</p>
-          <p style={{ fontSize:13.5, color:"#64748b", marginBottom:20, lineHeight:1.6 }}>Generate some content first — notebook, quiz, assignment, etc. — then come back to export.</p>
+          <p style={{ fontWeight:700, fontSize:16, color:"#f0e6d3", marginBottom:8 }}>Nothing to export yet</p>
+          <p style={{ fontSize:13.5, color:"#6b8099", marginBottom:20, lineHeight:1.6 }}>Generate some content first — notebook, quiz, assignment, etc. — then come back to export.</p>
           <button className="lms-btn lms-btn-dark" onClick={onClose}>Got it</button>
         </div>
       </div>
@@ -764,20 +764,20 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
   }
 
   return (
-    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
       onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
-      <div style={{ background:"#fff", borderRadius:20, width:"100%", maxWidth:500, boxShadow:"0 24px 80px rgba(0,0,0,.3)", overflow:"hidden" }}>
+      <div style={{ background:"#0a0f1a", borderRadius:20, width:"100%", maxWidth:500, boxShadow:"0 24px 80px rgba(0,0,0,.3)", overflow:"hidden" }}>
 
         {/* Header */}
-        <div style={{ padding:"20px 24px 16px", borderBottom:"1.5px solid #f1f5f9", display:"flex", alignItems:"center", gap:12 }}>
-          <div style={{ width:38, height:38, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-            <Ic n="download" s={18} c="#fff"/>
+        <div style={{ padding:"20px 24px 16px", borderBottom:"1.5px solid rgba(255,255,255,.07)", display:"flex", alignItems:"center", gap:12 }}>
+          <div style={{ width:38, height:38, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            <Ic n="download" s={18} c="#0a0f1a"/>
           </div>
           <div style={{ flex:1 }}>
-            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a" }}>Export Day {day.dayNum}</p>
-            <p style={{ fontSize:12.5, color:"#64748b" }}>{day.topic}</p>
+            <p style={{ fontWeight:800, fontSize:16, color:"#f0e6d3" }}>Export Day {day.dayNum}</p>
+            <p style={{ fontSize:12.5, color:"#6b8099" }}>{day.topic}</p>
           </div>
-          <button onClick={onClose} style={{ background:"#f1f5f9", border:"none", borderRadius:8, cursor:"pointer", padding:"6px 8px", color:"#64748b" }}>
+          <button onClick={onClose} style={{ background:"#141c2e", border:"none", borderRadius:8, cursor:"pointer", padding:"6px 8px", color:"#6b8099" }}>
             <Ic n="x" s={16}/>
           </button>
         </div>
@@ -785,28 +785,28 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
         {/* Content list */}
         <div style={{ padding:"16px 24px" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-            <p style={{ fontSize:12, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".07em" }}>
+            <p style={{ fontSize:12, fontWeight:700, color:"#4a6278", textTransform:"uppercase", letterSpacing:".07em" }}>
               Select content to include
             </p>
-            <button onClick={toggleAll} style={{ background:"none", border:"none", cursor:"pointer", fontSize:12.5, color:"#3b82f6", fontWeight:600, fontFamily:"inherit" }}>
+            <button onClick={toggleAll} style={{ background:"none", border:"none", cursor:"pointer", fontSize:12.5, color:"#14d9a4", fontWeight:600, fontFamily:"inherit" }}>
               {allOn ? "Deselect all" : "Select all"}
             </button>
           </div>
 
           <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
             {ITEMS.map(item => (
-              <div key={item.key} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:11, border:`1.5px solid ${sel[item.key]?"#3b82f6":"#e2e8f0"}`, background:sel[item.key]?"#eff6ff":"#f8fafc", cursor:"pointer", transition:"all .12s" }}
+              <div key={item.key} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:11, border:`1.5px solid ${sel[item.key]?"#14d9a4":"#1e2d48"}`, background:sel[item.key]?"#05211a":"#0d1424", cursor:"pointer", transition:"all .12s" }}
                 onClick={()=>setSel(p=>({...p,[item.key]:!p[item.key]}))}>
-                <div style={{ width:20, height:20, borderRadius:6, border:`2px solid ${sel[item.key]?"#3b82f6":"#cbd5e1"}`, background:sel[item.key]?"#3b82f6":"transparent", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                  {sel[item.key] && <Ic n="check" s={11} c="#fff"/>}
+                <div style={{ width:20, height:20, borderRadius:6, border:`2px solid ${sel[item.key]?"#14d9a4":"#2a3f5f"}`, background:sel[item.key]?"#14d9a4":"transparent", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                  {sel[item.key] && <Ic n="check" s={11} c="#0a0f1a"/>}
                 </div>
-                <span style={{ fontSize:14, fontWeight:600, color:"#0f172a", flex:1 }}>{item.label}</span>
-                <span style={{ fontSize:11.5, color:"#94a3b8" }}>{item.sub}</span>
+                <span style={{ fontSize:14, fontWeight:600, color:"#f0e6d3", flex:1 }}>{item.label}</span>
+                <span style={{ fontSize:11.5, color:"#4a6278" }}>{item.sub}</span>
                 {/* Quick single-file download button */}
                 <button
                   title={`Download ${item.label} only`}
                   onClick={e=>{ e.stopPropagation(); downloadSingle(item.key); }}
-                  style={{ background:"#f1f5f9", border:"none", borderRadius:7, cursor:"pointer", padding:"4px 7px", color:"#64748b", display:"flex", alignItems:"center" }}>
+                  style={{ background:"#141c2e", border:"none", borderRadius:7, cursor:"pointer", padding:"4px 7px", color:"#6b8099", display:"flex", alignItems:"center" }}>
                   <Ic n="download" s={13}/>
                 </button>
               </div>
@@ -815,7 +815,7 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
         </div>
 
         {/* Footer */}
-        <div style={{ padding:"14px 24px 20px", borderTop:"1.5px solid #f1f5f9", display:"flex", gap:10, alignItems:"center" }}>
+        <div style={{ padding:"14px 24px 20px", borderTop:"1.5px solid rgba(255,255,255,.07)", display:"flex", gap:10, alignItems:"center" }}>
           <button className="lms-btn lms-btn-dark" style={{ flex:1, justifyContent:"center", padding:"11px 0" }}
             disabled={packing || totalSelected === 0}
             onClick={downloadZip}>
@@ -827,7 +827,7 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
         </div>
 
         <div style={{ padding:"0 24px 16px" }}>
-          <p style={{ fontSize:11.5, color:"#94a3b8", lineHeight:1.6 }}>
+          <p style={{ fontSize:11.5, color:"#4a6278", lineHeight:1.6 }}>
             💡 Zip includes student sheets <em>and</em> answer keys. Each item also has a ⬇ button for individual download.
           </p>
         </div>
@@ -1032,14 +1032,14 @@ class ErrorBoundaryInner extends Component {
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 40, textAlign: "center", fontFamily: "system-ui" }}>
+        <div style={{ padding: 40, textAlign: "center", fontFamily: "Syne, system-ui", background:"#0a0f1a", minHeight:"100vh", color:"#f0e6d3" }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
-          <h2 style={{ color: "#dc2626", marginBottom: 12 }}>Something went wrong</h2>
-          <p style={{ color: "#64748b", marginBottom: 20, maxWidth: 400, margin: "0 auto 20px" }}>
+          <h2 style={{ color: "#e53e3e", marginBottom: 12 }}>Something went wrong</h2>
+          <p style={{ color: "#6b8099", marginBottom: 20, maxWidth: 400, margin: "0 auto 20px" }}>
             {this.state.error.message}
           </p>
           <button
-            style={{ padding: "10px 24px", background: "#0f172a", color: "#fff", border: "none", borderRadius: 9, cursor: "pointer", fontSize: 14, fontWeight: 600 }}
+            style={{ padding: "10px 24px", background: "#f0e6d3", color: "#0a0f1a", border: "none", borderRadius: 9, cursor: "pointer", fontSize: 14, fontWeight: 600 }}
             onClick={() => this.props.onReset()}
           >
             Try Again
@@ -1234,71 +1234,71 @@ function LoginScreen({ onLogin, sb }) {
 
 
   return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#667eea 0%,#764ba2 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif" }}>
-      <div style={{ background:"white", borderRadius:20, padding:48, maxWidth:480, width:"100%", boxShadow:"0 25px 70px rgba(0,0,0,.25)" }}>
+    <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at 20% 50%, #0d2b1a 0%, #0a0f1a 50%, #1a0f2e 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'Syne','DM Sans',system-ui,sans-serif" }}>
+      <div style={{ background:"#0a0f1a", borderRadius:20, padding:48, maxWidth:480, width:"100%", boxShadow:"0 32px 80px rgba(0,0,0,.7)" }}>
         <div style={{ textAlign:"center", marginBottom:40 }}>
-          <div style={{ fontSize:56, marginBottom:16 }}>📚</div>
-          <h1 style={{ fontSize:32, fontWeight:800, color:"#1a202c", margin:0, letterSpacing:"-0.5px" }}>LMS Portal</h1>
-          <p style={{ color:"#64748b", fontSize:14, margin:"12px 0 0 0", lineHeight:1.6 }}>Interactive Learning Management System</p>
+          <div style={{ fontSize:36, marginBottom:16, fontWeight:800, color:"#14d9a4", letterSpacing:"-2px" }}>◈</div>
+          <h1 style={{ fontSize:32, fontWeight:800, color:"#f0e6d3", margin:0, letterSpacing:"-0.5px" }}>LMS Portal</h1>
+          <p style={{ color:"#6b8099", fontSize:14, margin:"12px 0 0 0", lineHeight:1.6 }}>Interactive Learning Management System</p>
         </div>
 
-        {error && <div style={{ background:"#fed7d7", color:"#c53030", padding:12, borderRadius:8, marginBottom:20, fontSize:13 }}>{error}</div>}
+        {error && <div style={{ background:"rgba(255,71,87,.12)", color:"#ff4757", border:"1px solid rgba(255,71,87,.3)", padding:12, borderRadius:8, marginBottom:20, fontSize:13 }}>{error}</div>}
 
         {mode === "select" && (
           <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            <button onClick={() => setMode("trainer")} style={{ padding:14, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🏫 Trainer Login</button>
-            <button onClick={() => setMode("trainer-register")} style={{ padding:14, background:"#4f46e5", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>🆕 New Trainer Account</button>
-            <button onClick={() => setMode("student")} style={{ padding:14, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🎓 Student Login</button>
-            <button onClick={() => setMode("register")} style={{ padding:14, background:"#e2e8f0", color:"#2d3748", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>✍️ Student Registration</button>
+            <button onClick={() => setMode("trainer")} style={{ padding:14, background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🏫 Trainer Login</button>
+            <button onClick={() => setMode("trainer-register")} style={{ padding:14, background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>🆕 New Trainer Account</button>
+            <button onClick={() => setMode("student")} style={{ padding:14, background:"#d4820a", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🎓 Student Login</button>
+            <button onClick={() => setMode("register")} style={{ padding:14, background:"#1e2d48", color:"#f0e6d3", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>✍️ Student Registration</button>
           </div>
         )}
 
         {mode === "trainer" && (
           <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="text" value={trainerUsername} onChange={e=>setTrainerUsername(e.target.value)} placeholder="Username" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
-            <button onClick={handleTrainerLogin} disabled={loading} style={{ padding:12, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
+            <input type="text" value={trainerUsername} onChange={e=>setTrainerUsername(e.target.value)} placeholder="Username" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
+            <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
+            <button onClick={handleTrainerLogin} disabled={loading} style={{ padding:12, background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
+            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#1e2d48", color:"#f5a623", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
         )}
 
         {mode === "trainer-register" && (
           <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-            <p style={{ fontWeight:700, fontSize:15, color:"#1a202c", margin:0 }}>Create Trainer Account</p>
-            <input type="text" value={newTrainerName} onChange={e=>setNewTrainerName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="text" value={newTrainerUsername} onChange={e=>setNewTrainerUsername(e.target.value)} placeholder="Username (unique)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="password" value={newTrainerPass} onChange={e=>setNewTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
+            <p style={{ fontWeight:700, fontSize:15, color:"#f0e6d3", margin:0 }}>Create Trainer Account</p>
+            <input type="text" value={newTrainerName} onChange={e=>setNewTrainerName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
+            <input type="text" value={newTrainerUsername} onChange={e=>setNewTrainerUsername(e.target.value)} placeholder="Username (unique)" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
+            <input type="password" value={newTrainerPass} onChange={e=>setNewTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
 
-            <button onClick={handleTrainerRegister} disabled={loading} style={{ padding:12, background:"#4f46e5", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Creating...":"Create Account & Login"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
+            <button onClick={handleTrainerRegister} disabled={loading} style={{ padding:12, background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Creating...":"Create Account & Login"}</button>
+            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#1e2d48", color:"#f5a623", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
         )}
 
         {mode === "student" && (
           <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
+            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
             {/* FIX #3: password required for student login */}
-            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} onKeyDown={e=>e.key==="Enter"&&handleStudentLogin()} />
-            <button onClick={handleStudentLogin} disabled={loading} style={{ padding:12, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
+            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Password" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} onKeyDown={e=>e.key==="Enter"&&handleStudentLogin()} />
+            <button onClick={handleStudentLogin} disabled={loading} style={{ padding:12, background:"#d4820a", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
+            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#1e2d48", color:"#f5a623", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
         )}
 
         {mode === "register" && (
           <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="text" value={studentName} onChange={e=>setStudentName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
+            <input type="text" value={studentName} onChange={e=>setStudentName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
+            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
             {/* FIX #3: require password at registration */}
-            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <select value={studentCourseId} onChange={e=>setStudentCourseId(e.target.value)} style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14, color:studentCourseId?"#1a202c":"#718096", background:"white" }}>
+            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3" }} />
+            <select value={studentCourseId} onChange={e=>setStudentCourseId(e.target.value)} style={{ padding:10, border:"1.5px solid rgba(255,255,255,.1)", borderRadius:8, fontSize:14, background:"rgba(255,255,255,.05)", color:"#f0e6d3", color:studentCourseId?"#f0e6d3":"#6b8099", background:"#0a0f1a" }}>
               <option value="">— Select a course to enroll in —</option>
               {allCourses.map(c => {
                 const trainer = trainersMap[c.trainerId];
                 return <option key={c.id} value={c.id}>{c.name}{trainer ? ` (${trainer.name})` : ""}</option>;
               })}
             </select>
-            <button onClick={handleStudentRegister} disabled={loading} style={{ padding:12, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Registering...":"Register"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
+            <button onClick={handleStudentRegister} disabled={loading} style={{ padding:12, background:"#d4820a", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Registering...":"Register"}</button>
+            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#1e2d48", color:"#f5a623", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
         )}
       </div>
@@ -1397,51 +1397,51 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
 
   return (
     <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:10000, padding:20 }}>
-      <div style={{ background:"white", borderRadius:16, padding:30, maxWidth:720, width:"100%", maxHeight:"85vh", overflow:"auto", boxShadow:"0 20px 60px rgba(0,0,0,.3)" }}>
-        <h2 style={{ fontSize:22, fontWeight:700, marginBottom:4, color:"#1a202c" }}>📋 Student Enrollments</h2>
-        {courseName && <p style={{ fontSize:14, color:"#764ba2", fontWeight:600, margin:"0 0 20px 0" }}>📚 {courseName}</p>}
-        {loading ? <p style={{ color:"#94a3b8", textAlign:"center", padding:40 }}>Loading…</p> : (
+      <div style={{ background:"#0a0f1a", borderRadius:16, padding:30, maxWidth:720, width:"100%", maxHeight:"85vh", overflow:"auto", boxShadow:"0 32px 80px rgba(0,0,0,.7)" }}>
+        <h2 style={{ fontSize:22, fontWeight:700, marginBottom:4, color:"#f0e6d3" }}>📋 Student Enrollments</h2>
+        {courseName && <p style={{ fontSize:14, color:"#d4820a", fontWeight:600, margin:"0 0 20px 0" }}>📚 {courseName}</p>}
+        {loading ? <p style={{ color:"#4a6278", textAlign:"center", padding:40 }}>Loading…</p> : (
           <>
             <div style={{ marginBottom:20 }}>
-              <h3 style={{ color:"#f59e0b", marginBottom:10, fontSize:15 }}>⏳ Pending ({pending.length})</h3>
-              {pending.length === 0 ? <p style={{ color:"#718096", fontSize:13 }}>No pending requests</p> : pending.map(s => (
-                <div key={s.id} style={{ padding:12, background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
+              <h3 style={{ color:"#f5a623", marginBottom:10, fontSize:15 }}>⏳ Pending ({pending.length})</h3>
+              {pending.length === 0 ? <p style={{ color:"#6b8099", fontSize:13 }}>No pending requests</p> : pending.map(s => (
+                <div key={s.id} style={{ padding:12, background:"#1a0f00", border:"1px solid #fde68a", borderRadius:8, marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
                   <div>
-                    <p style={{ fontWeight:600, margin:"0 0 2px 0", color:"#1a202c", fontSize:14 }}>{s.name}</p>
-                    <p style={{ fontSize:12, color:"#718096", margin:0 }}>{s.email}</p>
+                    <p style={{ fontWeight:600, margin:"0 0 2px 0", color:"#f0e6d3", fontSize:14 }}>{s.name}</p>
+                    <p style={{ fontSize:12, color:"#6b8099", margin:0 }}>{s.email}</p>
                   </div>
                   <div style={{ display:"flex", gap:8 }}>
-                    <button onClick={()=>handleApprove(s.id)} style={{ padding:"6px 12px", background:"#22c55e", color:"white", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Approve</button>
-                    <button onClick={()=>handleReject(s.id)} style={{ padding:"6px 12px", background:"#ef4444", color:"white", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Reject</button>
+                    <button onClick={()=>handleApprove(s.id)} style={{ padding:"6px 12px", background:"#14d9a4", color:"#0a0f1a", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Approve</button>
+                    <button onClick={()=>handleReject(s.id)} style={{ padding:"6px 12px", background:"#ff4757", color:"#0a0f1a", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Reject</button>
                   </div>
                 </div>
               ))}
             </div>
             <div style={{ marginBottom:20 }}>
-              <h3 style={{ color:"#22c55e", marginBottom:10, fontSize:15 }}>✅ Enrolled ({approved.length})</h3>
-              {approved.length === 0 ? <p style={{ color:"#718096", fontSize:13 }}>No enrolled students</p> : approved.map(s => {
+              <h3 style={{ color:"#14d9a4", marginBottom:10, fontSize:15 }}>✅ Enrolled ({approved.length})</h3>
+              {approved.length === 0 ? <p style={{ color:"#6b8099", fontSize:13 }}>No enrolled students</p> : approved.map(s => {
                 const otherCourses = (s.enrolledCourseIds||[]).filter(e=>e.courseId!==courseId);
                 return (
-                  <div key={s.id} style={{ padding:12, background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8, marginBottom:8 }}>
+                  <div key={s.id} style={{ padding:12, background:"#011a12", border:"1px solid #bbf7d0", borderRadius:8, marginBottom:8 }}>
                     <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
                       <div style={{ flex:1 }}>
-                        <p style={{ fontWeight:600, margin:"0 0 2px 0", color:"#1a202c", fontSize:14 }}>{s.name}</p>
-                        <p style={{ fontSize:12, color:"#718096", margin:"0 0 4px 0" }}>{s.email}</p>
-                        {otherCourses.length > 0 && <p style={{ fontSize:11, color:"#764ba2", margin:0 }}>Also enrolled in: {otherCourses.map(e=>e.courseName).join(", ")}</p>}
+                        <p style={{ fontWeight:600, margin:"0 0 2px 0", color:"#f0e6d3", fontSize:14 }}>{s.name}</p>
+                        <p style={{ fontSize:12, color:"#6b8099", margin:"0 0 4px 0" }}>{s.email}</p>
+                        {otherCourses.length > 0 && <p style={{ fontSize:11, color:"#d4820a", margin:0 }}>Also enrolled in: {otherCourses.map(e=>e.courseName).join(", ")}</p>}
                       </div>
                       <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-                        <button title="Enroll in another course" onClick={()=>{setAddCourseStudentId(s.id);setAddCourseId("");}} style={{ padding:"5px 9px", background:"#eff6ff", color:"#3b82f6", border:"1px solid #bfdbfe", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>+ Course</button>
-                        <button onClick={()=>handleRevoke(s.id)} style={{ padding:"5px 9px", background:"#fef2f2", color:"#dc2626", border:"1px solid #fecaca", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>Revoke</button>
+                        <button title="Enroll in another course" onClick={()=>{setAddCourseStudentId(s.id);setAddCourseId("");}} style={{ padding:"5px 9px", background:"#05211a", color:"#14d9a4", border:"1px solid #bfdbfe", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>+ Course</button>
+                        <button onClick={()=>handleRevoke(s.id)} style={{ padding:"5px 9px", background:"#1a0007", color:"#e53e3e", border:"1px solid #fecaca", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>Revoke</button>
                       </div>
                     </div>
                     {addCourseStudentId === s.id && (
                       <div style={{ marginTop:10, display:"flex", gap:8 }}>
-                        <select value={addCourseId} onChange={e=>setAddCourseId(e.target.value)} style={{ flex:1, padding:"6px 8px", border:"1px solid #cbd5e1", borderRadius:6, fontSize:12, background:"white" }}>
+                        <select value={addCourseId} onChange={e=>setAddCourseId(e.target.value)} style={{ flex:1, padding:"6px 8px", border:"1px solid #cbd5e1", borderRadius:6, fontSize:12, background:"#0a0f1a" }}>
                           <option value="">— Select course —</option>
                           {allCourses.filter(c=>!s.enrolledCourseIds?.some(e=>e.courseId===c.id)).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                         </select>
-                        <button onClick={handleAddCourseEnrollment} style={{ padding:"6px 12px", background:"#3b82f6", color:"white", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Enroll</button>
-                        <button onClick={()=>setAddCourseStudentId(null)} style={{ padding:"6px 10px", background:"#f1f5f9", color:"#475569", border:"1px solid #e2e8f0", borderRadius:4, cursor:"pointer", fontSize:12 }}>✕</button>
+                        <button onClick={handleAddCourseEnrollment} style={{ padding:"6px 12px", background:"#14d9a4", color:"#0a0f1a", border:"none", borderRadius:4, cursor:"pointer", fontSize:12, fontWeight:600 }}>Enroll</button>
+                        <button onClick={()=>setAddCourseStudentId(null)} style={{ padding:"6px 10px", background:"#141c2e", color:"#9aabbd", border:"1px solid #e2e8f0", borderRadius:4, cursor:"pointer", fontSize:12 }}>✕</button>
                       </div>
                     )}
                   </div>
@@ -1450,7 +1450,7 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
             </div>
           </>
         )}
-        <button onClick={onClose} style={{ width:"100%", marginTop:8, padding:12, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>Close</button>
+        <button onClick={onClose} style={{ width:"100%", marginTop:8, padding:12, background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>Close</button>
       </div>
     </div>
   );
@@ -1484,7 +1484,7 @@ function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen
       <Ic n="teacher" s={16} />
       {!collapsed && <span>Students</span>}
       {pendingCount > 0 && (
-        <span style={{ marginLeft:"auto", background:"#f59e0b", color:"#fff", borderRadius:99, fontSize:9, fontWeight:800, padding:"2px 6px", lineHeight:1.4, flexShrink:0 }}>
+        <span style={{ marginLeft:"auto", background:"#f5a623", color:"#0a0f1a", borderRadius:99, fontSize:9, fontWeight:800, padding:"2px 6px", lineHeight:1.4, flexShrink:0 }}>
           {pendingCount}
         </span>
       )}
@@ -1536,30 +1536,30 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
   return (
     <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, zIndex:500, display:"flex" }} onClick={e=>{ if(e.target===e.currentTarget) setStudentsOpen(false); }}>
       <div style={{ width: collapsed ? 58 : 210, flexShrink:0 }} />
-      <div style={{ width:300, background:"#fff", borderRight:"1.5px solid #e8edf3", display:"flex", flexDirection:"column", boxShadow:"4px 0 24px rgba(0,0,0,.08)", animation:"lms-slide .2s ease", height:"100vh", overflow:"hidden" }}>
+      <div style={{ width:300, background:"#0a0f1a", borderRight:"1.5px solid #e8edf3", display:"flex", flexDirection:"column", boxShadow:"4px 0 24px rgba(0,0,0,.08)", animation:"lms-slide .2s ease", height:"100vh", overflow:"hidden" }}>
         <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid #f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
           <div>
-            <p style={{ fontWeight:700, fontSize:14, color:"#0f172a", margin:0 }}>Students</p>
-            <p style={{ fontSize:11.5, color:"#94a3b8", margin:"2px 0 0 0" }}>{list.length} enrolled · {pending.length} pending</p>
+            <p style={{ fontWeight:700, fontSize:14, color:"#f0e6d3", margin:0 }}>Students</p>
+            <p style={{ fontSize:11.5, color:"#4a6278", margin:"2px 0 0 0" }}>{list.length} enrolled · {pending.length} pending</p>
           </div>
-          <button onClick={()=>setStudentsOpen(false)} style={{ background:"#f1f5f9", border:"none", borderRadius:8, cursor:"pointer", padding:"5px 7px", color:"#64748b", display:"flex", alignItems:"center" }}><Ic n="x" s={14}/></button>
+          <button onClick={()=>setStudentsOpen(false)} style={{ background:"#141c2e", border:"none", borderRadius:8, cursor:"pointer", padding:"5px 7px", color:"#6b8099", display:"flex", alignItems:"center" }}><Ic n="x" s={14}/></button>
         </div>
         <div style={{ flex:1, overflowY:"auto", padding:"12px 10px" }}>
           {pending.length > 0 && (
             <div style={{ marginBottom:16 }}>
-              <div style={{ fontSize:10, fontWeight:700, color:"#f59e0b", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>⏳ Pending ({pending.length})</div>
+              <div style={{ fontSize:10, fontWeight:700, color:"#f5a623", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>⏳ Pending ({pending.length})</div>
               {pending.map(s => (
-                <div key={s.id} style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
+                <div key={s.id} style={{ background:"#1a0f00", border:"1px solid #fde68a", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
-                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#92400e", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#1a0f00", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#8b5200", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:12.5, fontWeight:700, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
-                      <div style={{ fontSize:11, color:"#78716c", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:"#f0e6d3", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                      <div style={{ fontSize:11, color:"#4a6278", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:6 }}>
-                    <button onClick={()=>handleApprove(s.id)} style={{ flex:1, padding:"5px 0", background:"#22c55e", color:"#fff", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✓ Approve</button>
-                    <button onClick={()=>handleReject(s.id)} style={{ flex:1, padding:"5px 0", background:"#fee2e2", color:"#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✕ Reject</button>
+                    <button onClick={()=>handleApprove(s.id)} style={{ flex:1, padding:"5px 0", background:"#14d9a4", color:"#0a0f1a", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✓ Approve</button>
+                    <button onClick={()=>handleReject(s.id)} style={{ flex:1, padding:"5px 0", background:"#1a0007", color:"#e53e3e", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✕ Reject</button>
                   </div>
                 </div>
               ))}
@@ -1567,22 +1567,22 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
           )}
           {approved.length > 0 && (
             <div>
-              <div style={{ fontSize:10, fontWeight:700, color:"#22c55e", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>✓ Enrolled ({approved.length})</div>
+              <div style={{ fontSize:10, fontWeight:700, color:"#14d9a4", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>✓ Enrolled ({approved.length})</div>
               {approved.map(s => (
-                <div key={s.id} style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
+                <div key={s.id} style={{ background:"#011a12", border:"1px solid #bbf7d0", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
-                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#dcfce7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#15803d", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#022b1e", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#09a87e", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:12.5, fontWeight:700, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
-                      <div style={{ fontSize:11, color:"#64748b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:"#f0e6d3", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                      <div style={{ fontSize:11, color:"#6b8099", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
                     </div>
                   </div>
-                  <button onClick={()=>handleReject(s.id)} style={{ width:"100%", padding:"5px 0", background:"#fee2e2", color:"#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Remove</button>
+                  <button onClick={()=>handleReject(s.id)} style={{ width:"100%", padding:"5px 0", background:"#1a0007", color:"#e53e3e", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Remove</button>
                 </div>
               ))}
             </div>
           )}
-          {list.length === 0 && <div style={{ textAlign:"center", padding:"40px 16px", color:"#94a3b8", fontSize:13 }}>No students yet</div>}
+          {list.length === 0 && <div style={{ textAlign:"center", padding:"40px 16px", color:"#4a6278", fontSize:13 }}>No students yet</div>}
         </div>
       </div>
     </div>
@@ -1620,39 +1620,39 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   const hasAnyCourse = enrolledCourses.length > 0;
   const activeCourseName = enrolledCourses.find(e => e.courseId === activeCourseId)?.courseName || "Your Course";
 
-  if (loading) return <div style={{ textAlign:"center", padding:"60px 20px", color:"#94a3b8", fontSize:14 }}>Loading…</div>;
+  if (loading) return <div style={{ textAlign:"center", padding:"60px 20px", color:"#4a6278", fontSize:14 }}>Loading…</div>;
 
   return (
-    <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
-      <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
+    <div style={{ minHeight:"100vh", background:"#0d1424" }}>
+      <div style={{ background:"#0a0f1a", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
         <div>
-          <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
-          <p style={{ fontSize:12, color:"#718096", margin:"4px 0 0 0" }}>👨‍🎓 {auth.name}{hasAnyCourse ? ` · ${activeCourseName}` : ""}
-            <span style={{ marginLeft:8, background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:99, fontSize:10, fontWeight:700, padding:"1px 7px" }}>🔄 Live</span>
+          <h1 style={{ fontSize:20, fontWeight:700, color:"#f0e6d3", margin:0 }}>📚 LMS</h1>
+          <p style={{ fontSize:12, color:"#6b8099", margin:"4px 0 0 0" }}>👨‍🎓 {auth.name}{hasAnyCourse ? ` · ${activeCourseName}` : ""}
+            <span style={{ marginLeft:8, background:"#011a12", color:"#0ec494", border:"1px solid #bbf7d0", borderRadius:99, fontSize:10, fontWeight:700, padding:"1px 7px" }}>🔄 Live</span>
           </p>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           {enrolledCourses.length > 1 && (
-            <select value={activeCourseId||""} onChange={e=>setActiveCourseId(e.target.value)} style={{ padding:"7px 10px", border:"1px solid #ddd6fe", borderRadius:6, fontSize:12, fontWeight:600, color:"#764ba2", background:"#f5f3ff", cursor:"pointer", maxWidth:200 }}>
+            <select value={activeCourseId||""} onChange={e=>setActiveCourseId(e.target.value)} style={{ padding:"7px 10px", border:"1px solid #ddd6fe", borderRadius:6, fontSize:12, fontWeight:600, color:"#d4820a", background:"#1a1205", cursor:"pointer", maxWidth:200 }}>
               {enrolledCourses.map(e=><option key={e.courseId} value={e.courseId}>{e.courseName}</option>)}
             </select>
           )}
           {/* FIX: always show refresh — lets students re-check enrollment after approval */}
-          <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"8px 12px", background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:6, cursor:"pointer", fontSize:12, fontWeight:600 }}>
+          <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"8px 12px", background:"#011a12", color:"#0ec494", border:"1px solid #bbf7d0", borderRadius:6, cursor:"pointer", fontSize:12, fontWeight:600 }}>
             🔄 Refresh
           </button>
-          <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ef4444", color:"white", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
+          <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ff4757", color:"#0a0f1a", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
         </div>
       </div>
       {hasAnyCourse && activeCourseId ? (
         <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} />
       ) : (
         <div style={{ maxWidth:600, margin:"80px auto", padding:"0 20px", textAlign:"center" }}>
-          <div style={{ background:"white", borderRadius:12, padding:"48px 40px", boxShadow:"0 4px 20px rgba(0,0,0,.06)" }}>
+          <div style={{ background:"#0a0f1a", borderRadius:12, padding:"48px 40px", boxShadow:"0 4px 20px rgba(0,0,0,.06)" }}>
             <div style={{ fontSize:48, marginBottom:16 }}>⏳</div>
-            <h2 style={{ color:"#1a202c", margin:"0 0 10px 0", fontSize:22, fontWeight:700 }}>Awaiting Course Assignment</h2>
-            <p style={{ color:"#94a3b8", margin:"0 0 20px 0", lineHeight:1.6 }}>Your account is pending or no course has been assigned yet. Please contact your trainer — then click Refresh above.</p>
-            <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"10px 24px", background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:14 }}>
+            <h2 style={{ color:"#f0e6d3", margin:"0 0 10px 0", fontSize:22, fontWeight:700 }}>Awaiting Course Assignment</h2>
+            <p style={{ color:"#4a6278", margin:"0 0 20px 0", lineHeight:1.6 }}>Your account is pending or no course has been assigned yet. Please contact your trainer — then click Refresh above.</p>
+            <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"10px 24px", background:"#f5a623", color:"#0a0f1a", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:14 }}>
               🔄 Check Again
             </button>
           </div>
@@ -2519,9 +2519,9 @@ Rules:
   ════════════════════════════════════════════════ */
   return (
     <ErrorBoundary>
-      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
+      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"#0d1424", fontFamily:"'Syne','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
         <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
           *{box-sizing:border-box;margin:0;padding:0}
           html,body,#root{width:100%;height:100%;overflow:hidden}
           ::-webkit-scrollbar{width:5px;height:5px}
@@ -2531,48 +2531,50 @@ Rules:
           @keyframes lms-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
           @keyframes lms-slide{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
           @keyframes lms-toast{0%{opacity:0;transform:translateY(8px)}100%{opacity:1;transform:translateY(0)}}
-          .lms-nav{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;transition:all .15s;color:#64748b;font-size:13.5px;font-weight:500;white-space:nowrap;border:none;background:transparent;width:100%;text-align:left;font-family:inherit}
-          .lms-nav:hover{background:#f1f5f9;color:#0f172a}
-          .lms-nav.on{background:#0f172a;color:#fff}
-          .lms-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap}
-          .lms-btn:disabled{opacity:.55;cursor:not-allowed}
-          .lms-btn-dark{background:#0f172a;color:#fff}
-          .lms-btn-dark:hover:not(:disabled){background:#1e293b}
-          .lms-btn-blue{background:#3b82f6;color:#fff}
-          .lms-btn-blue:hover:not(:disabled){background:#2563eb}
-          .lms-btn-green{background:#22c55e;color:#fff}
-          .lms-btn-green:hover:not(:disabled){background:#16a34a}
-          .lms-btn-amber{background:#f59e0b;color:#fff}
-          .lms-btn-amber:hover:not(:disabled){background:#d97706}
-          .lms-btn-violet{background:#8b5cf6;color:#fff}
-          .lms-btn-violet:hover:not(:disabled){background:#7c3aed}
-          .lms-btn-rose{background:#f43f5e;color:#fff}
-          .lms-btn-rose:hover:not(:disabled){background:#e11d48}
-          .lms-btn-ghost{background:#f1f5f9;color:#475569}
-          .lms-btn-ghost:hover:not(:disabled){background:#e2e8f0;color:#0f172a}
-          .lms-card{background:#fff;border-radius:16px;border:1px solid #e8edf3;box-shadow:0 1px 3px rgba(0,0,0,.04)}
-          .lms-input{width:100%;padding:9px 13px;border:1.5px solid #e2e8f0;border-radius:9px;font-size:13px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:#0f172a}
-          .lms-input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+          .lms-nav{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:8px;cursor:pointer;transition:all .15s;color:#4a6278;font-size:13px;font-weight:500;white-space:nowrap;border:none;border-left:2px solid transparent;background:transparent;width:100%;text-align:left;font-family:inherit;letter-spacing:.01em}
+          .lms-nav:hover{background:rgba(20,217,164,.08);color:#14d9a4}
+          .lms-nav.on{background:rgba(20,217,164,.1);color:#14d9a4;border-left-color:#14d9a4}
+          .lms-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap;letter-spacing:.01em}
+          .lms-btn:disabled{opacity:.4;cursor:not-allowed}
+          .lms-btn-dark{background:#f0e6d3;color:#0a0f1a}
+          .lms-btn-dark:hover:not(:disabled){background:#e8d5be}
+          .lms-btn-blue{background:#14d9a4;color:#0a0f1a}
+          .lms-btn-blue:hover:not(:disabled){background:#0ec494}
+          .lms-btn-green{background:#14d9a4;color:#0a0f1a}
+          .lms-btn-green:hover:not(:disabled){background:#0ec494}
+          .lms-btn-amber{background:#f5a623;color:#0a0f1a}
+          .lms-btn-amber:hover:not(:disabled){background:#e8940a}
+          .lms-btn-violet{background:#f5a623;color:#0a0f1a}
+          .lms-btn-violet:hover:not(:disabled){background:#e8940a}
+          .lms-btn-rose{background:#ff4757;color:#fff}
+          .lms-btn-rose:hover:not(:disabled){background:#ff2e43}
+          .lms-btn-ghost{background:rgba(255,255,255,.06);color:#9aabbd;border:1px solid rgba(255,255,255,.08)}
+          .lms-btn-ghost:hover:not(:disabled){background:rgba(20,217,164,.1);color:#14d9a4;border-color:rgba(20,217,164,.3)}
+          .lms-card{background:#111827;border-radius:12px;border:1px solid rgba(255,255,255,.07);box-shadow:0 4px 20px rgba(0,0,0,.3);transition:box-shadow .2s}
+          .lms-input{width:100%;padding:10px 14px;border:1.5px solid rgba(255,255,255,.1);border-radius:8px;font-size:13px;font-family:inherit;outline:none;transition:border .15s,box-shadow .15s;background:rgba(255,255,255,.05);color:#f0e6d3}
+          .lms-input:focus{border-color:#14d9a4;box-shadow:0 0 0 3px rgba(20,217,164,.12)}
+          .lms-input::placeholder{color:#4a6278}
           textarea.lms-input{resize:vertical;min-height:80px;line-height:1.55}
           select.lms-input{cursor:pointer}
-          .lms-tab{padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:all .15s;color:#64748b;border:none;background:transparent;font-family:inherit}
-          .lms-tab.on{background:#0f172a;color:#fff}
-          .lms-tab:hover:not(.on){background:#f1f5f9;color:#334155}
-          .lms-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:99px;font-size:11.5px;font-weight:600}
-          .lms-cell{background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#1e293b;white-space:pre-wrap;word-break:break-all;overflow-x:auto}
-          .lms-output{background:#0f172a;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#e2e8f0;white-space:pre-wrap;word-break:break-all;min-height:80px}
-          .lms-block{background:#fff;border:1.5px solid #e8edf3;border-radius:14px;padding:20px;margin-bottom:14px;animation:lms-in .25s ease}
-          .lms-block-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f1f5f9}
-          .lms-section-label{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
-          .lms-prose{font-size:13.5px;line-height:1.75;color:#374151}
-          .lms-prose h1,.lms-prose h2,.lms-prose h3{color:#0f172a;font-weight:700;margin:16px 0 6px}
+          select.lms-input option{background:#111827;color:#f0e6d3}
+          .lms-tab{padding:7px 14px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:500;transition:all .15s;color:#4a6278;border:1px solid transparent;background:transparent;font-family:inherit;letter-spacing:.01em}
+          .lms-tab.on{background:rgba(20,217,164,.12);color:#14d9a4;border-color:rgba(20,217,164,.25)}
+          .lms-tab:hover:not(.on){background:rgba(255,255,255,.05);color:#9aabbd}
+          .lms-tag{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:6px;font-size:11.5px;font-weight:600}
+          .lms-cell{background:#060b14;border:1.5px solid rgba(255,255,255,.08);border-radius:8px;padding:14px;font-family:'IBM Plex Mono','JetBrains Mono',monospace;font-size:12.5px;line-height:1.65;color:#c8d4e0;white-space:pre-wrap;word-break:break-all;overflow-x:auto}
+          .lms-output{background:#04080f;border-radius:8px;padding:14px;font-family:'IBM Plex Mono','JetBrains Mono',monospace;font-size:12.5px;line-height:1.65;color:#14d9a4;white-space:pre-wrap;word-break:break-all;min-height:80px;border:1px solid rgba(20,217,164,.15)}
+          .lms-block{background:#111827;border:1.5px solid rgba(255,255,255,.07);border-radius:12px;padding:20px;margin-bottom:14px;animation:lms-in .25s ease}
+          .lms-block-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,.07)}
+          .lms-section-label{font-size:10.5px;font-weight:700;color:#4a6278;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}
+          .lms-prose{font-size:13.5px;line-height:1.75;color:#c8b99e}
+          .lms-prose h1,.lms-prose h2,.lms-prose h3{color:#f0e6d3;font-weight:700;margin:16px 0 6px}
           .lms-prose h1{font-size:18px}.lms-prose h2{font-size:16px}.lms-prose h3{font-size:14px}
-          .upload-zone{border:2px dashed #cbd5e1;border-radius:12px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;background:#f8fafc;display:block}
-          .upload-zone:hover{border-color:#3b82f6;background:#eff6ff}
-          .day-cell{cursor:pointer;border-radius:12px;padding:10px;border:1.5px solid #e8edf3;background:#fff;transition:all .18s;min-height:78px}
-          .day-cell:hover{box-shadow:0 4px 16px rgba(0,0,0,.08);transform:translateY(-1px);border-color:#cbd5e1}
-          .day-cell.today{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.2)}
-          .day-cell.has-plan:hover{border-color:#94a3b8}
+          .upload-zone{border:2px dashed rgba(255,255,255,.12);border-radius:12px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;background:rgba(255,255,255,.02);display:block}
+          .upload-zone:hover{border-color:#14d9a4;background:rgba(20,217,164,.04)}
+          .day-cell{cursor:pointer;border-radius:10px;padding:10px;border:1.5px solid rgba(255,255,255,.07);background:#111827;transition:all .18s;min-height:78px}
+          .day-cell:hover{box-shadow:0 6px 24px rgba(0,0,0,.4);transform:translateY(-1px);border-color:rgba(255,255,255,.15)}
+          .day-cell.today{border-color:#14d9a4;box-shadow:0 0 0 2px rgba(20,217,164,.2)}
+          .day-cell.has-plan:hover{border-color:rgba(245,166,35,.4)}
           @media(max-width:768px){
             .lms-sidebar{position:fixed!important;left:0;top:0;height:100vh;z-index:200;transform:translateX(-100%);transition:transform .25s}
             .lms-sidebar.open{transform:translateX(0)!important}
@@ -2583,14 +2585,14 @@ Rules:
             .lms-mobile-menu-btn{display:flex!important}
             .lms-desktop-collapse-btn{display:none!important}
           }
-          .lms-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:199}
+          .lms-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:199}
           .lms-mobile-menu-btn{display:none}
           .lms-desktop-collapse-btn{display:flex}
         `}</style>
 
         {!isOnline && (
-          <div style={{ position:"fixed", top:0, left:0, right:0, background: aiProvider==="ollama"?"#f59e0b":"#f43f5e", color:"#fff", padding:"8px 16px", textAlign:"center", fontSize:13, fontWeight:600, zIndex:9999, display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
-            <Ic n="wifi-off" s={15} c="#fff"/>
+          <div style={{ position:"fixed", top:0, left:0, right:0, background: aiProvider==="ollama"?"#f5a623":"#ff4757", color:"#0a0f1a", padding:"8px 16px", textAlign:"center", fontSize:13, fontWeight:600, zIndex:9999, display:"flex", alignItems:"center", justifyContent:"center", gap:8 }}>
+            <Ic n="wifi-off" s={15} c="#0a0f1a"/>
             {aiProvider==="ollama" ? "No internet — Ollama (local) still works. Pyodide execution available." : "You're offline — Groq AI unavailable. Load Real Python for code execution, or switch to Ollama in Settings."}
           </div>
         )}
@@ -2598,12 +2600,12 @@ Rules:
         {mobileMenuOpen && <div className="lms-overlay" style={{ display:"block" }} onClick={()=>setMobileMenuOpen(false)}/>}
 
         {/* ── SIDEBAR ── */}
-        <aside className={`lms-sidebar${mobileMenuOpen?" open":""}`} style={{ width:collapsed?58:210, flexShrink:0, background:"#fff", borderRight:"1.5px solid #e8edf3", display:"flex", flexDirection:"column", transition:"width .2s", overflow:"hidden" }}>
-          <div style={{ padding:"16px 12px 12px", display:"flex", alignItems:"center", gap:9, borderBottom:"1px solid #f1f5f9" }}>
-            <div style={{ width:32, height:32, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-              <Ic n="brain" s={17} c="#fff" />
+        <aside className={`lms-sidebar${mobileMenuOpen?" open":""}`} style={{ width:collapsed?58:210, flexShrink:0, background:"#0a0f1a", borderRight:"1.5px solid #e8edf3", display:"flex", flexDirection:"column", transition:"width .2s", overflow:"hidden" }}>
+          <div style={{ padding:"16px 12px 12px", display:"flex", alignItems:"center", gap:9, borderBottom:"1px solid rgba(255,255,255,.06)" }}>
+            <div style={{ width:32, height:32, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <Ic n="brain" s={17} c="#0a0f1a" />
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI With ARBAJ</span>}
+            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#f0e6d3", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>learn<span style={{color:"#14d9a4"}}>AI</span></span>}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -2636,13 +2638,13 @@ Rules:
               />
             )}
           </nav>
-          <div style={{ padding:"10px 6px", borderTop:"1px solid #f1f5f9" }}>
-            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
-              <div style={{ width:28, height:28, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:12, fontWeight:700, flexShrink:0 }}>T</div>
+          <div style={{ padding:"10px 6px", borderTop:"1px solid rgba(255,255,255,.06)" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px", borderRadius:8, background:"rgba(255,255,255,.03)" }}>
+              <div style={{ width:28, height:28, background:"#14d9a4", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#0a0f1a", fontSize:12, fontWeight:700, flexShrink:0 }}>T</div>
               {!collapsed && (
                 <div style={{ flex:1 }}>
-                  <div style={{ fontSize:12.5, fontWeight:600, color:"#0f172a" }}>Trainer</div>
-                  <div style={{ fontSize:11, color:"#94a3b8" }}>{aiProvider==="groq"?"Groq":"Ollama"} AI</div>
+                  <div style={{ fontSize:12.5, fontWeight:600, color:"#f0e6d3" }}>Trainer</div>
+                  <div style={{ fontSize:11, color:"#4a6278" }}>{aiProvider==="groq"?"Groq":"Ollama"} AI</div>
                 </div>
               )}
             </div>
@@ -2656,21 +2658,21 @@ Rules:
 
         {/* ── MAIN ── */}
         <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", marginTop: isOnline ? 0 : 36 }}>
-          <header style={{ height:52, background:"#fff", borderBottom:"1.5px solid #e8edf3", display:"flex", alignItems:"center", padding:"0 16px", gap:10, flexShrink:0 }}>
+          <header style={{ height:52, background:"#0a0f1a", borderBottom:"1.5px solid #e8edf3", display:"flex", alignItems:"center", padding:"0 16px", gap:10, flexShrink:0 }}>
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
-            <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color:"#475569" }}>AI With ARBAJ</span>{" › "}
-              <span style={{ color:"#0f172a", fontWeight:600 }}>
+            <div style={{ flex:1, fontSize:13, color:"#4a6278", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
+              <span style={{ color:"#9aabbd" }}>LearnAI</span>{" › "}
+              <span style={{ color:"#f0e6d3", fontWeight:600 }}>
                 {page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
-              <div style={{ display:"flex", alignItems:"center", gap:6, background:"#f1f5f9", padding:"4px 12px", borderRadius:8, fontSize:12.5, color:"#475569", flexShrink:0 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:6, background:"#141c2e", padding:"4px 12px", borderRadius:8, fontSize:12.5, color:"#9aabbd", flexShrink:0 }}>
                 <Ic n="chart" s={13} />{planDays.length} days · {Object.values(dayStatus).filter(s=>s==="Completed").length} done
               </div>
             )}
-            <div style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 10px", borderRadius:8, background: aiProvider==="groq"?"#eff6ff":"#f0fdf4", fontSize:12, fontWeight:600, color: aiProvider==="groq"?"#2563eb":"#16a34a", flexShrink:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 10px", borderRadius:8, background: aiProvider==="groq"?"#05211a":"#011a12", fontSize:12, fontWeight:600, color: aiProvider==="groq"?"#0ec494":"#0ec494", flexShrink:0 }}>
               {aiProvider==="groq"?"⚡ Groq":"🦙 Ollama"}
             </div>
             {planDays.length > 0 && (
@@ -2680,23 +2682,23 @@ Rules:
             )}
           </header>
 
-          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 48px", minHeight:0 }}>
+          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 48px", minHeight:0, background:"#0a0f1a" }}>
             <ErrorBoundary>
               {page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
               {parsePlanConfirm && (
-                <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:9500, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-                  <div style={{ background:"#fff", borderRadius:16, padding:28, maxWidth:440, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
-                    <div style={{ width:42, height:42, background:"#fffbeb", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
-                      <Ic n="refresh" s={20} c="#f59e0b"/>
+                <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.8)", zIndex:9500, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+                  <div style={{ background:"#0a0f1a", borderRadius:16, padding:28, maxWidth:440, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
+                    <div style={{ width:42, height:42, background:"#1a0f00", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
+                      <Ic n="refresh" s={20} c="#f5a623"/>
                     </div>
-                    <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:8 }}>Re-parse Course Plan?</p>
-                    <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.65, marginBottom:16 }}>
+                    <p style={{ fontWeight:800, fontSize:16, color:"#f0e6d3", marginBottom:8 }}>Re-parse Course Plan?</p>
+                    <p style={{ fontSize:13.5, color:"#9aabbd", lineHeight:1.65, marginBottom:16 }}>
                       This will <strong>reset all day statuses</strong> to "Not Started" and clear local day data.
                       AI-generated content stored in Supabase (<code>lms_day_content</code>) is safe — but re-parsing
                       may remap dates if you changed the start date or Mon–Fri setting.
                     </p>
-                    <p style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>
+                    <p style={{ fontSize:13, color:"#6b8099", marginBottom:20 }}>
                       New plan: <strong>{parsePlanConfirm.length} days</strong> · Current plan: <strong>{planDays.length} days</strong>
                     </p>
                     <div style={{ display:"flex", gap:10 }}>
@@ -2756,20 +2758,20 @@ Rules:
 
         {/* Search overlay */}
         {searchOpen && (
-          <div style={{ position:"fixed", inset:0, zIndex:8000, display:"flex", alignItems:"flex-start", justifyContent:"center", paddingTop:80, background:"rgba(15,23,42,.55)" }}
+          <div style={{ position:"fixed", inset:0, zIndex:8000, display:"flex", alignItems:"flex-start", justifyContent:"center", paddingTop:80, background:"rgba(0,0,0,.8)" }}
             onClick={e=>{ if(e.target===e.currentTarget) setSearchOpen(false); }}>
-            <div style={{ background:"#fff", borderRadius:16, width:"100%", maxWidth:580, boxShadow:"0 24px 80px rgba(0,0,0,.3)", overflow:"hidden" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:10, padding:"14px 18px", borderBottom:"1.5px solid #f1f5f9" }}>
-                <Ic n="search" s={18} c="#94a3b8"/>
+            <div style={{ background:"#0a0f1a", borderRadius:16, width:"100%", maxWidth:580, boxShadow:"0 24px 80px rgba(0,0,0,.3)", overflow:"hidden" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, padding:"14px 18px", borderBottom:"1px solid rgba(255,255,255,.06)" }}>
+                <Ic n="search" s={18} c="#4a6278"/>
                 <input autoFocus className="lms-input" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)}
                   placeholder="Search topics, notebooks, assignments…"
-                  style={{ border:"none", outline:"none", flex:1, fontSize:15, fontWeight:500, padding:0 }}/>
-                <button onClick={()=>setSearchOpen(false)} style={{ background:"none", border:"none", cursor:"pointer", color:"#94a3b8", fontSize:12, padding:"4px 8px", borderRadius:6, fontFamily:"inherit" }}>ESC</button>
+                  style={{ border:"none", outline:"none", flex:1, fontSize:15, fontWeight:500, padding:0, background:"transparent", color:"#f0e6d3" }}/>
+                <button onClick={()=>setSearchOpen(false)} style={{ background:"none", border:"none", cursor:"pointer", color:"#4a6278", fontSize:12, padding:"4px 8px", borderRadius:6, fontFamily:"inherit" }}>ESC</button>
               </div>
               <div style={{ maxHeight:400, overflowY:"auto" }}>
                 {(() => {
                   const q = searchQuery.trim().toLowerCase();
-                  if (!q) return <div style={{ padding:"20px 18px", color:"#94a3b8", fontSize:13.5 }}>Type to search across all {planDays.length} days…</div>;
+                  if (!q) return <div style={{ padding:"20px 18px", color:"#4a6278", fontSize:13.5 }}>Type to search across all {planDays.length} days…</div>;
                   const hits = [];
                   for (const [k2, pidx] of Object.entries(dayMap)) {
                     const pd = planDays[pidx]; const dd = dayData[k2] || {};
@@ -2782,17 +2784,17 @@ Rules:
                       }
                     }
                   }
-                  if (!hits.length) return <div style={{ padding:"20px 18px", color:"#94a3b8", fontSize:13.5 }}>No results for "{searchQuery}"</div>;
+                  if (!hits.length) return <div style={{ padding:"20px 18px", color:"#4a6278", fontSize:13.5 }}>No results for "{searchQuery}"</div>;
                   return hits.slice(0,12).map((h,i)=>(
                     <button key={i} onClick={()=>{ setSelDay({key:h.k2,dayNum:h.dayNum,topic:h.topic}); setPage("day"); setSearchOpen(false); setSearchQuery(""); }}
                       style={{ width:"100%", textAlign:"left", padding:"12px 18px", border:"none", background:"transparent", borderBottom:"1px solid #f8fafc", cursor:"pointer", fontFamily:"inherit" }}
-                      onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"}
+                      onMouseEnter={e=>e.currentTarget.style.background="#0d1424"}
                       onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                       <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-                        <div style={{ width:30, height:30, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:11, flexShrink:0 }}>{h.dayNum}</div>
+                        <div style={{ width:30, height:30, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#0a0f1a", fontWeight:800, fontSize:11, flexShrink:0 }}>{h.dayNum}</div>
                         <div style={{ flex:1, overflow:"hidden" }}>
-                          <p style={{ fontSize:13, fontWeight:700, color:"#0f172a" }}>{h.topic} <span style={{ fontSize:11, color:"#94a3b8", fontWeight:500 }}>· {h.label}</span></p>
-                          <p style={{ fontSize:12, color:"#64748b", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>…{h.snippet}…</p>
+                          <p style={{ fontSize:13, fontWeight:700, color:"#f0e6d3", fontFamily:"'Syne',sans-serif" }}>{h.topic} <span style={{ fontSize:11, color:"#4a6278", fontWeight:500 }}>· {h.label}</span></p>
+                          <p style={{ fontSize:12, color:"#6b8099", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>…{h.snippet}…</p>
                         </div>
                       </div>
                     </button>
@@ -2806,7 +2808,7 @@ Rules:
         {/* Toasts */}
         <div style={{ position:"fixed", bottom:22, right:22, display:"flex", flexDirection:"column", gap:8, zIndex:9999, maxWidth:360 }}>
           {toasts.map(t => (
-            <div key={t.id} style={{ padding:"11px 18px", borderRadius:11, background:t.type==="err"?"#fef2f2":t.type==="warn"?"#fffbeb":"#f0fdf4", border:`1.5px solid ${t.type==="err"?"#fecaca":t.type==="warn"?"#fde68a":"#bbf7d0"}`, color:t.type==="err"?"#dc2626":t.type==="warn"?"#92400e":"#15803d", fontSize:13.5, fontWeight:600, animation:"lms-toast .25s ease", boxShadow:"0 6px 24px rgba(0,0,0,.1)", display:"flex", alignItems:"center", gap:8 }}>
+            <div key={t.id} style={{ padding:"11px 18px", borderRadius:11, background:t.type==="err"?"#1a0007":t.type==="warn"?"#1a0f00":"#011a12", border:`1.5px solid ${t.type==="err"?"#5c0a0a":t.type==="warn"?"#8b5200":"#064a35"}`, color:t.type==="err"?"#e53e3e":t.type==="warn"?"#8b5200":"#09a87e", fontSize:13.5, fontWeight:600, animation:"lms-toast .25s ease", boxShadow:"0 6px 24px rgba(0,0,0,.1)", display:"flex", alignItems:"center", gap:8 }}>
               <Ic n={t.type==="err"?"x":t.type==="warn"?"bell":"check"} s={15}/>
               {t.msg}
             </div>
@@ -3055,19 +3057,19 @@ Day 2: [Topic]
   return (
     <div style={{ maxWidth:900, animation:"lms-in .3s ease", paddingBottom:40 }}>
       <div style={{ marginBottom:28 }}>
-        <h1 style={{ fontSize:26, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Setup Your Course Plan</h1>
-        <p style={{ color:"#64748b", fontSize:14, marginTop:5 }}>Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
+        <h1 style={{ fontSize:26, fontWeight:800, color:"#f0e6d3", letterSpacing:"-.5px" }}>Setup Your Course Plan</h1>
+        <p style={{ color:"#6b8099", fontSize:14, marginTop:5 }}>Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
       </div>
 
       {/* ══ BROCHURE PLAN GENERATOR ══ */}
       <div className="lms-card" style={{ padding:22, marginBottom:20, border:"1.5px solid #e0e7ff", background:"linear-gradient(135deg,#f8f9ff 0%,#f0f4ff 100%)" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
           <div style={{ width:32, height:32, background:"linear-gradient(135deg,#6366f1,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-            <Ic n="brain" s={17} c="#fff"/>
+            <Ic n="brain" s={17} c="#0a0f1a"/>
           </div>
           <div>
-            <p style={{ fontWeight:800, fontSize:15, color:"#0f172a" }}>AI Plan Generator from Brochure</p>
-            <p style={{ fontSize:12.5, color:"#6366f1", fontWeight:500 }}>Upload a course brochure (PDF or image) → AI reads it → generates a day-wise teaching plan</p>
+            <p style={{ fontWeight:800, fontSize:15, color:"#f0e6d3" }}>AI Plan Generator from Brochure</p>
+            <p style={{ fontSize:12.5, color:"#f5a623", fontWeight:500 }}>Upload a course brochure (PDF or image) → AI reads it → generates a day-wise teaching plan</p>
           </div>
         </div>
 
@@ -3079,8 +3081,8 @@ Day 2: [Topic]
             <div
               className="upload-zone"
               style={{
-                borderColor: brochureDragOver ? "#6366f1" : brochureFile ? "#6366f1" : "#c7d2fe",
-                background:  brochureDragOver ? "#eef2ff" : brochureFile ? "#f5f3ff" : "#f8fafc",
+                borderColor: brochureDragOver ? "#f5a623" : brochureFile ? "#f5a623" : "#c7d2fe",
+                background:  brochureDragOver ? "#eef2ff" : brochureFile ? "#1a1205" : "#0d1424",
                 transition:"all .2s", padding:20, position:"relative"
               }}
               onDragOver={e=>{ e.preventDefault(); setBrochureDragOver(true); }}
@@ -3093,12 +3095,12 @@ Day 2: [Topic]
                     <img src={brochureFile.dataUrl} alt="brochure preview"
                       style={{ maxHeight:120, maxWidth:"100%", borderRadius:8, objectFit:"contain", boxShadow:"0 2px 12px rgba(0,0,0,.12)" }}/>
                   ) : (
-                    <div style={{ width:52, height:52, background:"#fef2f2", borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                      <Ic n="file" s={26} c="#ef4444"/>
+                    <div style={{ width:52, height:52, background:"#1a0007", borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      <Ic n="file" s={26} c="#ff4757"/>
                     </div>
                   )}
-                  <p style={{ fontSize:13, fontWeight:700, color:"#0f172a", textAlign:"center", wordBreak:"break-all" }}>{brochureFile.name}</p>
-                  <p style={{ fontSize:11.5, color:"#6366f1", fontWeight:600 }}>✓ Ready to analyze</p>
+                  <p style={{ fontSize:13, fontWeight:700, color:"#f0e6d3", fontFamily:"'Syne',sans-serif", textAlign:"center", wordBreak:"break-all" }}>{brochureFile.name}</p>
+                  <p style={{ fontSize:11.5, color:"#f5a623", fontWeight:600 }}>✓ Ready to analyze</p>
                   <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"4px 10px" }}
                     onClick={()=>{ setBrochureFile(null); setBrochureResult(null); setBrochureError(""); }}>
                     <Ic n="trash" s={12}/>Remove
@@ -3106,9 +3108,9 @@ Day 2: [Topic]
                 </div>
               ) : (
                 <>
-                  <Ic n="upload" s={26} c="#a5b4fc"/>
-                  <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#475569" }}>Drop brochure here or click to browse</p>
-                  <p style={{ fontSize:12, color:"#94a3b8", marginTop:4 }}>PDF, PNG, JPG, WEBP — max 8MB</p>
+                  <Ic n="upload" s={26} c="#f5a623"/>
+                  <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#9aabbd" }}>Drop brochure here or click to browse</p>
+                  <p style={{ fontSize:12, color:"#4a6278", marginTop:4 }}>PDF, PNG, JPG, WEBP — max 8MB</p>
                 </>
               )}
               <input type="file" accept=".pdf,image/png,image/jpeg,image/webp,image/gif"
@@ -3120,7 +3122,7 @@ Day 2: [Topic]
           {/* Right: settings + generate */}
           <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
             <div>
-              <p className="lms-section-label" style={{ marginBottom:8 }}>Step 2 — Days to Cover (optional)</p>
+              <p className="lms-section-label" style={{ marginBottom:8 }}>Step 2 — Days to Cover</p>
               <div style={{ position:"relative" }}>
                 <input
                   type="number" min="1" max="365"
@@ -3131,17 +3133,17 @@ Day 2: [Topic]
                   style={{ paddingRight:110 }}
                 />
                 {!brochureDays && (
-                  <span style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", fontSize:11, color:"#a5b4fc", fontWeight:600, pointerEvents:"none" }}>AI decides</span>
+                  <span style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", fontSize:11, color:"#f5a623", fontWeight:600, pointerEvents:"none" }}>AI decides</span>
                 )}
               </div>
-              <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:5, lineHeight:1.5 }}>
+              <p style={{ fontSize:11.5, color:"#4a6278", marginTop:5, lineHeight:1.5 }}>
                 Set a fixed number or leave blank and the AI will estimate based on content depth.
               </p>
             </div>
 
             <button
               className="lms-btn"
-              style={{ background:"linear-gradient(135deg,#6366f1,#8b5cf6)", color:"#fff", justifyContent:"center", padding:"11px 0", fontSize:13.5, fontWeight:700 }}
+              style={{ background:"linear-gradient(135deg,#6366f1,#8b5cf6)", color:"#0a0f1a", justifyContent:"center", padding:"11px 0", fontSize:13.5, fontWeight:700 }}
               disabled={!brochureFile || brochureGenerating}
               onClick={generatePlanFromBrochure}
             >
@@ -3151,19 +3153,19 @@ Day 2: [Topic]
             </button>
 
             {brochureError && (
-              <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#dc2626" }}>
+              <div style={{ background:"#1a0007", border:"1.5px solid #fecaca", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#e53e3e" }}>
                 ❌ {brochureError}
               </div>
             )}
 
             {brochureResult && (
-              <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:9, padding:"12px 14px", display:"flex", flexDirection:"column", gap:8 }}>
+              <div style={{ background:"#011a12", border:"1.5px solid #bbf7d0", borderRadius:9, padding:"12px 14px", display:"flex", flexDirection:"column", gap:8 }}>
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <span style={{ fontSize:18 }}>✅</span>
                   <div>
-                    <p style={{ fontWeight:700, fontSize:13, color:"#15803d" }}>{brochureResult.lineCount} days generated</p>
+                    <p style={{ fontWeight:700, fontSize:13, color:"#09a87e" }}>{brochureResult.lineCount} days generated</p>
                     {brochureResult.suggestedDays && (
-                      <p style={{ fontSize:12, color:"#16a34a" }}>
+                      <p style={{ fontSize:12, color:"#0ec494" }}>
                         AI recommendation: <strong>{brochureResult.suggestedDays} days</strong>
                         {parseInt(brochureDays) > 0 && parseInt(brochureDays) !== brochureResult.suggestedDays
                           ? ` (you set ${brochureDays})`
@@ -3173,12 +3175,12 @@ Day 2: [Topic]
                   </div>
                 </div>
                 {brochureResult.summary && (
-                  <p style={{ fontSize:12.5, color:"#374151", lineHeight:1.55, borderTop:"1px solid #bbf7d0", paddingTop:8 }}>
+                  <p style={{ fontSize:12.5, color:"#c8b99e", lineHeight:1.55, borderTop:"1px solid #bbf7d0", paddingTop:8 }}>
                     {brochureResult.summary}
                   </p>
                 )}
                 {brochureResult.fallback && (
-                  <p style={{ fontSize:11.5, color:"#d97706" }}>⚠ Generated from filename (model doesn't support image reading — switch to a vision model for better results)</p>
+                  <p style={{ fontSize:11.5, color:"#e8940a" }}>⚠ Generated from filename (model doesn't support image reading — switch to a vision model for better results)</p>
                 )}
                 <button className="lms-btn lms-btn-green" style={{ justifyContent:"center" }} onClick={usePlanInSetup}>
                   <Ic n="check" s={14}/>Use This Plan in Editor ↓
@@ -3196,7 +3198,7 @@ Day 2: [Topic]
         {brochureResult?.plan && (
           <div style={{ marginTop:16 }}>
             <p className="lms-section-label" style={{ marginBottom:8 }}>Generated Plan Preview</p>
-            <div style={{ background:"#fff", border:"1.5px solid #e0e7ff", borderRadius:10, padding:"12px 14px", maxHeight:200, overflowY:"auto", fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12, lineHeight:1.7, color:"#1e293b", whiteSpace:"pre-wrap" }}>
+            <div style={{ background:"#0a0f1a", border:"1.5px solid #e0e7ff", borderRadius:10, padding:"12px 14px", maxHeight:200, overflowY:"auto", fontFamily:"'IBM Plex Mono','JetBrains Mono',monospace", fontSize:12, lineHeight:1.7, color:"#d4c5ae", whiteSpace:"pre-wrap" }}>
               {brochureResult.plan}
             </div>
           </div>
@@ -3207,7 +3209,7 @@ Day 2: [Topic]
         <div className="lms-card" style={{ padding:22 }}>
           <p className="lms-section-label">Teaching Plan (.txt format)</p>
           <textarea className="lms-input" value={planText} onChange={e=>setPlanText(e.target.value)}
-            placeholder={sample} style={{ minHeight:300, fontSize:12.5, fontFamily:"'JetBrains Mono','Fira Code',monospace" }} />
+            placeholder={sample} style={{ minHeight:300, fontSize:12.5, fontFamily:"'IBM Plex Mono','JetBrains Mono',monospace" }} />
           <div style={{ display:"flex", gap:8, marginTop:12, flexWrap:"wrap" }}>
             <button className="lms-btn lms-btn-dark" onClick={onParse}><Ic n="check" s={14}/>Parse & Start</button>
             <label className="lms-btn lms-btn-ghost" style={{ cursor:"pointer" }}>
@@ -3230,7 +3232,7 @@ Day 2: [Topic]
               <button className={`lms-btn ${monfri?"lms-btn-dark":"lms-btn-ghost"}`} onClick={()=>setMonfri(true)} style={{ flex:1 }}>Mon–Fri</button>
               <button className={`lms-btn ${!monfri?"lms-btn-dark":"lms-btn-ghost"}`} onClick={()=>setMonfri(false)} style={{ flex:1 }}>All Days</button>
             </div>
-            <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:8 }}>{monfri?"Weekends skipped":"Includes weekends"}</p>
+            <p style={{ fontSize:11.5, color:"#4a6278", marginTop:8 }}>{monfri?"Weekends skipped":"Includes weekends"}</p>
           </div>
 
           {planDays.length > 0 && (
@@ -3239,8 +3241,8 @@ Day 2: [Topic]
               <div style={{ maxHeight:200, overflowY:"auto", display:"flex", flexDirection:"column", gap:5 }}>
                 {planDays.map((d,i) => (
                   <div key={i} style={{ display:"flex", gap:10, fontSize:12.5, padding:"5px 0", borderBottom:"1px solid #f8fafc" }}>
-                    <span style={{ color:"#3b82f6", fontWeight:700, minWidth:48, flexShrink:0 }}>Day {d.dayNum}</span>
-                    <span style={{ color:"#374151" }}>{d.topic}</span>
+                    <span style={{ color:"#14d9a4", fontWeight:700, minWidth:48, flexShrink:0 }}>Day {d.dayNum}</span>
+                    <span style={{ color:"#c8b99e" }}>{d.topic}</span>
                   </div>
                 ))}
               </div>
@@ -3375,16 +3377,16 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
 
       {/* Inline confirm dialog — replaces window.confirm which is blocked in sandboxed iframes */}
       {confirmWeek && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div style={{ background:"#fff", borderRadius:16, padding:28, maxWidth:420, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
-            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:10 }}>Generate Full Week?</p>
-            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.6, marginBottom:8 }}>
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ background:"#0a0f1a", borderRadius:16, padding:28, maxWidth:420, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#f0e6d3", marginBottom:10 }}>Generate Full Week?</p>
+            <p style={{ fontSize:13.5, color:"#9aabbd", lineHeight:1.6, marginBottom:8 }}>
               <strong>Mon {confirmWeek.monday.getDate()} – Fri {confirmWeek.endFri.getDate()}</strong> · {confirmWeek.weekDays.length} day(s)
             </p>
-            <div style={{ background:"#f8fafc", borderRadius:10, padding:"10px 14px", marginBottom:16, fontSize:12.5, color:"#64748b", lineHeight:1.6 }}>
+            <div style={{ background:"#0d1424", borderRadius:10, padding:"10px 14px", marginBottom:16, fontSize:12.5, color:"#6b8099", lineHeight:1.6 }}>
               {confirmWeek.weekDays.map(d => <div key={d.key}>Day {d.dayNum}: {d.topic}</div>)}
             </div>
-            <p style={{ fontSize:12.5, color:"#94a3b8", marginBottom:18 }}>
+            <p style={{ fontSize:12.5, color:"#4a6278", marginBottom:18 }}>
               This will make {confirmWeek.weekDays.length * 6} sequential AI calls. It may take several minutes.
             </p>
             <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
@@ -3399,8 +3401,8 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
 
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
         <div>
-          <h1 style={{ fontSize:25, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Learning Calendar</h1>
-          <p style={{ color:"#64748b", fontSize:13.5, marginTop:4 }}>Click any lesson day to open the full workspace</p>
+          <h1 style={{ fontSize:25, fontWeight:800, color:"#f0e6d3", letterSpacing:"-.5px" }}>Learning Calendar</h1>
+          <p style={{ color:"#6b8099", fontSize:13.5, marginTop:4 }}>Click any lesson day to open the full workspace</p>
         </div>
         <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
           {total > 0 && Object.values(dayData||{}).some(d=>d?.notebook) && (
@@ -3428,48 +3430,48 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
           <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:12 }}>
             <div style={{ width:52, height:52, position:"relative", flexShrink:0 }}>
               <svg viewBox="0 0 36 36" width="52" height="52">
-                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#f1f5f9" strokeWidth="3.5"/>
-                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#3b82f6" strokeWidth="3.5"
+                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#141c2e" strokeWidth="3.5"/>
+                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#14d9a4" strokeWidth="3.5"
                   strokeDasharray={`${pct} ${100-pct}`} strokeDashoffset="25" strokeLinecap="round"
                   style={{ transition:"stroke-dasharray .5s ease" }}/>
               </svg>
-              <span style={{ position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", fontSize:10, fontWeight:800, color:"#3b82f6" }}>{pct}%</span>
+              <span style={{ position:"absolute", top:"50%", left:"50%", transform:"translate(-50%,-50%)", fontSize:10, fontWeight:800, color:"#14d9a4" }}>{pct}%</span>
             </div>
             <div>
-              <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Progress</p>
-              <p style={{ fontSize:16, fontWeight:800, color:"#0f172a", lineHeight:1 }}>{completed}<span style={{ fontSize:12, color:"#94a3b8", fontWeight:500 }}>/{total}</span></p>
-              <p style={{ fontSize:11, color:"#64748b", marginTop:2 }}>days done</p>
+              <p style={{ fontSize:11, fontWeight:700, color:"#4a6278", textTransform:"uppercase", letterSpacing:".06em" }}>Progress</p>
+              <p style={{ fontSize:16, fontWeight:800, color:"#f0e6d3", lineHeight:1 }}>{completed}<span style={{ fontSize:12, color:"#4a6278", fontWeight:500 }}>/{total}</span></p>
+              <p style={{ fontSize:11, color:"#6b8099", marginTop:2 }}>days done</p>
             </div>
           </div>
           {/* Streak */}
           <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:10 }}>
-            <div style={{ width:36, height:36, background: streak>0?"#fffbeb":"#f8fafc", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>{streak>0?"🔥":"💤"}</div>
+            <div style={{ width:36, height:36, background: streak>0?"#1a0f00":"#0d1424", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>{streak>0?"🔥":"💤"}</div>
             <div>
-              <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Streak</p>
-              <p style={{ fontSize:16, fontWeight:800, color: streak>0?"#f59e0b":"#94a3b8", lineHeight:1 }}>{streak} <span style={{ fontSize:11, fontWeight:500, color:"#94a3b8" }}>day{streak!==1?"s":""}</span></p>
+              <p style={{ fontSize:11, fontWeight:700, color:"#4a6278", textTransform:"uppercase", letterSpacing:".06em" }}>Streak</p>
+              <p style={{ fontSize:16, fontWeight:800, color: streak>0?"#f5a623":"#4a6278", lineHeight:1 }}>{streak} <span style={{ fontSize:11, fontWeight:500, color:"#4a6278" }}>day{streak!==1?"s":""}</span></p>
             </div>
           </div>
           {/* In Progress */}
           {inProgress > 0 && (
             <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:10 }}>
-              <div style={{ width:36, height:36, background:"#fffbeb", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                <Ic n="zap" s={18} c="#f59e0b"/>
+              <div style={{ width:36, height:36, background:"#1a0f00", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <Ic n="zap" s={18} c="#f5a623"/>
               </div>
               <div>
-                <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Active</p>
-                <p style={{ fontSize:16, fontWeight:800, color:"#f59e0b", lineHeight:1 }}>{inProgress} <span style={{ fontSize:11, fontWeight:500, color:"#94a3b8" }}>in progress</span></p>
+                <p style={{ fontSize:11, fontWeight:700, color:"#4a6278", textTransform:"uppercase", letterSpacing:".06em" }}>Active</p>
+                <p style={{ fontSize:16, fontWeight:800, color:"#f5a623", lineHeight:1 }}>{inProgress} <span style={{ fontSize:11, fontWeight:500, color:"#4a6278" }}>in progress</span></p>
               </div>
             </div>
           )}
           {/* Est finish */}
           {estFinish && (
             <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:10 }}>
-              <div style={{ width:36, height:36, background:"#f0fdf4", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                <Ic n="calendar" s={18} c="#22c55e"/>
+              <div style={{ width:36, height:36, background:"#011a12", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <Ic n="calendar" s={18} c="#14d9a4"/>
               </div>
               <div>
-                <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Est. Finish</p>
-                <p style={{ fontSize:13, fontWeight:700, color:"#15803d", lineHeight:1.2 }}>{estFinish}</p>
+                <p style={{ fontSize:11, fontWeight:700, color:"#4a6278", textTransform:"uppercase", letterSpacing:".06em" }}>Est. Finish</p>
+                <p style={{ fontSize:13, fontWeight:700, color:"#09a87e", lineHeight:1.2 }}>{estFinish}</p>
               </div>
             </div>
           )}
@@ -3479,7 +3481,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
       {/* Month tabs — scrollable on mobile */}
       <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, WebkitOverflowScrolling:"touch", flexShrink:0 }}>
         {MONTHS_SHORT.map((m,i) => (
-          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"5px 13px", borderRadius:99, border:"1.5px solid", fontSize:12.5, fontWeight:600, cursor:"pointer", transition:"all .15s", flexShrink:0, background:calMonth===i?"#0f172a":"#fff", color:calMonth===i?"#fff":"#64748b", borderColor:calMonth===i?"#0f172a":"#e2e8f0", fontFamily:"inherit" }}>{m}</button>
+          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"5px 13px", borderRadius:99, border:"1.5px solid", fontSize:12.5, fontWeight:600, cursor:"pointer", transition:"all .15s", flexShrink:0, background:calMonth===i?"#f0e6d3":"#0a0f1a", color:calMonth===i?"#0a0f1a":"#6b8099", borderColor:calMonth===i?"#f0e6d3":"#1e2d48", fontFamily:"inherit" }}>{m}</button>
         ))}
       </div>
 
@@ -3487,12 +3489,12 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
       <div className="lms-cal-grid" style={{ display:"grid", gridTemplateColumns:"1fr 270px", gap:18, alignItems:"start" }}>
         <div className="lms-card" style={{ padding:20 }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-            <button onClick={prev} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#64748b" }}><Ic n="chevL" s={18}/></button>
-            <span style={{ fontWeight:700, fontSize:16, color:"#0f172a" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
-            <button onClick={next} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#64748b" }}><Ic n="chevR" s={18}/></button>
+            <button onClick={prev} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#6b8099" }}><Ic n="chevL" s={18}/></button>
+            <span style={{ fontWeight:700, fontSize:16, color:"#f0e6d3" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
+            <button onClick={next} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#6b8099" }}><Ic n="chevR" s={18}/></button>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:8 }}>
-            {DAYS_HDR.map(d => <div key={d} style={{ textAlign:"center", fontSize:11.5, fontWeight:700, color:"#94a3b8", padding:"4px 0" }}>{d}</div>)}
+            {DAYS_HDR.map(d => <div key={d} style={{ textAlign:"center", fontSize:11.5, fontWeight:700, color:"#4a6278", padding:"4px 0" }}>{d}</div>)}
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4 }}>
             {cells.map((day,idx) => {
@@ -3506,10 +3508,10 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
               const isToday = k === todayK;
               return (
                 <div key={idx} className={`day-cell${isToday?" today":""}${hasPlan?" has-plan":""}`}
-                  style={{ background: hasPlan ? sc.bg : "#fafafa", borderColor: hasPlan ? sc.border : "#f1f5f9", cursor: hasPlan ? "pointer" : "default" }}
+                  style={{ background: hasPlan ? sc.bg : "#fafafa", borderColor: hasPlan ? sc.border : "#141c2e", cursor: hasPlan ? "pointer" : "default" }}
                   onClick={() => { if (!hasPlan) return; onSelectDay({ key:k, dayNum:planDays[pidx].dayNum, topic }); }}>
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <span style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6":"#334155" }}>{day}</span>
+                    <span style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#14d9a4":"#d4c5ae" }}>{day}</span>
                     {hasPlan && <span style={{ width:7, height:7, borderRadius:"50%", background:sc.dot, display:"inline-block", marginTop:3, flexShrink:0 }}/>}
                   </div>
                   {hasPlan && <div style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>}
@@ -3525,8 +3527,8 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
             {Object.entries(STATUS_CFG).map(([s,sc]) => (
               <div key={s} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7 }}>
                 <span style={{ width:9, height:9, borderRadius:"50%", background:sc.dot, flexShrink:0 }}/>
-                <span style={{ fontSize:12.5, color:"#475569", fontWeight:500 }}>{sc.label}</span>
-                <span style={{ marginLeft:"auto", fontWeight:700, fontSize:12, color:"#94a3b8" }}>{Object.values(dayStatus).filter(v=>v===s).length}</span>
+                <span style={{ fontSize:12.5, color:"#9aabbd", fontWeight:500 }}>{sc.label}</span>
+                <span style={{ marginLeft:"auto", fontWeight:700, fontSize:12, color:"#4a6278" }}>{Object.values(dayStatus).filter(v=>v===s).length}</span>
               </div>
             ))}
           </div>
@@ -3534,7 +3536,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
           <div className="lms-card" style={{ padding:16, display:"flex", flexDirection:"column" }}>
             <p className="lms-section-label">{MONTHS_SHORT[calMonth]} Lessons ({monthEvents.length})</p>
             <div style={{ display:"flex", flexDirection:"column", gap:8, overflowY:"auto", maxHeight:360, paddingRight:2 }}>
-              {monthEvents.length === 0 && <p style={{ fontSize:13, color:"#94a3b8" }}>No lessons this month</p>}
+              {monthEvents.length === 0 && <p style={{ fontSize:13, color:"#4a6278" }}>No lessons this month</p>}
               {monthEvents.map(([k, pidx]) => {
                 const topic = planDays[pidx]?.topic;
                 const s = dayStatus[k] || "Not Started";
@@ -3560,9 +3562,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
       {/* ── Generate Full Week — 4-per-row landscape grid below calendar ── Hidden for students */}
       {weeks.length > 0 && !studentMode && (
         <div style={{ marginTop:4 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
             <p className="lms-section-label" style={{ margin:0 }}>Generate Full Week</p>
-            <span style={{ fontSize:11.5, color:"#94a3b8" }}>
+            <span style={{ fontSize:11.5, color:"#4a6278" }}>
               Generates Notebook, Examples, Resources, Assignment &amp; Teaching Guide for all Mon–Fri days.
             </span>
           </div>
@@ -3573,18 +3575,18 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
               const friLabel = `${MONTHS_SHORT[week.endFri.getMonth()]} ${week.endFri.getDate()}`;
               return (
                 <div key={week.weekKey} className="lms-card" style={{ borderRadius:10, border:"1.5px solid #e2e8f0", overflow:"hidden", display:"flex", flexDirection:"column", padding:0 }}>
-                  <div style={{ padding:"8px 12px", background:"#f8fafc", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                    <span style={{ fontSize:12, fontWeight:700, color:"#334155" }}>
+                  <div style={{ padding:"8px 12px", background:"#0d1424", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontSize:12, fontWeight:700, color:"#d4c5ae" }}>
                       {monLabel} – {friLabel}
                     </span>
-                    <span style={{ fontSize:11, color:"#94a3b8", fontWeight:500 }}>
+                    <span style={{ fontSize:11, color:"#4a6278", fontWeight:500 }}>
                       {week.weekDays.length} day{week.weekDays.length!==1?"s":""}
                     </span>
                   </div>
                   <div style={{ padding:"6px 12px 4px", flex:1 }}>
                     {week.weekDays.map(d => (
-                      <div key={d.key} style={{ fontSize:11.5, color:"#475569", padding:"3px 0", borderBottom:"1px solid #f1f5f9", display:"flex", gap:6, alignItems:"center" }}>
-                        <span style={{ color:"#3b82f6", fontWeight:700, minWidth:40, flexShrink:0 }}>Day {d.dayNum}</span>
+                      <div key={d.key} style={{ fontSize:11.5, color:"#9aabbd", padding:"3px 0", borderBottom:"1px solid #f1f5f9", display:"flex", gap:6, alignItems:"center" }}>
+                        <span style={{ color:"#14d9a4", fontWeight:700, minWidth:40, flexShrink:0 }}>Day {d.dayNum}</span>
                         <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.topic}</span>
                       </div>
                     ))}
@@ -3592,12 +3594,12 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
                   <div style={{ padding:"8px 12px" }}>
                     {isGenerating && weekProgress && (
                       <div style={{ marginBottom:8 }}>
-                        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#64748b", marginBottom:4 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#6b8099", marginBottom:4 }}>
                           <span>Generating… {weekProgress.done}/{weekProgress.total} steps</span>
                           <span>{Math.round(weekProgress.done/weekProgress.total*100)}%</span>
                         </div>
-                        <div style={{ height:5, borderRadius:99, background:"#e2e8f0", overflow:"hidden" }}>
-                          <div style={{ height:"100%", borderRadius:99, background:"#3b82f6", width:`${Math.round(weekProgress.done/weekProgress.total*100)}%`, transition:"width .3s ease" }}/>
+                        <div style={{ height:5, borderRadius:99, background:"#1e2d48", overflow:"hidden" }}>
+                          <div style={{ height:"100%", borderRadius:99, background:"#14d9a4", width:`${Math.round(weekProgress.done/weekProgress.total*100)}%`, transition:"width .3s ease" }}/>
                         </div>
                       </div>
                     )}
@@ -3658,8 +3660,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
     <div style={{ animation:"lms-in .3s ease" }}>
       {/* FIX 8: pending generation indicator — FIX 9: use exact key prefix matching */}
       {Object.keys(pendingGen).filter(pk => pk.endsWith(`-${k}`)).length > 0 && (
-        <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:10, padding:"10px 14px", marginBottom:16, display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
-          <Spin s={14}/><span style={{ color:"#92400e", fontWeight:600 }}>Generation in progress — safe to close, will auto-save when complete</span>
+        <div style={{ background:"#1a0f00", border:"1.5px solid #fde68a", borderRadius:10, padding:"10px 14px", marginBottom:16, display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
+          <Spin s={14}/><span style={{ color:"#8b5200", fontWeight:600 }}>Generation in progress — safe to close, will auto-save when complete</span>
         </div>
       )}
 
@@ -3668,23 +3670,23 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
         <button className="lms-btn lms-btn-ghost" onClick={onBack}><Ic n="chevL" s={14}/>Calendar</button>
         <div style={{ flex:1, minWidth:200 }}>
           <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-            <div style={{ width:36, height:36, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>{day.dayNum}</div>
+            <div style={{ width:36, height:36, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", color:"#0a0f1a", fontWeight:800, fontSize:13, flexShrink:0 }}>{day.dayNum}</div>
             <div>
-              <h1 style={{ fontSize:20, fontWeight:800, color:"#0f172a", letterSpacing:"-.3px" }}>{day.topic}</h1>
-              <p style={{ fontSize:12, color:"#94a3b8" }}>{day.key}</p>
+              <h1 style={{ fontSize:20, fontWeight:800, color:"#f0e6d3", letterSpacing:"-.3px" }}>{day.topic}</h1>
+              <p style={{ fontSize:12, color:"#4a6278" }}>{day.key}</p>
             </div>
             <span className="lms-tag" style={{ background:sc.bg, color:sc.text, border:`1.5px solid ${sc.border}` }}>
               <span style={{ width:6, height:6, borderRadius:"50%", background:sc.dot }}/>
               {status}
             </span>
             {dayData.quizScore && (
-              <span className="lms-tag" style={{ background:"#fffbeb", color:"#92400e", border:"1.5px solid #fde68a", cursor:"pointer" }}
+              <span className="lms-tag" style={{ background:"#1a0f00", color:"#8b5200", border:"1.5px solid #fde68a", cursor:"pointer" }}
                 onClick={()=>setTab("quiz")}>
                 🎯 {dayData.quizScore.pct}%
               </span>
             )}
             {dayData.notes?.trim() && (
-              <span className="lms-tag" style={{ background:"#f0f9ff", color:"#0369a1", border:"1.5px solid #bae6fd", cursor:"pointer" }}
+              <span className="lms-tag" style={{ background:"#010d1a", color:"#14d9a4", border:"1.5px solid #bae6fd", cursor:"pointer" }}
                 onClick={()=>setTab("notes")}>
                 🗒️ Notes
               </span>
@@ -3716,7 +3718,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
       </div>
 
       {/* Tabs — scrollable on mobile */}
-      <div style={{ display:"flex", gap:3, background:"#f1f5f9", padding:4, borderRadius:12, marginBottom:20, overflowX:"auto", WebkitOverflowScrolling:"touch", flexShrink:0 }}>
+      <div style={{ display:"flex", gap:3, background:"#141c2e", padding:4, borderRadius:12, marginBottom:20, overflowX:"auto", WebkitOverflowScrolling:"touch", flexShrink:0 }}>
         {TABS.map(t => (
           <button key={t.id} className={`lms-tab${tab===t.id?" on":""}`} onClick={()=>setTab(t.id)} style={{ flexShrink:0 }}>{t.label}</button>
         ))}
@@ -3757,9 +3759,9 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
         <div style={{ animation:"lms-in .2s ease" }}>
           {/* Pyodide loader banner */}
           {!pyodideReady && (
-            <div style={{ background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:"#1e40af" }}>
-                <Ic n="zap" s={15} c="#3b82f6"/>
+            <div style={{ background:"#05211a", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:"#09a87e" }}>
+                <Ic n="zap" s={15} c="#14d9a4"/>
                 <strong>Real Python Execution available</strong> — load Pyodide (WASM) for actual code running
               </div>
               <button className="lms-btn lms-btn-blue" disabled={pyodideLoading} onClick={onLoadPyodide} style={{ flexShrink:0 }}>
@@ -3768,8 +3770,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
             </div>
           )}
           {pyodideReady && (
-            <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"8px 16px", marginBottom:14, fontSize:13, color:"#15803d", fontWeight:600, display:"flex", alignItems:"center", gap:8 }}>
-              <Ic n="check" s={15} c="#22c55e"/> Real Python (Pyodide WASM) — actual execution, no simulation
+            <div style={{ background:"#011a12", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"8px 16px", marginBottom:14, fontSize:13, color:"#09a87e", fontWeight:600, display:"flex", alignItems:"center", gap:8 }}>
+              <Ic n="check" s={15} c="#14d9a4"/> Real Python (Pyodide WASM) — actual execution, no simulation
             </div>
           )}
 
@@ -3777,13 +3779,13 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           <div className="lms-compiler-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
             <div className="lms-card" style={{ padding:16 }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
-                <p style={{ fontWeight:700, fontSize:13, color:"#0f172a" }}>Code Editor — {day.topic}</p>
+                <p style={{ fontWeight:700, fontSize:13, color:"#f0e6d3" }}>Code Editor — {day.topic}</p>
                 <button className="lms-btn lms-btn-blue" disabled={!!busy[`run-${k}`]} onClick={()=>onRunCode(codeEdit)} style={{ padding:"6px 14px" }}>
                   {busy[`run-${k}`]?<><Spin s={13}/>Running...</>:<><Ic n="play" s={13}/>Run Code</>}
                 </button>
               </div>
               <textarea className="lms-input" value={codeEdit} onChange={e=>setCodeEdit(e.target.value)}
-                style={{ minHeight:360, fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12.5, lineHeight:1.65 }} />
+                style={{ minHeight:360, fontFamily:"'IBM Plex Mono','JetBrains Mono',monospace", fontSize:12.5, lineHeight:1.65 }} />
               <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
                 <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 10px" }}
                   onClick={()=>downloadBlob(codeEdit, `Day${day.dayNum}_code.py`)}>
@@ -3797,14 +3799,14 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
               </div>
             </div>
             <div className="lms-card" style={{ padding:16 }}>
-              <p style={{ fontWeight:700, fontSize:13, color:"#0f172a", marginBottom:10 }}>
+              <p style={{ fontWeight:700, fontSize:13, color:"#f0e6d3", marginBottom:10 }}>
                 Output{" "}
-                <span style={{ fontSize:11, color:"#94a3b8", fontWeight:400 }}>
-                  ({pyodideReady?"Real Pyodide WASM":"AI-simulated — load Real Python above"})
+                <span style={{ fontSize:11, color:"#4a6278", fontWeight:400 }}>
+                  ({pyodideReady?"✓ Real Pyodide WASM":"AI-simulated — load Real Python above"})
                 </span>
               </p>
               <div className="lms-output" style={{ minHeight:360, overflowY:"auto" }}>
-                {codeOutput || <span style={{ color:"#475569" }}>▶ Run your code to see output here</span>}
+                {codeOutput || <span style={{ color:"#9aabbd" }}>▶ Run your code to see output here</span>}
               </div>
             </div>
           </div>
@@ -3855,8 +3857,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           {dayData.resources && (
             <div className="lms-block" style={{ marginBottom:20 }}>
               <div className="lms-block-head">
-                <div style={{ width:28, height:28, background:"#f3e8ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="file" s={15} c="#8b5cf6"/></div>
-                <span style={{ fontWeight:700, color:"#0f172a" }}>Auto-Generated Resources</span>
+                <div style={{ width:28, height:28, background:"#f3e8ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="file" s={15} c="#f5a623"/></div>
+                <span style={{ fontWeight:700, color:"#f0e6d3" }}>Auto-Generated Resources</span>
               </div>
               <ErrorBoundary><ContentRenderer content={dayData.resources} /></ErrorBoundary>
             </div>
@@ -3865,15 +3867,15 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           {/* File upload zone */}
           <div className="lms-block">
             <div className="lms-block-head">
-              <div style={{ width:28, height:28, background:"#eff6ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="upload" s={15} c="#3b82f6"/></div>
-              <span style={{ fontWeight:700, color:"#0f172a" }}>Upload Your Files</span>
-              <span style={{ fontSize:12, color:"#94a3b8", marginLeft:4 }}>Max ~2MB per file for best persistence</span>
+              <div style={{ width:28, height:28, background:"#05211a", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="upload" s={15} c="#14d9a4"/></div>
+              <span style={{ fontWeight:700, color:"#f0e6d3" }}>Upload Your Files</span>
+              <span style={{ fontSize:12, color:"#4a6278", marginLeft:4 }}>Max ~2MB per file for best persistence</span>
             </div>
 
             <label className="upload-zone">
-              <Ic n="upload" s={28} c="#94a3b8" />
-              <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#475569" }}>Drop files here or click to browse</p>
-              <p style={{ fontSize:12, color:"#94a3b8", marginTop:4 }}>Supports: .ipynb, .pdf, .py, .txt, .png, .jpg, .jpeg, .gif</p>
+              <Ic n="upload" s={28} c="#4a6278" />
+              <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#9aabbd" }}>Drop files here or click to browse</p>
+              <p style={{ fontSize:12, color:"#4a6278", marginTop:4 }}>Supports: .ipynb, .pdf, .py, .txt, .png, .jpg, .jpeg, .gif</p>
               <input type="file" multiple accept=".ipynb,.pdf,.py,.txt,.png,.jpg,.jpeg,.gif,.md" style={{ display:"none" }}
                 onChange={e=>onFileUpload(Array.from(e.target.files))} />
             </label>
@@ -3887,16 +3889,16 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
                     const isPdf = f.type === "application/pdf";
                     const isNb  = f.name.endsWith(".ipynb");
                     const ic = isImg ? "img" : isPdf ? "pdf" : isNb ? "book" : "file";
-                    const color = isImg ? "#ec4899" : isPdf ? "#ef4444" : isNb ? "#f59e0b" : "#6b7280";
-                    const bg    = isImg ? "#fdf2f8" : isPdf ? "#fef2f2" : isNb ? "#fffbeb" : "#f8fafc";
+                    const color = isImg ? "#ff4757" : isPdf ? "#ff4757" : isNb ? "#f5a623" : "#6b7280";
+                    const bg    = isImg ? "#1a0010" : isPdf ? "#1a0007" : isNb ? "#1a0f00" : "#0d1424";
                     return (
-                      <div key={f.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", background:bg, borderRadius:10, border:"1.5px solid #e8edf3", flexWrap:"wrap" }}>
-                        <div style={{ width:32, height:32, background:"#fff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, border:"1px solid #e2e8f0" }}>
+                      <div key={f.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", background:bg, borderRadius:10, border:"1.5px solid rgba(255,255,255,.08)", flexWrap:"wrap" }}>
+                        <div style={{ width:32, height:32, background:"#0a0f1a", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, border:"1px solid #e2e8f0" }}>
                           <Ic n={ic} s={17} c={color}/>
                         </div>
                         <div style={{ flex:1, minWidth:120 }}>
-                          <p style={{ fontSize:13, fontWeight:600, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
-                          <p style={{ fontSize:11, color:"#94a3b8" }}>{(f.size/1024).toFixed(1)} KB · {new Date(f.uploadedAt).toLocaleDateString()}</p>
+                          <p style={{ fontSize:13, fontWeight:600, color:"#f0e6d3", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                          <p style={{ fontSize:11, color:"#4a6278" }}>{(f.size/1024).toFixed(1)} KB · {new Date(f.uploadedAt).toLocaleDateString()}</p>
                         </div>
                         {isImg && f.dataUrl && <img src={f.dataUrl} alt={f.name} style={{ width:40, height:40, objectFit:"cover", borderRadius:6, flexShrink:0 }}/>}
                         {f.dataUrl && (
@@ -3904,10 +3906,10 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
                             <Ic n="download" s={13}/>
                           </a>
                         )}
-                        {!f.dataUrl && <span style={{ fontSize:11, color:"#ef4444", padding:"3px 8px", background:"#fef2f2", borderRadius:6 }}>Session only</span>}
-                        <button className="lms-btn" style={{ padding:"5px 8px", background:"#fef2f2", color:"#dc2626", fontSize:12 }}
+                        {!f.dataUrl && <span style={{ fontSize:11, color:"#ff4757", padding:"3px 8px", background:"#1a0007", borderRadius:6 }}>Session only</span>}
+                        <button className="lms-btn" style={{ padding:"5px 8px", background:"#1a0007", color:"#e53e3e", fontSize:12 }}
                           onClick={()=>onDeleteFile(f.id)}>
-                          <Ic n="trash" s={13} c="#dc2626"/>
+                          <Ic n="trash" s={13} c="#e53e3e"/>
                         </button>
                       </div>
                     );
@@ -3943,7 +3945,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
               </>
             )}
             {(dayData.uploadedFiles||[]).length > 0 && (
-              <span style={{ fontSize:12, color:"#64748b", padding:"4px 10px", background:"#f1f5f9", borderRadius:8 }}>
+              <span style={{ fontSize:12, color:"#6b8099", padding:"4px 10px", background:"#141c2e", borderRadius:8 }}>
                 📎 {(dayData.uploadedFiles||[]).length} file(s) from Resources referenced
               </span>
             )}
@@ -4027,21 +4029,21 @@ function NotebookView({ content, codeBlocks, onUseCode }) {
           const code = codeMatch[1];
           return (
             <div key={i} style={{ marginBottom:14 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#1e293b", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
-                <span style={{ fontSize:11.5, fontWeight:600, color:"#94a3b8" }}>Python</span>
-                <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#334155", color:"#e2e8f0", borderRadius:6 }} onClick={()=>onUseCode(code)}>
-                  <Ic n="play" s={11} c="#e2e8f0"/>Use in Compiler
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#d4c5ae", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
+                <span style={{ fontSize:11.5, fontWeight:600, color:"#4a6278" }}>Python</span>
+                <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#d4c5ae", color:"#1e2d48", borderRadius:6 }} onClick={()=>onUseCode(code)}>
+                  <Ic n="play" s={11} c="#1e2d48"/>Use in Compiler
                 </button>
               </div>
-              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#0f172a", color:"#e2e8f0" }}>{code}</div>
+              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#f0e6d3", color:"#1e2d48" }}>{code}</div>
             </div>
           );
         }
         return <MdRenderer key={i} text={part} />;
       })}
       {codeBlocks.length > 0 && (
-        <div style={{ marginTop:16, padding:"12px 16px", background:"#f8fafc", borderRadius:10, border:"1.5px solid #e2e8f0" }}>
-          <p style={{ fontSize:12, fontWeight:700, color:"#94a3b8", marginBottom:8 }}>QUICK ACCESS · {codeBlocks.length} CODE BLOCK{codeBlocks.length>1?"S":""}</p>
+        <div style={{ marginTop:16, padding:"12px 16px", background:"#0d1424", borderRadius:10, border:"1.5px solid #e2e8f0" }}>
+          <p style={{ fontSize:12, fontWeight:700, color:"#4a6278", marginBottom:8 }}>QUICK ACCESS · {codeBlocks.length} CODE BLOCK{codeBlocks.length>1?"S":""}</p>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
             {codeBlocks.map((cb,i) => (
               <button key={i} className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 12px" }} onClick={()=>onUseCode(cb)}>
@@ -4061,7 +4063,7 @@ function renderInline(text) {
   const parts = text.split(/(`[^`]+`)/g);
   return parts.flatMap((part, j) => {
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2)
-      return [<code key={`c${j}`} style={{ background:"#f1f5f9", padding:"1px 6px", borderRadius:4, fontFamily:"monospace", fontSize:12.5, color:"#0f172a" }}>{part.slice(1,-1)}</code>];
+      return [<code key={`c${j}`} style={{ background:"#141c2e", padding:"1px 6px", borderRadius:4, fontFamily:"monospace", fontSize:12.5, color:"#f0e6d3" }}>{part.slice(1,-1)}</code>];
 
     // Use non-global regexes for split (global regex consumed by split is fine),
     // but use non-global regex for the .test() check to avoid lastIndex mutation
@@ -4099,18 +4101,18 @@ function MdRenderer({ text }) {
   return (
     <div className="lms-prose" style={{ marginBottom:8 }}>
       {lines.map((line, i) => {
-        if (line.startsWith("### ")) return <h3 key={i} style={{ fontSize:14, fontWeight:700, color:"#0f172a", margin:"14px 0 5px" }}>{renderInline(line.slice(4))}</h3>;
-        if (line.startsWith("## "))  return <h2 key={i} style={{ fontSize:16, fontWeight:700, color:"#0f172a", margin:"18px 0 6px", borderBottom:"1.5px solid #f1f5f9", paddingBottom:6 }}>{renderInline(line.slice(3))}</h2>;
-        if (line.startsWith("# "))   return <h1 key={i} style={{ fontSize:19, fontWeight:800, color:"#0f172a", margin:"20px 0 8px", letterSpacing:"-.3px" }}>{renderInline(line.slice(2))}</h1>;
+        if (line.startsWith("### ")) return <h3 key={i} style={{ fontSize:14, fontWeight:700, color:"#f0e6d3", margin:"14px 0 5px" }}>{renderInline(line.slice(4))}</h3>;
+        if (line.startsWith("## "))  return <h2 key={i} style={{ fontSize:16, fontWeight:700, color:"#f0e6d3", margin:"18px 0 6px", borderBottom:"1.5px solid #f1f5f9", paddingBottom:6 }}>{renderInline(line.slice(3))}</h2>;
+        if (line.startsWith("# "))   return <h1 key={i} style={{ fontSize:19, fontWeight:800, color:"#f0e6d3", margin:"20px 0 8px", letterSpacing:"-.3px" }}>{renderInline(line.slice(2))}</h1>;
         // Whole-line bold — entire line wrapped in ** with no nested ** inside
         const trimmed = line.trim();
         if (trimmed.startsWith("**") && trimmed.endsWith("**") && trimmed.length > 4 && !trimmed.slice(2, -2).includes("**"))
-          return <p key={i} style={{ fontWeight:700, color:"#0f172a", margin:"5px 0" }}>{trimmed.slice(2, -2)}</p>;
-        if (line.match(/^[-*] /)) return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#3b82f6", fontWeight:700, marginTop:2, flexShrink:0 }}>•</span><span style={{ fontSize:13.5, color:"#374151", lineHeight:1.6 }}>{renderInline(line.slice(2))}</span></div>;
-        if (line.match(/^\d+\. /)) { const [num,...rest]=line.split(". "); return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#3b82f6", fontWeight:700, minWidth:20, flexShrink:0 }}>{num}.</span><span style={{ fontSize:13.5, color:"#374151", lineHeight:1.6 }}>{renderInline(rest.join(". "))}</span></div>; }
-        if (line.startsWith("---")) return <hr key={i} style={{ border:"none", borderTop:"1.5px solid #f1f5f9", margin:"14px 0" }}/>;
+          return <p key={i} style={{ fontWeight:700, color:"#f0e6d3", margin:"5px 0" }}>{trimmed.slice(2, -2)}</p>;
+        if (line.match(/^[-*] /)) return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#14d9a4", fontWeight:700, marginTop:2, flexShrink:0 }}>•</span><span style={{ fontSize:13.5, color:"#c8b99e", lineHeight:1.6 }}>{renderInline(line.slice(2))}</span></div>;
+        if (line.match(/^\d+\. /)) { const [num,...rest]=line.split(". "); return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#14d9a4", fontWeight:700, minWidth:20, flexShrink:0 }}>{num}.</span><span style={{ fontSize:13.5, color:"#c8b99e", lineHeight:1.6 }}>{renderInline(rest.join(". "))}</span></div>; }
+        if (line.startsWith("---")) return <hr key={i} style={{ border:"none", borderTop:"1.5px solid rgba(255,255,255,.07)", margin:"14px 0" }}/>;
         if (!line.trim()) return <div key={i} style={{ height:6 }}/>;
-        return <p key={i} style={{ fontSize:13.5, color:"#374151", lineHeight:1.7, margin:"3px 0" }}>{renderInline(line)}</p>;
+        return <p key={i} style={{ fontSize:13.5, color:"#c8b99e", lineHeight:1.7, margin:"3px 0" }}>{renderInline(line)}</p>;
       })}
     </div>
   );
@@ -4128,11 +4130,11 @@ function ContentRenderer({ content, onUseCode }) {
           const code = codeMatch[1];
           return (
             <div key={i} style={{ marginBottom:12 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#1e293b", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
-                <span style={{ fontSize:11.5, fontWeight:600, color:"#94a3b8" }}>Python</span>
-                {onUseCode && <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#334155", color:"#e2e8f0", borderRadius:6 }} onClick={()=>onUseCode(code)}><Ic n="play" s={11} c="#e2e8f0"/>Try it</button>}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#d4c5ae", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
+                <span style={{ fontSize:11.5, fontWeight:600, color:"#4a6278" }}>Python</span>
+                {onUseCode && <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#d4c5ae", color:"#1e2d48", borderRadius:6 }} onClick={()=>onUseCode(code)}><Ic n="play" s={11} c="#1e2d48"/>Try it</button>}
               </div>
-              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#0f172a", color:"#e2e8f0" }}>{code}</div>
+              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#f0e6d3", color:"#1e2d48" }}>{code}</div>
             </div>
           );
         }
@@ -4145,9 +4147,9 @@ function ContentRenderer({ content, onUseCode }) {
 /* ─── Teaching guide renderer ─── */
 function TeachingGuideView({ content }) {
   if (!content) return null;
-  const blockColors = ["#eff6ff","#f0fdf4","#fffbeb","#fdf4ff","#fff7ed","#f0f9ff"];
-  const blockBorders= ["#bfdbfe","#bbf7d0","#fde68a","#e9d5ff","#fed7aa","#bae6fd"];
-  const blockAccents= ["#3b82f6","#22c55e","#f59e0b","#a855f7","#f97316","#06b6d4"];
+  const blockColors = ["#05211a","#011a12","#1a0f00","#fdf4ff","#1a0f00","#010d1a"];
+  const blockBorders= ["#0a5a44","#064a35","#8b5200","#e9d5ff","#8b5200","#0a5a44"];
+  const blockAccents= ["#14d9a4","#14d9a4","#f5a623","#a855f7","#f5a623","#14d9a4"];
 
   const sections = content.split(/(?=^## BLOCK|^---$|^## 🎯|^## 🚨|^## 💡)/m).filter(s=>s.trim());
   let blockIdx = 0;
@@ -4166,10 +4168,10 @@ function TeachingGuideView({ content }) {
           <div key={i} style={{ background:blockColors[colorIdx], border:`1.5px solid ${blockBorders[colorIdx]}`, borderRadius:14, padding:20 }}>
             {header && (
               <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, paddingBottom:12, borderBottom:`1px solid ${blockBorders[colorIdx]}` }}>
-                <div style={{ width:30, height:30, background:blockAccents[colorIdx], borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>
+                <div style={{ width:30, height:30, background:blockAccents[colorIdx], borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#0a0f1a", fontWeight:800, fontSize:13, flexShrink:0 }}>
                   {isBlock ? section.match(/BLOCK (\d+)/)?.[1] || "•" : isOverview ? "🎯" : isTrouble ? "🚨" : "💡"}
                 </div>
-                <span style={{ fontWeight:700, fontSize:14, color:"#0f172a" }}>{header}</span>
+                <span style={{ fontWeight:700, fontSize:14, color:"#f0e6d3" }}>{header}</span>
               </div>
             )}
             <MdRenderer text={section.split("\n").slice(1).join("\n")} />
@@ -4217,7 +4219,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
     <div style={{ animation:"lms-in .2s ease" }}>
       <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
         {!studentMode && (
-          <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" }}
+          <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#0a0f1a" }}
             disabled={!!busy[`qz-${k}`]} onClick={onGenQuiz}>
             {busy[`qz-${k}`]?<><Spin/>Generating...</>:<><Ic n="brain" s={14}/>Generate Quiz</>}
           </button>
@@ -4228,7 +4230,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
               <Ic n="refresh" s={14}/>Retake
             </button>
             {dayData.quizScore && (
-              <span style={{ fontSize:12.5, color:"#64748b", padding:"4px 10px", background:"#f1f5f9", borderRadius:8 }}>
+              <span style={{ fontSize:12.5, color:"#6b8099", padding:"4px 10px", background:"#141c2e", borderRadius:8 }}>
                 Last score: {dayData.quizScore.score}/{dayData.quizScore.total} ({dayData.quizScore.pct}%)
               </span>
             )}
@@ -4245,18 +4247,18 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
           {/* Score banner after submit */}
           {submitted && (
             <div style={{ marginBottom:20, padding:"18px 22px", borderRadius:14,
-              background: score/questions.length >= 0.8 ? "#f0fdf4" : score/questions.length >= 0.5 ? "#fffbeb" : "#fef2f2",
-              border: `2px solid ${score/questions.length >= 0.8 ? "#86efac" : score/questions.length >= 0.5 ? "#fde68a" : "#fecaca"}` }}>
+              background: score/questions.length >= 0.8 ? "#011a12" : score/questions.length >= 0.5 ? "#1a0f00" : "#1a0007",
+              border: `2px solid ${score/questions.length >= 0.8 ? "#14d9a4" : score/questions.length >= 0.5 ? "#8b5200" : "#5c0a0a"}` }}>
               <div style={{ display:"flex", alignItems:"center", gap:14 }}>
                 <span style={{ fontSize:36 }}>{score/questions.length >= 0.8 ? "🎉" : score/questions.length >= 0.5 ? "📚" : "💪"}</span>
                 <div>
-                  <p style={{ fontSize:20, fontWeight:800, color:"#0f172a" }}>{score}/{questions.length} Correct</p>
-                  <p style={{ fontSize:13.5, color:"#64748b" }}>
+                  <p style={{ fontSize:20, fontWeight:800, color:"#f0e6d3" }}>{score}/{questions.length} Correct</p>
+                  <p style={{ fontSize:13.5, color:"#6b8099" }}>
                     {score/questions.length >= 0.8 ? "Excellent! You've mastered this topic." : score/questions.length >= 0.5 ? "Good progress! Review the explanations below." : "Keep practicing! Read the notebook and try again."}
                   </p>
                 </div>
                 <div style={{ marginLeft:"auto", textAlign:"center" }}>
-                  <div style={{ fontSize:28, fontWeight:800, color: score/questions.length >= 0.8 ? "#16a34a" : score/questions.length >= 0.5 ? "#d97706" : "#dc2626" }}>
+                  <div style={{ fontSize:28, fontWeight:800, color: score/questions.length >= 0.8 ? "#0ec494" : score/questions.length >= 0.5 ? "#e8940a" : "#e53e3e" }}>
                     {Math.round(score/questions.length*100)}%
                   </div>
                 </div>
@@ -4272,26 +4274,26 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
               const isWrong = submitted && chosen !== undefined && chosen !== q.answer;
               return (
                 <div key={qi} style={{
-                  padding:18, borderRadius:14, border:`1.5px solid ${submitted ? (isCorrect?"#86efac":isWrong?"#fca5a5":"#e2e8f0") : "#e2e8f0"}`,
-                  background: submitted ? (isCorrect?"#f0fdf4":isWrong?"#fef2f2":"#fff") : "#fff"
+                  padding:18, borderRadius:14, border:`1.5px solid ${submitted ? (isCorrect?"#14d9a4":isWrong?"#5c0a0a":"#1e2d48") : "#1e2d48"}`,
+                  background: submitted ? (isCorrect?"#011a12":isWrong?"#1a0007":"#0a0f1a") : "#0a0f1a"
                 }}>
-                  <p style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12, lineHeight:1.5 }}>
-                    <span style={{ color:"#3b82f6", marginRight:8 }}>Q{qi+1}.</span>{q.q}
+                  <p style={{ fontWeight:700, fontSize:14, color:"#f0e6d3", marginBottom:12, lineHeight:1.5 }}>
+                    <span style={{ color:"#14d9a4", marginRight:8 }}>Q{qi+1}.</span>{q.q}
                   </p>
                   <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
                     {q.options.map((opt, oi) => {
                       const isChosenOpt = chosen === oi;
                       const isCorrectOpt = submitted && oi === q.answer;
                       const isWrongOpt = submitted && isChosenOpt && oi !== q.answer;
-                      let bg = "#f8fafc", border = "#e2e8f0", color = "#374151";
-                      if (isChosenOpt && !submitted) { bg="#eff6ff"; border="#3b82f6"; color="#1e40af"; }
-                      if (isCorrectOpt) { bg="#f0fdf4"; border="#22c55e"; color="#15803d"; }
-                      if (isWrongOpt) { bg="#fef2f2"; border="#ef4444"; color="#dc2626"; }
+                      let bg = "#0d1424", border = "#1e2d48", color = "#c8b99e";
+                      if (isChosenOpt && !submitted) { bg="#05211a"; border="#14d9a4"; color="#09a87e"; }
+                      if (isCorrectOpt) { bg="#011a12"; border="#14d9a4"; color="#09a87e"; }
+                      if (isWrongOpt) { bg="#1a0007"; border="#ff4757"; color="#e53e3e"; }
                       return (
                         <button key={oi} disabled={submitted}
                           onClick={() => !submitted && setAnswers(p => ({...p, [qi]: oi}))}
                           style={{ textAlign:"left", padding:"10px 14px", borderRadius:9, border:`1.5px solid ${border}`, background:bg, color, cursor:submitted?"default":"pointer", fontSize:13.5, fontFamily:"inherit", fontWeight: isChosenOpt||isCorrectOpt ? 600 : 400, display:"flex", alignItems:"center", gap:10 }}>
-                          <span style={{ width:20, height:20, borderRadius:"50%", border:`1.5px solid ${border}`, background: isChosenOpt||isCorrectOpt ? border : "transparent", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color: isChosenOpt||isCorrectOpt ? "#fff" : color }}>
+                          <span style={{ width:20, height:20, borderRadius:"50%", border:`1.5px solid ${border}`, background: isChosenOpt||isCorrectOpt ? border : "transparent", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color: isChosenOpt||isCorrectOpt ? "#0a0f1a" : color }}>
                             {["A","B","C","D"][oi]}
                           </span>
                           {opt}
@@ -4301,9 +4303,9 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
                   </div>
                   {/* Explanation after submit */}
                   {submitted && (
-                    <div style={{ marginTop:12, padding:"10px 14px", background:"#f8fafc", borderRadius:9, border:"1px solid #e2e8f0" }}>
-                      <p style={{ fontSize:12.5, color:"#475569", lineHeight:1.6 }}>
-                        <strong style={{ color:"#0f172a" }}>Explanation: </strong>{q.explanation}
+                    <div style={{ marginTop:12, padding:"10px 14px", background:"#0d1424", borderRadius:9, border:"1px solid #e2e8f0" }}>
+                      <p style={{ fontSize:12.5, color:"#9aabbd", lineHeight:1.6 }}>
+                        <strong style={{ color:"#f0e6d3" }}>Explanation: </strong>{q.explanation}
                       </p>
                     </div>
                   )}
@@ -4358,11 +4360,11 @@ function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
   return (
     <div style={{ animation:"lms-in .2s ease" }}>
       <div style={{ display:"flex", gap:8, marginBottom:14, alignItems:"center", flexWrap:"wrap" }}>
-        <p style={{ fontSize:13, fontWeight:700, color:"#0f172a", flex:1 }}>
+        <p style={{ fontSize:13, fontWeight:700, color:"#f0e6d3", fontFamily:"'Syne',sans-serif", flex:1 }}>
           Personal Notes — Day {day.dayNum}: {day.topic}
         </p>
         <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-          <span style={{ fontSize:12, color: saved?"#22c55e":"#f59e0b", fontWeight:600 }}>
+          <span style={{ fontSize:12, color: saved?"#14d9a4":"#f5a623", fontWeight:600 }}>
             {saved ? "✓ Saved" : "Saving…"}
           </span>
           <button className={`lms-btn ${preview?"lms-btn-dark":"lms-btn-ghost"}`} style={{ padding:"5px 12px", fontSize:12 }} onClick={()=>setPreview(p=>!p)}>
@@ -4379,7 +4381,7 @@ function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
 
       {preview ? (
         <div className="lms-card" style={{ padding:20, minHeight:300 }}>
-          {draft.trim() ? <MdRenderer text={draft} /> : <p style={{ color:"#94a3b8", fontSize:13.5 }}>Nothing to preview yet.</p>}
+          {draft.trim() ? <MdRenderer text={draft} /> : <p style={{ color:"#4a6278", fontSize:13.5 }}>Nothing to preview yet.</p>}
         </div>
       ) : (
         <div>
@@ -4388,9 +4390,9 @@ function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
             value={draft}
             onChange={e => setDraft(e.target.value)}
             placeholder={`# Day ${day.dayNum} Notes\n\n## Key Concepts\n- \n\n## Questions\n- \n\n## Things to Review\n- `}
-            style={{ minHeight:380, fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:13, lineHeight:1.7, resize:"vertical" }}
+            style={{ minHeight:380, fontFamily:"'IBM Plex Mono','JetBrains Mono',monospace", fontSize:13, lineHeight:1.7, resize:"vertical" }}
           />
-          <p style={{ fontSize:12, color:"#94a3b8", marginTop:8 }}>Supports Markdown — use ## for headings, - for lists, **bold**, `code`. Auto-saves as you type.</p>
+          <p style={{ fontSize:12, color:"#4a6278", marginTop:8 }}>Supports Markdown — use ## for headings, - for lists, **bold**, `code`. Auto-saves as you type.</p>
         </div>
       )}
     </div>
@@ -4401,11 +4403,11 @@ function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
 function EmptyState({ icon, title, text }) {
   return (
     <div style={{ textAlign:"center", padding:"56px 20px", animation:"lms-in .3s ease" }}>
-      <div style={{ width:52, height:52, background:"#f1f5f9", borderRadius:14, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}>
-        <Ic n={icon} s={24} c="#cbd5e1"/>
+      <div style={{ width:52, height:52, background:"#141c2e", borderRadius:14, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 14px" }}>
+        <Ic n={icon} s={24} c="#2a3f5f"/>
       </div>
-      <p style={{ fontWeight:700, fontSize:15, color:"#334155", marginBottom:6 }}>{title}</p>
-      <p style={{ fontSize:13.5, color:"#94a3b8", maxWidth:380, margin:"0 auto", lineHeight:1.65 }}>{text}</p>
+      <p style={{ fontWeight:700, fontSize:15, color:"#d4c5ae", marginBottom:6 }}>{title}</p>
+      <p style={{ fontSize:13.5, color:"#4a6278", maxWidth:380, margin:"0 auto", lineHeight:1.65 }}>{text}</p>
     </div>
   );
 }
@@ -4504,10 +4506,10 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
   return (
     <div style={{ maxWidth:640, animation:"lms-in .3s ease" }}>
       {confirmClear && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div style={{ background:"#fff", borderRadius:16, padding:28, maxWidth:400, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
-            <p style={{ fontWeight:800, fontSize:16, color:"#dc2626", marginBottom:10 }}>Clear All Course Data?</p>
-            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.6, marginBottom:20 }}>This will permanently delete the plan, all notebooks, assignments, and notes for this course in Supabase. <strong>Cannot be undone.</strong></p>
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ background:"#0a0f1a", borderRadius:16, padding:28, maxWidth:400, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#e53e3e", marginBottom:10 }}>Clear All Course Data?</p>
+            <p style={{ fontSize:13.5, color:"#9aabbd", lineHeight:1.6, marginBottom:20 }}>This will permanently delete the plan, all notebooks, assignments, and notes for this course in Supabase. <strong>Cannot be undone.</strong></p>
             <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
               <button className="lms-btn lms-btn-ghost" onClick={()=>setConfirmClear(false)}>Cancel</button>
               <button className="lms-btn lms-btn-rose" onClick={doClearData}><Ic n="trash" s={13}/>Yes, Clear Everything</button>
@@ -4517,15 +4519,15 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       )}
 
       <div style={{ marginBottom:26 }}>
-        <h1 style={{ fontSize:25, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Settings</h1>
-        <p style={{ color:"#64748b", fontSize:13.5, marginTop:4 }}>Configure AI provider and manage course data</p>
+        <h1 style={{ fontSize:25, fontWeight:800, color:"#f0e6d3", letterSpacing:"-.5px" }}>Settings</h1>
+        <p style={{ color:"#6b8099", fontSize:13.5, marginTop:4 }}>Configure AI provider and manage course data</p>
       </div>
 
       {/* AI Provider */}
       <div className="lms-card" style={{ padding:22, marginBottom:16 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
-          <div style={{ width:30, height:30, background:"#eff6ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="brain" s={16} c="#3b82f6"/></div>
-          <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a" }}>AI Provider</p>
+          <div style={{ width:30, height:30, background:"#05211a", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="brain" s={16} c="#14d9a4"/></div>
+          <p style={{ fontWeight:700, fontSize:14.5, color:"#f0e6d3" }}>AI Provider</p>
         </div>
         <div style={{ display:"flex", gap:10, marginBottom:20 }}>
           {[{v:"groq",l:"⚡ Groq API"},{v:"ollama",l:"🦙 Ollama (Local)"}].map(opt=>(
@@ -4535,12 +4537,12 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
         {aiProvider==="groq" && (
           <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
             <div>
-              <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>API Key</label>
+              <label style={{ fontSize:12.5, fontWeight:600, color:"#9aabbd", display:"block", marginBottom:6 }}>API Key</label>
               <input type="password" className="lms-input" value={groqKey} onChange={e=>setGroqKey(e.target.value)} placeholder="gsk_..." />
-              <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:5 }}>Get free key at <a href="https://console.groq.com" target="_blank" rel="noreferrer" style={{ color:"#3b82f6" }}>console.groq.com</a></p>
+              <p style={{ fontSize:11.5, color:"#4a6278", marginTop:5 }}>Get free key at <a href="https://console.groq.com" target="_blank" rel="noreferrer" style={{ color:"#14d9a4" }}>console.groq.com</a></p>
             </div>
             <div>
-              <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>Model</label>
+              <label style={{ fontSize:12.5, fontWeight:600, color:"#9aabbd", display:"block", marginBottom:6 }}>Model</label>
               <select className="lms-input" value={groqModel} onChange={e=>setGroqModel(e.target.value)}>
                 {GROQ_MODELS.map(m=><option key={m} value={m}>{m}</option>)}
               </select>
@@ -4550,17 +4552,17 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
         {aiProvider==="ollama" && (
           <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
             <div>
-              <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>Ollama Base URL</label>
+              <label style={{ fontSize:12.5, fontWeight:600, color:"#9aabbd", display:"block", marginBottom:6 }}>Ollama Base URL</label>
               <input className="lms-input" value={ollamaUrl} onChange={e=>setOllamaUrl(e.target.value)} placeholder="http://localhost:11434" />
             </div>
             <div>
-              <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>Model</label>
+              <label style={{ fontSize:12.5, fontWeight:600, color:"#9aabbd", display:"block", marginBottom:6 }}>Model</label>
               <select className="lms-input" value={ollamaModel} onChange={e=>setOllamaModel(e.target.value)}>
                 {OLLAMA_MODELS.map(m=><option key={m} value={m}>{m}</option>)}
               </select>
             </div>
-            <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:10, padding:"11px 14px" }}>
-              <p style={{ fontSize:12.5, color:"#92400e", lineHeight:1.6 }}>⚠️ Start Ollama with CORS enabled:<br/><code style={{ background:"#fff7ed", padding:"2px 7px", borderRadius:5, fontSize:11.5 }}>OLLAMA_ORIGINS=* ollama serve</code></p>
+            <div style={{ background:"#1a0f00", border:"1.5px solid #fde68a", borderRadius:10, padding:"11px 14px" }}>
+              <p style={{ fontSize:12.5, color:"#8b5200", lineHeight:1.6 }}>⚠️ Start Ollama with CORS enabled:<br/><code style={{ background:"#1a0f00", padding:"2px 7px", borderRadius:5, fontSize:11.5 }}>OLLAMA_ORIGINS=* ollama serve</code></p>
             </div>
           </div>
         )}
@@ -4572,14 +4574,14 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       {/* Supabase status */}
       <div className="lms-card" style={{ padding:22, marginBottom:16 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}>
-          <div style={{ width:30, height:30, background:"#f0fdf4", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="db" s={16} c="#22c55e"/></div>
-          <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a" }}>Supabase Storage</p>
+          <div style={{ width:30, height:30, background:"#011a12", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="db" s={16} c="#14d9a4"/></div>
+          <p style={{ fontWeight:700, fontSize:14.5, color:"#f0e6d3" }}>Supabase Storage</p>
         </div>
-        <div style={{ background: sb?"#f0fdf4":"#fef2f2", border:`1.5px solid ${sb?"#bbf7d0":"#fecaca"}`, borderRadius:10, padding:"11px 14px", marginBottom:14 }}>
-          <p style={{ fontSize:12.5, color: sb?"#15803d":"#dc2626", fontWeight:600 }}>{sb ? "☁️ Connected — all data saves to Supabase" : "⚠️ Not connected — enter Supabase credentials on the main screen"}</p>
+        <div style={{ background: sb?"#011a12":"#1a0007", border:`1.5px solid ${sb?"#064a35":"#5c0a0a"}`, borderRadius:10, padding:"11px 14px", marginBottom:14 }}>
+          <p style={{ fontSize:12.5, color: sb?"#09a87e":"#e53e3e", fontWeight:600 }}>{sb ? "☁️ Connected — all data saves to Supabase" : "⚠️ Not connected — enter Supabase credentials on the main screen"}</p>
         </div>
         {sbStatus && (
-          <div style={{ background:sbStatus.error?"#fef2f2":"#f0fdf4", border:`1.5px solid ${sbStatus.error?"#fecaca":"#bbf7d0"}`, borderRadius:10, padding:"11px 14px", fontSize:12.5, color:sbStatus.error?"#dc2626":"#15803d", marginBottom:14 }}>
+          <div style={{ background:sbStatus.error?"#1a0007":"#011a12", border:`1.5px solid ${sbStatus.error?"#5c0a0a":"#064a35"}`, borderRadius:10, padding:"11px 14px", fontSize:12.5, color:sbStatus.error?"#e53e3e":"#09a87e", marginBottom:14 }}>
             {sbStatus.error ? `❌ ${sbStatus.error}` : `✓ Read (${sbStatus.rowCount} rows)${sbStatus.write?" · Write confirmed":""}`}
           </div>
         )}
@@ -4594,9 +4596,9 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       </div>
 
       {/* Danger zone */}
-      <div className="lms-card" style={{ padding:22, border:"1.5px solid #fecaca" }}>
-        <p style={{ fontWeight:700, fontSize:14, color:"#dc2626", marginBottom:10 }}>Danger Zone</p>
-        <p style={{ fontSize:13, color:"#6b7280", marginBottom:14 }}>Clear all course data (plan, notebooks, assignments) from Supabase for this course.</p>
+      <div className="lms-card" style={{ padding:22, border:"1.5px solid rgba(255,71,87,.3)" }}>
+        <p style={{ fontWeight:700, fontSize:14, color:"#e53e3e", marginBottom:10 }}>Danger Zone</p>
+        <p style={{ fontSize:13, color:"#4a6278", marginBottom:14 }}>Clear all course data (plan, notebooks, assignments) from Supabase for this course.</p>
         <button className="lms-btn lms-btn-rose" onClick={()=>setConfirmClear(true)}><Ic n="trash" s={14}/>Clear Course Data</button>
       </div>
     </div>
@@ -4737,34 +4739,35 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
   };
 
   return (
-    <div style={{ minHeight:"100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:"#0d1424", fontFamily:"'Syne','DM Sans',system-ui,sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
-        .cp-card{background:#fff;border-radius:16px;border:1px solid #e8edf3;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:box-shadow .18s,transform .18s}
-        .cp-card:hover{box-shadow:0 6px 24px rgba(0,0,0,.08);transform:translateY(-2px)}
-        .cp-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap}
-        .cp-btn:disabled{opacity:.5;cursor:not-allowed}
-        .cp-btn-dark{background:#0f172a;color:#fff}.cp-btn-dark:hover:not(:disabled){background:#1e293b}
-        .cp-btn-ghost{background:#f1f5f9;color:#475569;border:1.5px solid #e2e8f0}.cp-btn-ghost:hover:not(:disabled){background:#e2e8f0;color:#0f172a}
-        .cp-btn-rose{background:#fef2f2;color:#dc2626;border:1.5px solid #fecaca}.cp-btn-rose:hover:not(:disabled){background:#fee2e2}
-        .cp-btn-violet{background:#f5f3ff;color:#7c3aed;border:1.5px solid #ddd6fe}.cp-btn-violet:hover:not(:disabled){background:#ede9fe}
-        .cp-btn-red{background:#dc2626;color:#fff}.cp-btn-red:hover:not(:disabled){background:#b91c1c}
-        .cp-input{width:100%;padding:9px 13px;border:1.5px solid #e2e8f0;border-radius:9px;font-size:13.5px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:#0f172a;box-sizing:border-box}
-        .cp-input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+        .cp-card{background:#111827;border-radius:14px;border:1px solid rgba(255,255,255,.07);box-shadow:0 4px 20px rgba(0,0,0,.3);transition:box-shadow .2s,transform .2s}
+        .cp-card:hover{box-shadow:0 8px 36px rgba(0,0,0,.45),0 0 0 1px rgba(20,217,164,.1);transform:translateY(-3px)}
+        .cp-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap;letter-spacing:.01em}
+        .cp-btn:disabled{opacity:.4;cursor:not-allowed}
+        .cp-btn-dark{background:#f0e6d3;color:#0a0f1a}.cp-btn-dark:hover:not(:disabled){background:#e8d5be}
+        .cp-btn-ghost{background:rgba(255,255,255,.06);color:#9aabbd;border:1px solid rgba(255,255,255,.1)}.cp-btn-ghost:hover:not(:disabled){background:rgba(20,217,164,.1);color:#14d9a4;border-color:rgba(20,217,164,.3)}
+        .cp-btn-rose{background:rgba(255,71,87,.12);color:#ff4757;border:1px solid rgba(255,71,87,.3)}.cp-btn-rose:hover:not(:disabled){background:rgba(255,71,87,.2)}
+        .cp-btn-violet{background:rgba(245,166,35,.1);color:#f5a623;border:1px solid rgba(245,166,35,.3)}.cp-btn-violet:hover:not(:disabled){background:rgba(245,166,35,.18)}
+        .cp-btn-red{background:#ff4757;color:#fff}.cp-btn-red:hover:not(:disabled){background:#ff2e43}
+        .cp-input{width:100%;padding:10px 14px;border:1.5px solid rgba(255,255,255,.1);border-radius:8px;font-size:13.5px;font-family:inherit;outline:none;transition:border .15s,box-shadow .15s;background:rgba(255,255,255,.05);color:#f0e6d3;box-sizing:border-box}
+        .cp-input:focus{border-color:#14d9a4;box-shadow:0 0 0 3px rgba(20,217,164,.12)}
+        .cp-input::placeholder{color:#4a6278}
         @keyframes cp-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
         @keyframes cp-spin{to{transform:rotate(360deg)}}
         .cp-spinner{width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:cp-spin .6s linear infinite;display:inline-block;flex-shrink:0}
       `}</style>
 
-      <div style={{ maxWidth:1280, margin:"0 auto", padding:"40px 28px" }}>
+      <div style={{ maxWidth:1200, margin:"0 auto", padding:"40px 32px" }}>
 
         {/* Header */}
-        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:40, flexWrap:"wrap", gap:16 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:48, flexWrap:"wrap", gap:16 }}>
           <div>
-            <h1 style={{ fontSize:32, fontWeight:800, color:"#0f172a", letterSpacing:"-0.5px", margin:0 }}>My Courses</h1>
-            <p style={{ fontSize:13.5, color:"#94a3b8", margin:"4px 0 0 0" }}>
+            <h1 style={{ fontSize:36, fontWeight:800, color:"#f0e6d3", letterSpacing:"-1px", margin:0, fontFamily:"'Syne',sans-serif" }}>My Courses</h1>
+            <p style={{ fontSize:13.5, color:"#4a6278", margin:"4px 0 0 0" }}>
               {loading ? "Loading…" : courses.length === 0 ? "Create your first course to get started" : `${courses.length} course${courses.length !== 1 ? "s" : ""}`}
-              {auth?.name && <span style={{ marginLeft:8, color:"#764ba2", fontWeight:600 }}>· {auth.name}</span>}
+              {auth?.name && <span style={{ marginLeft:8, color:"#d4820a", fontWeight:600 }}>· {auth.name}</span>}
             </p>
           </div>
           {!showCreateForm && (
@@ -4777,10 +4780,10 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
 
         {/* Error Banner */}
         {error && (
-          <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:10, padding:"10px 16px", marginBottom:20, fontSize:13, color:"#dc2626", display:"flex", alignItems:"center", gap:10, animation:"cp-in .2s ease" }}>
+          <div style={{ background:"#1a0007", border:"1.5px solid #fecaca", borderRadius:10, padding:"10px 16px", marginBottom:20, fontSize:13, color:"#e53e3e", display:"flex", alignItems:"center", gap:10, animation:"cp-in .2s ease" }}>
             <span style={{ flexShrink:0 }}>⚠️</span>
             <span style={{ flex:1 }}>{error}</span>
-            <button onClick={() => setError("")} style={{ background:"none", border:"none", cursor:"pointer", color:"#dc2626", fontSize:16, padding:0, lineHeight:1 }}>×</button>
+            <button onClick={() => setError("")} style={{ background:"none", border:"none", cursor:"pointer", color:"#e53e3e", fontSize:16, padding:0, lineHeight:1 }}>×</button>
           </div>
         )}
 
@@ -4788,10 +4791,10 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
         {showCreateForm && (
           <div className="cp-card" style={{ padding:24, marginBottom:28, maxWidth:520, animation:"cp-in .2s ease" }}>
             <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18 }}>
-              <div style={{ width:34, height:34, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              <div style={{ width:34, height:34, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0a0f1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               </div>
-              <p style={{ fontWeight:700, fontSize:15, color:"#0f172a", margin:0 }}>New Course</p>
+              <p style={{ fontWeight:700, fontSize:15, color:"#f0e6d3", margin:0 }}>New Course</p>
             </div>
             <input
               className="cp-input"
@@ -4822,20 +4825,20 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
 
         {/* Loading */}
         {loading && (
-          <div style={{ textAlign:"center", padding:"60px 20px", color:"#94a3b8", fontSize:14 }}>
-            <div className="cp-spinner" style={{ margin:"0 auto 12px", width:24, height:24 }}/>
-            Loading courses from Supabase…
+          <div style={{ textAlign:"center", padding:"60px 20px", color:"#4a6278", fontSize:14 }}>
+            <div className="cp-spinner" style={{ margin:"0 auto 12px", width:24, height:24, color:"#14d9a4" }}/>
+            Loading courses…
           </div>
         )}
 
         {/* Empty State */}
         {!loading && courses.length === 0 && !showCreateForm && (
           <div style={{ textAlign:"center", padding:"80px 20px", animation:"cp-in .3s ease" }}>
-            <div style={{ width:60, height:60, background:"#f1f5f9", borderRadius:16, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px" }}>
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <div style={{ width:60, height:60, background:"#141c2e", borderRadius:16, display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px" }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#2a3f5f" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
             </div>
-            <p style={{ fontWeight:700, fontSize:16, color:"#334155", marginBottom:6 }}>No courses yet</p>
-            <p style={{ fontSize:13.5, color:"#94a3b8", maxWidth:320, margin:"0 auto 24px", lineHeight:1.65 }}>Create your first course to start building lessons and managing students.</p>
+            <p style={{ fontWeight:700, fontSize:16, color:"#d4c5ae", marginBottom:6 }}>No courses yet</p>
+            <p style={{ fontSize:13.5, color:"#4a6278", maxWidth:320, margin:"0 auto 24px", lineHeight:1.65 }}>Create your first course to start building lessons and managing students.</p>
             <button className="cp-btn cp-btn-dark" onClick={() => { setShowCreateForm(true); setError(""); }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               Create First Course
@@ -4854,33 +4857,33 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
               return (
                 <div key={course.id} className="cp-card" style={{ padding:22, display:"flex", flexDirection:"column", animation:"cp-in .25s ease" }}>
                   <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:16 }}>
-                    <div style={{ width:40, height:40, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    <div style={{ width:40, height:40, background:"linear-gradient(135deg,#14d9a4,#f5a623)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0a0f1a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
                     </div>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <p style={{ fontWeight:700, fontSize:15, color:"#0f172a", margin:"0 0 2px 0", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{course.name}</p>
-                      <p style={{ fontSize:12, color:"#94a3b8", margin:0 }}>
+                      <p style={{ fontWeight:700, fontSize:15, color:"#f0e6d3", margin:"0 0 2px 0", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{course.name}</p>
+                      <p style={{ fontSize:12, color:"#4a6278", margin:0 }}>
                         {stats.total} lesson{stats.total !== 1 ? "s" : ""}
-                        {pending > 0 && <span style={{ marginLeft:8, color:"#f59e0b", fontWeight:700 }}>· {pending} pending</span>}
+                        {pending > 0 && <span style={{ marginLeft:8, color:"#f5a623", fontWeight:700 }}>· {pending} pending</span>}
                       </p>
                     </div>
                   </div>
                   {stats.total > 0 && (
                     <div style={{ marginBottom:16 }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, fontWeight:600, color:"#94a3b8", marginBottom:5 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", fontSize:11.5, fontWeight:600, color:"#4a6278", marginBottom:5 }}>
                         <span>Progress</span>
-                        <span style={{ color:pct===100?"#22c55e":"#3b82f6" }}>{pct}%</span>
+                        <span style={{ color:pct===100?"#14d9a4":"#14d9a4" }}>{pct}%</span>
                       </div>
-                      <div style={{ height:5, borderRadius:99, background:"#f1f5f9", overflow:"hidden" }}>
-                        <div style={{ height:"100%", borderRadius:99, background:pct===100?"#22c55e":"linear-gradient(90deg,#3b82f6,#8b5cf6)", width:`${pct}%`, transition:"width .4s ease" }}/>
+                      <div style={{ height:5, borderRadius:99, background:"#141c2e", overflow:"hidden" }}>
+                        <div style={{ height:"100%", borderRadius:99, background:pct===100?"#14d9a4":"linear-gradient(90deg,#3b82f6,#8b5cf6)", width:`${pct}%`, transition:"width .4s ease" }}/>
                       </div>
                     </div>
                   )}
                   <div style={{ display:"flex", gap:8, marginBottom:18 }}>
-                    {[{v:stats.total,l:"Lessons",c:"#3b82f6"},{v:stats.completed,l:"Done",c:"#22c55e"},{v:pending,l:"Pending",c:pending>0?"#f59e0b":"#94a3b8"}].map(s=>(
-                      <div key={s.l} style={{ flex:1, background:"#f8fafc", border:"1px solid #e8edf3", borderRadius:10, padding:"10px 12px", textAlign:"center" }}>
-                        <p style={{ fontSize:18, fontWeight:800, color:s.c, margin:0, lineHeight:1 }}>{s.v}</p>
-                        <p style={{ fontSize:10.5, color:"#94a3b8", margin:"3px 0 0 0", fontWeight:600, textTransform:"uppercase", letterSpacing:".04em" }}>{s.l}</p>
+                    {[{v:stats.total,l:"Lessons",c:"#14d9a4"},{v:stats.completed,l:"Done",c:"#14d9a4"},{v:pending,l:"Pending",c:pending>0?"#f5a623":"#4a6278"}].map(s=>(
+                      <div key={s.l} style={{ flex:1, background:"#0d1424", border:"1px solid #e8edf3", borderRadius:10, padding:"10px 12px", textAlign:"center" }}>
+                        <p style={{ fontSize:18, fontWeight:800, color:s.c, margin:0, lineHeight:1, fontFamily:"'IBM Plex Mono',monospace" }}>{s.v}</p>
+                        <p style={{ fontSize:10.5, color:"#4a6278", margin:"3px 0 0 0", fontWeight:600, textTransform:"uppercase", letterSpacing:".04em" }}>{s.l}</p>
                       </div>
                     ))}
                   </div>
@@ -4888,11 +4891,11 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
                     <button className="cp-btn cp-btn-dark" style={{ flex:1, justifyContent:"center", padding:"9px 0" }} onClick={() => handleOpenCourse(course.id)} disabled={isDeleting}>Open</button>
                     <button className="cp-btn cp-btn-violet" style={{ padding:"9px 12px", position:"relative" }} onClick={() => setEnrollmentCourseId(course.id)} title="Student enrollments" disabled={isDeleting}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                      {pending > 0 && <span style={{ position:"absolute", top:-5, right:-5, background:"#f59e0b", color:"#fff", borderRadius:99, fontSize:9, fontWeight:800, padding:"2px 5px", lineHeight:1 }}>{pending}</span>}
+                      {pending > 0 && <span style={{ position:"absolute", top:-5, right:-5, background:"#f5a623", color:"#0a0f1a", borderRadius:99, fontSize:9, fontWeight:800, padding:"2px 5px", lineHeight:1 }}>{pending}</span>}
                     </button>
                     <button className="cp-btn cp-btn-rose" style={{ padding:"9px 12px" }} onClick={() => setDeleteConfirm(course.id)} disabled={isDeleting}>
                       {isDeleting
-                        ? <span className="cp-spinner" style={{ color:"#dc2626" }}/>
+                        ? <span className="cp-spinner" style={{ color:"#e53e3e" }}/>
                         : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>}
                     </button>
                   </div>
@@ -4915,13 +4918,13 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
 
         {/* Delete Confirmation Modal */}
         {deleteConfirm && (
-          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:20 }}>
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000, padding:20 }}>
             <div className="cp-card" style={{ padding:28, maxWidth:400, width:"100%", animation:"cp-in .2s ease" }}>
-              <div style={{ width:40, height:40, background:"#fef2f2", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <div style={{ width:40, height:40, background:"#1a0007", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e53e3e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
               </div>
-              <p style={{ fontWeight:700, fontSize:16, color:"#0f172a", margin:"0 0 6px 0" }}>Delete Course?</p>
-              <p style={{ fontSize:13.5, color:"#64748b", margin:"0 0 22px 0", lineHeight:1.6 }}>This will permanently delete this course and all its content from Supabase. Cannot be undone.</p>
+              <p style={{ fontWeight:700, fontSize:16, color:"#f0e6d3", margin:"0 0 6px 0" }}>Delete Course?</p>
+              <p style={{ fontSize:13.5, color:"#6b8099", margin:"0 0 22px 0", lineHeight:1.6 }}>This will permanently delete this course and all its content from Supabase. Cannot be undone.</p>
               <div style={{ display:"flex", gap:10 }}>
                 <button className="cp-btn cp-btn-ghost" style={{ flex:1, justifyContent:"center" }} onClick={() => setDeleteConfirm(null)} disabled={!!deleting}>Cancel</button>
                 <button className="cp-btn cp-btn-red" style={{ flex:1, justifyContent:"center" }} onClick={() => handleDeleteCourse(deleteConfirm)} disabled={!!deleting}>
@@ -4991,20 +4994,20 @@ export default function LMSApp() {
   // ── Trainer view ──────────────────────────────────────────────
   if (isTrainer) {
     return (
-      <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
-        <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
+      <div style={{ minHeight:"100vh", background:"#0d1424" }}>
+        <div style={{ background:"#0a0f1a", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
           <div>
-            <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
-            <p style={{ fontSize:12, color:"#718096", margin:"4px 0 0 0" }}>👨‍🏫 {auth.name}</p>
+            <h1 style={{ fontSize:20, fontWeight:700, color:"#f0e6d3", margin:0 }}>📚 LMS</h1>
+            <p style={{ fontSize:12, color:"#6b8099", margin:"4px 0 0 0" }}>👨‍🏫 {auth.name}</p>
           </div>
           <div style={{ display:"flex", gap:10, alignItems:"center" }}>
             {courseView && currentCourseId && (
-              <button onClick={()=>setCourseView(false)} style={{ padding:"8px 14px", background:"#f5f3ff", color:"#764ba2", border:"1px solid #ddd6fe", borderRadius:6, cursor:"pointer", fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}>
+              <button onClick={()=>setCourseView(false)} style={{ padding:"8px 14px", background:"#1a1205", color:"#d4820a", border:"1px solid #ddd6fe", borderRadius:6, cursor:"pointer", fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}>
                 ← Switch Course
               </button>
             )}
 
-            <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ef4444", color:"white", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
+            <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ff4757", color:"#0a0f1a", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
           </div>
         </div>
         {courseView && currentCourseId ? (
