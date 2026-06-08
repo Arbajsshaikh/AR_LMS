@@ -27,8 +27,8 @@ const SB_AUTH_KEY  = "lms_sb_auth";
    ADMIN CREDENTIALS — hardcoded, never stored in DB
    Change these to your own username/password.
 ═══════════════════════════════════════════════════════════════════ */
-const ADMIN_USERNAME = "ADMIN";
-const ADMIN_PASSWORD = "649633";
+const ADMIN_USERNAME = import.meta.env.ADMIN_USERNAME  || "";
+const ADMIN_PASSWORD = import.meta.env.ADMIN_PASSWORD  || "";
 const ADMIN_USER     = { id: "admin_1", name: "Admin", role: "admin", approved: true };
 
 /* ═══════════════════════════════════════════════════════════════════
