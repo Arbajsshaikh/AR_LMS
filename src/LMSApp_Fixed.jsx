@@ -2782,7 +2782,7 @@ Rules:
   ════════════════════════════════════════════════ */
   return (
     <ErrorBoundary>
-      <div style={{ display:"flex", width:"100vw", height: studentMode ? "calc(100vh - 68px)" : "100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
+      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
           *{box-sizing:border-box;margin:0;padding:0}
@@ -2944,7 +2944,7 @@ Rules:
             )}
           </header>
 
-          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 100px", minHeight:0 }}>
+          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 48px", minHeight:0 }}>
             <ErrorBoundary>
               {page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
@@ -4799,7 +4799,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
   };
 
   return (
-    <div style={{ animation:"lms-in .2s ease",paddingBottom: 80 }}>
+    <div style={{ animation:"lms-in .2s ease" }}>
       <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
         {!studentMode && (
           <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" }}
