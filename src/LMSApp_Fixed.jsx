@@ -4799,7 +4799,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
   };
 
   return (
-    <div style={{ animation:"lms-in .2s ease" }}>
+    <div style={{ animation:"lms-in .2s ease",paddingBottom: 80 }}>
       <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
         {!studentMode && (
           <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" }}
