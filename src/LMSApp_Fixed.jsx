@@ -2944,7 +2944,7 @@ Rules:
             )}
           </header>
 
-          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 48px", minHeight:0 }}>
+          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 80px", minHeight:0 }}>
             <ErrorBoundary>
               {page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
@@ -3328,7 +3328,7 @@ Day 2: [Topic]
   };
 
   return (
-    <div style={{ maxWidth:900, animation:"lms-in .3s ease", paddingBottom:40 }}>
+    <div style={{ maxWidth:900, animation:"lms-in .3s ease", paddingBottom:60 }}>
       <div style={{ marginBottom:28 }}>
         <h1 style={{ fontSize:26, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Setup Your Course Plan</h1>
         <p style={{ color:"#64748b", fontSize:14, marginTop:5 }}>Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
@@ -3680,7 +3680,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
   })();
 
   return (
-    <div style={{ animation:"lms-in .3s ease", display:"flex", flexDirection:"column", gap:16, paddingBottom:40 }}>
+    <div style={{ animation:"lms-in .3s ease", display:"flex", flexDirection:"column", gap:16, paddingBottom:60 }}>
 
       {/* Inline confirm dialog — replaces window.confirm which is blocked in sandboxed iframes */}
       {confirmWeek && (
@@ -4150,7 +4150,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
   ];
 
   return (
-    <div style={{ animation:"lms-in .3s ease" }}>
+    <div style={{ animation:"lms-in .3s ease", paddingBottom:60 }}>
       {/* FIX 8: pending generation indicator — FIX 9: use exact key prefix matching */}
       {Object.keys(pendingGen).filter(pk => pk.endsWith(`-${k}`)).length > 0 && (
         <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:10, padding:"10px 14px", marginBottom:16, display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
