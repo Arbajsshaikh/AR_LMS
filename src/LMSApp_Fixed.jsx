@@ -4898,7 +4898,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
           </div>
 
           {!submitted && (
-            <button className="lms-btn lms-btn-dark" style={{ marginTop:16, width:"100%", justifyContent:"center", padding:"12px 0" }}
+            <button className="lms-btn lms-btn-dark" style={{ marginTop:16, width:"100%", justifyContent:"center, padding:"12px 0",margin-bottom:50px;" }}
               onClick={handleSubmit}>
               <Ic n="check" s={15}/>Submit Quiz
             </button>
