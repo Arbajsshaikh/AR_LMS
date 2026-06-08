@@ -2786,7 +2786,7 @@ Rules:
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
           *{box-sizing:border-box;margin:0;padding:0}
-          html,body,#root{width:100%;height:100%;overflow:hidden}
+          html,body,#root{width:100%;height:100%;}
           ::-webkit-scrollbar{width:5px;height:5px}
           ::-webkit-scrollbar-track{background:transparent}
           ::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:99px}
