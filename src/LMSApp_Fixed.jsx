@@ -218,6 +218,7 @@ function dbRowToCourse(row) {
     dayStatus: row.day_status || {},
     dayData: row.day_data || {},
     dayMap: row.day_map || {},
+    dayOverrides: row.day_overrides || {},   // { "YYYY-MM-DD": { type:"holiday"|"extra"|"special", label:"..." } }
     calYear: row.cal_year || new Date().getFullYear(),
     calMonth: row.cal_month !== undefined ? row.cal_month : new Date().getMonth(),
     createdAt: row.created_at,
@@ -237,6 +238,7 @@ function courseToDbRow(course) {
     day_status: course.dayStatus || {},
     day_data: course.dayData || {},
     day_map: course.dayMap || {},
+    day_overrides: course.dayOverrides || {},
     cal_year: course.calYear || new Date().getFullYear(),
     cal_month: course.calMonth !== undefined ? course.calMonth : new Date().getMonth(),
     created_at: course.createdAt || new Date().toISOString(),
@@ -251,7 +253,7 @@ async function sbSaveCourseData(sb, courseId, patch) {
   const fieldMap = {
     planText: "plan_text", planDays: "plan_days", startDate: "start_date",
     monfri: "monfri", dayStatus: "day_status", dayData: "day_data",
-    dayMap: "day_map", calYear: "cal_year", calMonth: "cal_month",
+    dayMap: "day_map", dayOverrides: "day_overrides", calYear: "cal_year", calMonth: "cal_month",
     name: "name", trainerId: "trainer_id",
   };
   for (const [jsKey, dbCol] of Object.entries(fieldMap)) {
@@ -268,7 +270,7 @@ async function sbCreateCourse(sb, name, trainerId) {
     trainerId: trainerId || (() => { throw new Error("sbCreateCourse: trainerId is required"); })(),
     planText: "", planDays: [],
     startDate: new Date().toISOString().split("T")[0],
-    monfri: true, dayStatus: {}, dayData: {}, dayMap: {},
+    monfri: true, dayStatus: {}, dayData: {}, dayMap: {}, dayOverrides: {},
     calYear: new Date().getFullYear(),
     calMonth: new Date().getMonth(),
     createdAt: new Date().toISOString(),
@@ -517,20 +519,37 @@ function parsePlan(text) {
   return days;
 }
 
-function buildDayMap(planDays, startDate, monfriOnly) {
+function buildDayMap(planDays, startDate, monfriOnly, dayOverrides = {}) {
   const map = {};
   let date = new Date(startDate);
   let idx = 0;
   // FIX 14: Dynamic tries limit — weekday-only needs ~1.4x iterations vs all-days
-  const maxTries = Math.ceil(planDays.length * (monfriOnly ? 2 : 1.1)) + 30;
+  // Add extra buffer for holidays that shift days forward
+  const holidayCount = Object.values(dayOverrides).filter(o => o.type === "holiday" || o.type === "special").length;
+  const maxTries = Math.ceil(planDays.length * (monfriOnly ? 2 : 1.1)) + 30 + holidayCount * 2;
   let tries = 0;
   while (idx < planDays.length && tries < maxTries) {
+    const k = toKey(date.getFullYear(), date.getMonth(), date.getDate());
     const dow = date.getDay();
     const isWeekend = dow === 0 || dow === 6;
-    if (!monfriOnly || !isWeekend) {
-      map[toKey(date.getFullYear(), date.getMonth(), date.getDate())] = idx;
-      idx++;
+    const override = dayOverrides[k];
+    // Skip weekends if Mon-Fri mode
+    if (monfriOnly && isWeekend) {
+      date.setDate(date.getDate() + 1);
+      tries++;
+      continue;
     }
+    // Skip holiday dates — plan shifts forward automatically
+    // Also skip "special" days — they have custom content but still shift the plan forward
+    if (override?.type === "holiday" || override?.type === "special") {
+      date.setDate(date.getDate() + 1);
+      tries++;
+      continue;
+    }
+    // "extra" days occupy the slot but belong to the day's own entry, not a plan day
+    // They are NOT in dayMap — they're shown separately on the calendar
+    map[k] = idx;
+    idx++;
     date.setDate(date.getDate() + 1);
     tries++;
   }
@@ -1134,7 +1153,7 @@ function LoginScreen({ onLogin, sb }) {
   const [studentEmail, setStudentEmail]       = useState("");
   const [studentName, setStudentName]         = useState("");
   const [studentPassword, setStudentPassword] = useState(""); // FIX #3
-  const [studentCourseId, setStudentCourseId] = useState("");
+  const [studentCourseIds, setStudentCourseIds] = useState([]); // multi-course selection
   const [error, setError]   = useState("");
   const [loading, setLoading] = useState(false);
   const [allCourses, setAllCourses] = useState([]);
@@ -1193,32 +1212,38 @@ function LoginScreen({ onLogin, sb }) {
       if (!studentName.trim() || !studentEmail.trim()) throw new Error("Fill in all fields");
       // FIX #3: require a password on registration
       if (!studentPassword.trim() || studentPassword.trim().length < 6) throw new Error("Password must be at least 6 characters");
-      if (!studentCourseId) throw new Error("Please select a course to enroll in");
+      if (!studentCourseIds.length) throw new Error("Please select at least one course to enroll in");
       // FIX #14: filter server-side by email — don't fetch all students
       const existingRows = await sb.select("lms_students", `email=eq.${encodeURIComponent(studentEmail.trim())}&limit=1`);
       if (existingRows && existingRows.length > 0) throw new Error("Email already registered");
-      const selectedCourse = allCourses.find(c => c.id === studentCourseId);
+      // Use the first selected course's trainer as the primary trainer
+      const firstCourse = allCourses.find(c => c.id === studentCourseIds[0]);
+      if (!firstCourse?.trainerId) throw new Error("Could not determine trainer for the selected course");
       const newId = generateId();
       // FIX #3: hash the password before storing
       const passwordHash = await hashPassword(studentPassword.trim(), newId);
+      const pendingCourseIds = studentCourseIds.map(cid => {
+        const course = allCourses.find(c => c.id === cid);
+        return { courseId: cid, courseName: course?.name || "", requestedAt: new Date().toISOString() };
+      });
       const newStudent = {
         id: newId,
         name: studentName.trim(),
         email: studentEmail.trim(),
         passwordHash,
-        trainerId: selectedCourse?.trainerId || (() => { throw new Error("Could not determine trainer for the selected course"); })(),
+        trainerId: firstCourse.trainerId,
         approved: false,
-        pendingCourseIds: [{ courseId: studentCourseId, courseName: selectedCourse?.name || "", requestedAt: new Date().toISOString() }],
+        pendingCourseIds,
         enrolledCourseIds: [],
-        requestedCourseId: studentCourseId,
-        requestedCourseName: selectedCourse?.name || "",
+        requestedCourseId: studentCourseIds[0],
+        requestedCourseName: firstCourse?.name || "",
         requestedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       };
       await sbSaveStudent(sb, newStudent);
-      alert("✅ Registered! Wait for trainer approval.");
+      alert(`✅ Registered for ${studentCourseIds.length} course(s)! Wait for trainer approval.`);
       setMode("select");
-      setStudentName(""); setStudentEmail(""); setStudentCourseId(""); setStudentPassword("");
+      setStudentName(""); setStudentEmail(""); setStudentCourseIds([]); setStudentPassword("");
     } catch (e) { setError(e.message); }
     setLoading(false);
   };
@@ -1330,13 +1355,48 @@ function LoginScreen({ onLogin, sb }) {
             <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
             {/* FIX #3: require password at registration */}
             <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <select value={studentCourseId} onChange={e=>setStudentCourseId(e.target.value)} style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14, color:studentCourseId?"#1a202c":"#718096", background:"white" }}>
-              <option value="">— Select a course to enroll in —</option>
-              {allCourses.map(c => {
-                const trainer = trainersMap[c.trainerId];
-                return <option key={c.id} value={c.id}>{c.name}{trainer ? ` (${trainer.name})` : ""}</option>;
-              })}
-            </select>
+
+            {/* Multi-course selection — grouped by trainer */}
+            <div style={{ border:"1px solid #cbd5e1", borderRadius:8, overflow:"hidden" }}>
+              <div style={{ background:"#f7f7f7", padding:"8px 12px", fontSize:13, fontWeight:700, color:"#4a5568", borderBottom:"1px solid #e2e8f0" }}>
+                📚 Select Course(s) to Enroll In {studentCourseIds.length > 0 && <span style={{ marginLeft:6, background:"#764ba2", color:"#fff", borderRadius:99, fontSize:11, padding:"1px 7px" }}>{studentCourseIds.length} selected</span>}
+              </div>
+              <div style={{ maxHeight:220, overflowY:"auto", padding:"8px 4px" }}>
+                {allCourses.length === 0
+                  ? <p style={{ padding:"12px 16px", color:"#94a3b8", fontSize:13 }}>No courses available yet.</p>
+                  : (() => {
+                      // Group courses by trainer
+                      const byTrainer = {};
+                      allCourses.forEach(c => {
+                        const tName = trainersMap[c.trainerId]?.name || "Unknown Trainer";
+                        if (!byTrainer[tName]) byTrainer[tName] = [];
+                        byTrainer[tName].push(c);
+                      });
+                      return Object.entries(byTrainer).map(([tName, courses]) => (
+                        <div key={tName}>
+                          <div style={{ padding:"5px 12px 3px", fontSize:11, fontWeight:700, color:"#764ba2", textTransform:"uppercase", letterSpacing:".06em" }}>👨‍🏫 {tName}</div>
+                          {courses.map(c => {
+                            const checked = studentCourseIds.includes(c.id);
+                            return (
+                              <label key={c.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 14px", cursor:"pointer", background:checked?"#f5f3ff":"transparent", transition:"background .12s" }}>
+                                <input type="checkbox" checked={checked}
+                                  onChange={e => {
+                                    if (e.target.checked) setStudentCourseIds(prev => [...prev, c.id]);
+                                    else setStudentCourseIds(prev => prev.filter(id => id !== c.id));
+                                  }}
+                                  style={{ width:15, height:15, accentColor:"#764ba2", cursor:"pointer" }}
+                                />
+                                <span style={{ fontSize:13.5, color:checked?"#5b21b6":"#2d3748", fontWeight:checked?600:400 }}>{c.name}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ));
+                    })()
+                }
+              </div>
+            </div>
+
             <button onClick={handleStudentRegister} disabled={loading} style={{ padding:12, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Registering...":"Register"}</button>
             <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
           </div>
@@ -1637,6 +1697,14 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Post-login enrollment request state
+  const [showEnrollPanel, setShowEnrollPanel]   = useState(false);
+  const [allCourses, setAllCourses]             = useState([]);
+  const [trainersMap, setTrainersMap]           = useState({});
+  const [selectedEnrollIds, setSelectedEnrollIds] = useState([]);
+  const [enrolling, setEnrolling]               = useState(false);
+  const [enrollMsg, setEnrollMsg]               = useState("");
+
   const loadStudent = () => {
     if (!sb) return;
     setLoading(true);
@@ -1657,8 +1725,55 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   // FIX 12: re-runs when refreshKey increments (manual refresh button)
   useEffect(() => { loadStudent(); }, [sb, auth.id, refreshKey]);
 
+  // Load all available courses whenever enrollment panel opens
+  useEffect(() => {
+    if (!showEnrollPanel || !sb) return;
+    sbGetCourses(sb).then(rows => {
+      const courses = rows.map(dbRowToCourse);
+      setAllCourses(courses);
+      sbGetTrainers(sb).then(trainers => {
+        const m = {};
+        trainers.forEach(t => { m[t.id] = t; });
+        setTrainersMap(m);
+      }).catch(() => {});
+    }).catch(() => {});
+  }, [showEnrollPanel, sb]);
+
+  const handleRequestEnrollment = async () => {
+    if (!selectedEnrollIds.length) { setEnrollMsg("Please select at least one course."); return; }
+    setEnrolling(true); setEnrollMsg("");
+    try {
+      const rows = await sb.select("lms_students", `id=eq.${encodeURIComponent(auth.id)}&limit=1`);
+      const student = rows?.[0] ? dbRowToStudent(rows[0]) : null;
+      if (!student) throw new Error("Could not load your profile. Please refresh.");
+      const existing = [
+        ...(student.pendingCourseIds || []).map(p => p.courseId),
+        ...(student.enrolledCourseIds || []).map(e => e.courseId),
+      ];
+      const newRequests = selectedEnrollIds.filter(id => !existing.includes(id));
+      if (!newRequests.length) { setEnrollMsg("You are already enrolled or pending in all selected courses."); setEnrolling(false); return; }
+      const newPending = [
+        ...(student.pendingCourseIds || []),
+        ...newRequests.map(cid => {
+          const c = allCourses.find(x => x.id === cid);
+          return { courseId: cid, courseName: c?.name || "", requestedAt: new Date().toISOString() };
+        }),
+      ];
+      await sbSaveStudent(sb, { ...student, pendingCourseIds: newPending });
+      setEnrollMsg(`✅ Enrollment request sent for ${newRequests.length} course(s)! Wait for trainer approval.`);
+      setSelectedEnrollIds([]);
+    } catch(e) { setEnrollMsg("❌ " + e.message); }
+    setEnrolling(false);
+  };
+
   const hasAnyCourse = enrolledCourses.length > 0;
   const activeCourseName = enrolledCourses.find(e => e.courseId === activeCourseId)?.courseName || "Your Course";
+
+  // Courses not yet enrolled/pending — for the enroll panel
+  const availableToEnroll = allCourses.filter(c => {
+    const pendingIds = []; // will check against live student data inside handler
+    return !enrolledCourses.some(e => e.courseId === c.id);
+  });
 
   if (loading) return <div style={{ textAlign:"center", padding:"60px 20px", color:"#94a3b8", fontSize:14 }}>Loading…</div>;
 
@@ -1677,6 +1792,14 @@ function StudentCourseView({ sb, auth, handleLogout }) {
               {enrolledCourses.map(e=><option key={e.courseId} value={e.courseId}>{e.courseName}</option>)}
             </select>
           )}
+          {/* Enroll in Another Course */}
+          <button
+            onClick={()=>{ setShowEnrollPanel(p=>!p); setEnrollMsg(""); setSelectedEnrollIds([]); }}
+            style={{ padding:"8px 12px", background:"#f5f3ff", color:"#764ba2", border:"1px solid #ddd6fe", borderRadius:6, cursor:"pointer", fontSize:12, fontWeight:600 }}
+            title="Request enrollment in additional courses"
+          >
+            ➕ More Courses
+          </button>
           {/* FIX: always show refresh — lets students re-check enrollment after approval */}
           <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"8px 12px", background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:6, cursor:"pointer", fontSize:12, fontWeight:600 }}>
             🔄 Refresh
@@ -1684,6 +1807,83 @@ function StudentCourseView({ sb, auth, handleLogout }) {
           <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ef4444", color:"white", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
         </div>
       </div>
+
+      {/* ── Enroll in Another Course Panel ── */}
+      {showEnrollPanel && (
+        <div style={{ background:"white", borderBottom:"2px solid #ede9fe", padding:"18px 20px", boxShadow:"0 4px 16px rgba(118,75,162,.08)" }}>
+          <div style={{ maxWidth:720, margin:"0 auto" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+              <div>
+                <p style={{ fontWeight:700, fontSize:15, color:"#5b21b6", margin:0 }}>📚 Request Enrollment in More Courses</p>
+                <p style={{ fontSize:12, color:"#94a3b8", margin:"2px 0 0 0" }}>Select courses below — your trainer will be notified to approve you.</p>
+              </div>
+              <button onClick={()=>setShowEnrollPanel(false)} style={{ background:"#f1f5f9", border:"none", borderRadius:8, cursor:"pointer", padding:"5px 8px", color:"#64748b" }}>✕</button>
+            </div>
+
+            {allCourses.length === 0
+              ? <p style={{ color:"#94a3b8", fontSize:13 }}>Loading available courses…</p>
+              : (()=>{
+                  // Group by trainer
+                  const byTrainer = {};
+                  allCourses.forEach(c => {
+                    const tName = trainersMap[c.trainerId]?.name || "Unknown Trainer";
+                    if (!byTrainer[tName]) byTrainer[tName] = [];
+                    byTrainer[tName].push(c);
+                  });
+                  return (
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:12, marginBottom:14 }}>
+                      {Object.entries(byTrainer).map(([tName, courses]) => (
+                        <div key={tName} style={{ background:"#faf5ff", border:"1.5px solid #ede9fe", borderRadius:10, padding:"10px 14px", minWidth:200, flex:"1 1 200px" }}>
+                          <div style={{ fontSize:11, fontWeight:700, color:"#764ba2", textTransform:"uppercase", letterSpacing:".06em", marginBottom:8 }}>👨‍🏫 {tName}</div>
+                          {courses.map(c => {
+                            const alreadyEnrolled = enrolledCourses.some(e => e.courseId === c.id);
+                            const checked = selectedEnrollIds.includes(c.id);
+                            return (
+                              <label key={c.id} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6, cursor:alreadyEnrolled?"default":"pointer", opacity:alreadyEnrolled?.55:1 }}>
+                                <input type="checkbox"
+                                  checked={checked || alreadyEnrolled}
+                                  disabled={alreadyEnrolled}
+                                  onChange={e => {
+                                    if (e.target.checked) setSelectedEnrollIds(prev => [...prev, c.id]);
+                                    else setSelectedEnrollIds(prev => prev.filter(id => id !== c.id));
+                                  }}
+                                  style={{ width:14, height:14, accentColor:"#764ba2", cursor:alreadyEnrolled?"default":"pointer" }}
+                                />
+                                <span style={{ fontSize:13, color:alreadyEnrolled?"#94a3b8":checked?"#5b21b6":"#374151", fontWeight:checked?600:400 }}>
+                                  {c.name} {alreadyEnrolled && <span style={{ fontSize:10, color:"#22c55e", fontWeight:700 }}>✓ enrolled</span>}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()
+            }
+
+            {enrollMsg && (
+              <div style={{ padding:"9px 14px", borderRadius:8, marginBottom:10, background:enrollMsg.startsWith("✅")?"#f0fdf4":"#fef2f2", border:`1px solid ${enrollMsg.startsWith("✅")?"#bbf7d0":"#fecaca"}`, fontSize:13, color:enrollMsg.startsWith("✅")?"#15803d":"#dc2626", fontWeight:600 }}>
+                {enrollMsg}
+              </div>
+            )}
+
+            <div style={{ display:"flex", gap:10 }}>
+              <button
+                onClick={handleRequestEnrollment}
+                disabled={enrolling || !selectedEnrollIds.length}
+                style={{ padding:"9px 20px", background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:700, cursor:"pointer", fontSize:13, opacity:(enrolling||!selectedEnrollIds.length)?.6:1 }}
+              >
+                {enrolling ? "Sending…" : `Request Enrollment (${selectedEnrollIds.length} selected)`}
+              </button>
+              <button onClick={()=>{ setShowEnrollPanel(false); setEnrollMsg(""); setSelectedEnrollIds([]); }} style={{ padding:"9px 16px", background:"#f1f5f9", color:"#475569", border:"1px solid #e2e8f0", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:13 }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {hasAnyCourse && activeCourseId ? (
         <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} />
       ) : (
@@ -1692,9 +1892,14 @@ function StudentCourseView({ sb, auth, handleLogout }) {
             <div style={{ fontSize:48, marginBottom:16 }}>⏳</div>
             <h2 style={{ color:"#1a202c", margin:"0 0 10px 0", fontSize:22, fontWeight:700 }}>Awaiting Course Assignment</h2>
             <p style={{ color:"#94a3b8", margin:"0 0 20px 0", lineHeight:1.6 }}>Your account is pending or no course has been assigned yet. Please contact your trainer — then click Refresh above.</p>
-            <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"10px 24px", background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:14 }}>
-              🔄 Check Again
-            </button>
+            <div style={{ display:"flex", gap:10, justifyContent:"center", flexWrap:"wrap" }}>
+              <button onClick={()=>setRefreshKey(k=>k+1)} style={{ padding:"10px 24px", background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:14 }}>
+                🔄 Check Again
+              </button>
+              <button onClick={()=>{ setShowEnrollPanel(true); setEnrollMsg(""); setSelectedEnrollIds([]); }} style={{ padding:"10px 24px", background:"#f5f3ff", color:"#764ba2", border:"1px solid #ddd6fe", borderRadius:8, fontWeight:600, cursor:"pointer", fontSize:14 }}>
+                ➕ Request a Course
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1724,6 +1929,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [startDate, setStartDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [monfri,    setMonfri]    = useState(true);
   const [dayMap,    setDayMap]    = useState({});
+  const [dayOverrides, setDayOverrides] = useState({}); // { "YYYY-MM-DD": { type:"holiday"|"extra"|"special", label:"..." } }
 
   const [calYear,  setCalYear]  = useState(new Date().getFullYear());
   const [calMonth, setCalMonth] = useState(new Date().getMonth());
@@ -1777,6 +1983,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       if (course.startDate) setStartDate(course.startDate);
       if (course.monfri !== undefined) setMonfri(course.monfri);
       if (course.dayStatus) setDayStatus(course.dayStatus);
+      if (course.dayOverrides) setDayOverrides(course.dayOverrides);
       if (course.calYear)   setCalYear(course.calYear);
       if (course.calMonth !== undefined) setCalMonth(course.calMonth);
 
@@ -1830,6 +2037,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           if (course.startDate)             setStartDate(course.startDate);
           if (course.monfri !== undefined)  setMonfri(course.monfri);
           if (course.dayStatus)             setDayStatus(course.dayStatus);
+          if (course.dayOverrides)          setDayOverrides(course.dayOverrides);
         }
         const contentByDay = await sbGetAllDayContent(sb, courseId);
         // FIX: merge course.dayData so days only in the course row are included
@@ -1984,20 +2192,20 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         }
         const now = new Date().toISOString();
         await sbSaveCourseData(sb, courseId, {
-          planText, planDays, startDate, monfri, dayStatus,
+          planText, planDays, startDate, monfri, dayStatus, dayOverrides,
           dayData: lightDayData, calYear, calMonth,
         });
         lastSavedAtRef.current = now;
       } catch (e) { console.warn("Supabase save error:", e.message); }
     }, 1500);
     return () => clearTimeout(timer);
-  }, [planText, planDays, startDate, monfri, dayStatus, dayData, calYear, calMonth, courseId, sb, studentMode]);
+  }, [planText, planDays, startDate, monfri, dayStatus, dayOverrides, dayData, calYear, calMonth, courseId, sb, studentMode]);
 
   /* ════ Rebuild dayMap ════ */
   useEffect(() => {
     if (!planDays.length) return;
-    setDayMap(buildDayMap(planDays, new Date(startDate + "T12:00:00"), monfri));
-  }, [planDays, startDate, monfri]);
+    setDayMap(buildDayMap(planDays, new Date(startDate + "T12:00:00"), monfri, dayOverrides));
+  }, [planDays, startDate, monfri, dayOverrides]);
 
   /* ════ Search keyboard shortcut ════ */
   useEffect(() => {
@@ -2022,7 +2230,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -2097,7 +2305,7 @@ Include at least 3 code examples with extensive comments.` }
       ]);
       validateAIResponse(text, "notebook");
       const codeBlocks = extractCodeBlocks(text);
-      updateDay(k, { notebook: text, codeBlocks });
+      updateDay(k, { notebook: text, codeBlocks, generatedForTopic: day.topic });
       if (!opts.silent) notify("Notebook generated!");
     } catch(e) {
       if (!opts.silent) notify(`Notebook: ${e.message}`, "err");
@@ -2142,7 +2350,7 @@ For each task use this format:
 **Hint:** [helpful hint]` }
       ]);
       validateAIResponse(text, "general");
-      updateDay(k, { examples: text });
+      updateDay(k, { examples: text, generatedForTopic: day.topic });
       if (!opts.silent) notify("Live examples generated!");
     } catch(e) {
       if (!opts.silent) notify(`Examples: ${e.message}`, "err");
@@ -2191,7 +2399,7 @@ Include:
 [list of topics to explore next]` }
       ]);
       validateAIResponse(text, "general");
-      updateDay(k, { resources: text });
+      updateDay(k, { resources: text, generatedForTopic: day.topic });
       if (!opts.silent) notify("Resources generated!");
     } catch(e) {
       if (!opts.silent) notify(`Resources: ${e.message}`, "err");
@@ -2261,7 +2469,7 @@ Output: [example]
 [breakdown of how marks are awarded]` }
       ]);
       validateAIResponse(text, "assignment");
-      updateDay(k, { assignment: text });
+      updateDay(k, { assignment: text, generatedForTopic: day.topic });
       if (!opts.silent) notify("Assignment generated!");
     } catch(e) {
       if (!opts.silent) notify(`Assignment: ${e.message}`, "err");
@@ -2328,7 +2536,7 @@ Output: [example]
 [5 specific tips to keep energy high]` }
       ]);
       validateAIResponse(text, "general");
-      updateDay(k, { teachingGuide: text });
+      updateDay(k, { teachingGuide: text, generatedForTopic: day.topic });
       if (!opts.silent) notify("Teaching guide generated!");
     } catch(e) {
       if (!opts.silent) notify(`Guide: ${e.message}`, "err");
@@ -2391,7 +2599,7 @@ Rules:
       });
       if (valid.length === 0) throw new Error("Quiz: all questions failed validation — regenerate");
       if (valid.length < questions.length) notify(`Quiz: ${questions.length - valid.length} malformed question(s) skipped`, "warn");
-      updateDay(k, { quiz: valid });
+      updateDay(k, { quiz: valid, generatedForTopic: day.topic });
       if (!opts.silent) notify("Quiz generated!");
     } catch(e) {
       if (!opts.silent) notify(`Quiz: ${e.message}`, "err");
@@ -2549,6 +2757,7 @@ Rules:
     setPlanDays(days);
     setDayStatus({});
     setDayData({});
+    setDayOverrides({}); // new plan = new dates, old overrides no longer map correctly
     setPage("calendar");
     notify(`${days.length} days loaded!`);
   };
@@ -2613,6 +2822,7 @@ Rules:
           .day-cell:hover{box-shadow:0 4px 16px rgba(0,0,0,.08);transform:translateY(-1px);border-color:#cbd5e1}
           .day-cell.today{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.2)}
           .day-cell.has-plan:hover{border-color:#94a3b8}
+          .day-cell:hover .day-override-btn{opacity:1!important}
           @media(max-width:768px){
             .lms-sidebar{position:fixed!important;left:0;top:0;height:100vh;z-index:200;transform:translateX(-100%);transition:transform .25s}
             .lms-sidebar.open{transform:translateX(0)!important}
@@ -2748,7 +2958,7 @@ Rules:
                   </div>
                 </div>
               )}
-              {page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} onGenWeek={async(days,onProgress)=>{
+              {page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onGenWeek={async(days,onProgress)=>{
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
                 let done=0; const total=days.length*gens.length; const failed=[];
                 for(const d of days){ for(const{fn,label}of gens){ try{await fn(d,{silent:true});}catch(e){failed.push(`Day ${d.dayNum} ${label}: ${e.message}`);} done++; onProgress&&onProgress(done,total); } }
@@ -2774,6 +2984,16 @@ Rules:
                   updateDay={updateDay} notify={notify}
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
+                  onEditTopic={(newTopic) => {
+                    // Find the planDays index for this day key and update only its topic
+                    const pidx = dayMap[selDay.key];
+                    if (pidx === undefined) return;
+                    const updated = planDays.map((d, i) => i === pidx ? { ...d, topic: newTopic } : d);
+                    setPlanDays(updated);
+                    // Also sync selDay so the header reflects the change immediately
+                    setSelDay(prev => ({ ...prev, topic: newTopic }));
+                    notify(`✏️ Topic updated — all generated content is preserved`);
+                  }}
                 />
               )}
               {page==="settings" && !studentMode && (
@@ -2788,6 +3008,7 @@ Rules:
                   setPlanText={setPlanText} setPlanDays={setPlanDays}
                   setStartDate={setStartDate} setMonfri={setMonfri}
                   setDayStatus={setDayStatus} setDayData={setDayData}
+                  setDayOverrides={setDayOverrides}
                 />
               )}
             </ErrorBoundary>
@@ -3295,7 +3516,7 @@ Day 2: [Topic]
 /* ═══════════════════════════════════════════════════════════════════
    CALENDAR PAGE — FIX 10: responsive layout
 ═══════════════════════════════════════════════════════════════════ */
-function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode }) {
+function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides }) {
   const todayK = todayKey();
   const dim = daysInMonth(calYear, calMonth);
   const fw  = firstWeekday(calYear, calMonth);
@@ -3306,8 +3527,42 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
   const [weekProgress, setWeekProgress] = useState(null);
   const [confirmWeek, setConfirmWeek] = useState(null);
 
+  // Day-override modal state (holiday / extra topic)
+  const [overrideModal, setOverrideModal] = useState(null); // { dateKey, mode: "new"|"edit" }
+  const [overrideType, setOverrideType]   = useState("holiday"); // "holiday" | "extra" | "special"
+  const [overrideLabel, setOverrideLabel] = useState("");
+
   const prev = () => { if(calMonth===0){setCalMonth(11);setCalYear(y=>y-1);}else setCalMonth(m=>m-1); };
   const next = () => { if(calMonth===11){setCalMonth(0);setCalYear(y=>y+1);}else setCalMonth(m=>m+1); };
+
+  // ── Override helpers ──
+  const openOverrideModal = (dateKey) => {
+    if (!setDayOverrides) return; // students can't edit
+    const existing = dayOverrides[dateKey];
+    setOverrideType(existing?.type || "holiday");
+    setOverrideLabel(existing?.label || "");
+    setOverrideModal({ dateKey, mode: existing ? "edit" : "new" });
+  };
+
+  const saveOverride = () => {
+    if (!overrideLabel.trim()) { notify("Please enter a label", "err"); return; }
+    const updated = { ...dayOverrides, [overrideModal.dateKey]: { type: overrideType, label: overrideLabel.trim() } };
+    setDayOverrides(updated);
+    notify(
+      overrideType === "holiday" ? `🏖️ Holiday set: "${overrideLabel.trim()}" — plan shifts forward` :
+      overrideType === "special" ? `⭐ Special day added: "${overrideLabel.trim()}" — plan shifts forward` :
+      `📌 Extra content added for ${overrideModal.dateKey}`
+    );
+    setOverrideModal(null); setOverrideLabel("");
+  };
+
+  const removeOverride = (dateKey) => {
+    const updated = { ...dayOverrides };
+    delete updated[dateKey];
+    setDayOverrides(updated);
+    notify("Override removed — plan recalculated");
+    setOverrideModal(null); setOverrideLabel("");
+  };
 
   const monthEvents = Object.entries(dayMap).filter(([k])=>{
     const [y,m] = k.split("-").map(Number);
@@ -3437,10 +3692,107 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
         </div>
       )}
 
+      {/* ── Day Override Modal (Holiday / Extra topic) ── */}
+      {overrideModal && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+          onClick={e=>{ if(e.target===e.currentTarget){ setOverrideModal(null); setOverrideLabel(""); } }}>
+          <div style={{ background:"#fff", borderRadius:18, padding:28, maxWidth:420, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.28)" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:4 }}>
+              {overrideModal.mode === "edit" ? "Edit Day Override" : "Mark Day"}
+            </p>
+            <p style={{ fontSize:12.5, color:"#94a3b8", marginBottom:18 }}>{overrideModal.dateKey}</p>
+
+            {/* Type selector */}
+            <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+              <button
+                onClick={()=>setOverrideType("holiday")}
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="holiday"?"#f59e0b":"#e2e8f0"}`, background:overrideType==="holiday"?"#fffbeb":"#f8fafc", color:overrideType==="holiday"?"#92400e":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                🏖️ Holiday
+              </button>
+              <button
+                onClick={()=>setOverrideType("special")}
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="special"?"#f97316":"#e2e8f0"}`, background:overrideType==="special"?"#fff7ed":"#f8fafc", color:overrideType==="special"?"#9a3412":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                ⭐ Special Day
+              </button>
+              <button
+                onClick={()=>setOverrideType("extra")}
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="extra"?"#8b5cf6":"#e2e8f0"}`, background:overrideType==="extra"?"#f5f3ff":"#f8fafc", color:overrideType==="extra"?"#5b21b6":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                📌 Extra
+              </button>
+            </div>
+
+            {/* Type explanation */}
+            <div style={{
+              background: overrideType==="holiday"?"#fffbeb": overrideType==="special"?"#fff7ed":"#f5f3ff",
+              border:`1px solid ${overrideType==="holiday"?"#fde68a": overrideType==="special"?"#fed7aa":"#ddd6fe"}`,
+              borderRadius:9, padding:"9px 12px", marginBottom:14, fontSize:12.5,
+              color: overrideType==="holiday"?"#92400e": overrideType==="special"?"#9a3412":"#5b21b6",
+              lineHeight:1.55
+            }}>
+              {overrideType==="holiday"
+                ? "⤷ This date is skipped entirely. No content. All plan days after it shift forward by 1."
+                : overrideType==="special"
+                ? "⤷ A custom-titled day that shifts the plan forward by 1. It has its own full workspace — you can generate a Notebook, Assignment, Quiz etc. for this special topic."
+                : "⤷ Adds a custom label on this date without consuming a plan slot. The plan is not shifted. Use for revision, mock tests, or ad-hoc sessions."}
+            </div>
+
+            <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>
+              {overrideType==="holiday" ? "Holiday / Break Name" : overrideType==="special" ? "Special Day Title" : "Extra Content Label"}
+            </label>
+            <input
+              className="lms-input"
+              value={overrideLabel}
+              onChange={e=>setOverrideLabel(e.target.value)}
+              placeholder={
+                overrideType==="holiday" ? "e.g. Eid Holiday, Summer Break…" :
+                overrideType==="special" ? "e.g. Guest Lecture: Data Science, Hackathon Day…" :
+                "e.g. Revision Session, Mock Test…"
+              }
+              style={{ marginBottom:18 }}
+              autoFocus
+              onKeyDown={e=>{ if(e.key==="Enter") saveOverride(); if(e.key==="Escape"){ setOverrideModal(null); setOverrideLabel(""); } }}
+            />
+
+            <div style={{ display:"flex", gap:8 }}>
+              <button className="lms-btn lms-btn-dark" style={{ flex:1, justifyContent:"center" }} onClick={saveOverride}>
+                {overrideModal.mode==="edit" ? "Update" :
+                  overrideType==="holiday" ? "🏖️ Mark Holiday" :
+                  overrideType==="special" ? "⭐ Add Special Day" :
+                  "📌 Add Extra"}
+              </button>
+              {overrideModal.mode==="edit" && (
+                <button className="lms-btn lms-btn-rose" style={{ padding:"8px 12px" }} onClick={()=>removeOverride(overrideModal.dateKey)} title="Remove override">
+                  <Ic n="trash" s={14}/>
+                </button>
+              )}
+              <button className="lms-btn lms-btn-ghost" onClick={()=>{ setOverrideModal(null); setOverrideLabel(""); }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
         <div>
           <h1 style={{ fontSize:25, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Learning Calendar</h1>
-          <p style={{ color:"#64748b", fontSize:13.5, marginTop:4 }}>Click any lesson day to open the full workspace</p>
+          <p style={{ color:"#64748b", fontSize:13.5, marginTop:4 }}>
+            Click any lesson day to open the full workspace
+            {!studentMode && Object.keys(dayOverrides).length > 0 && (
+              <span style={{ marginLeft:10 }}>
+                {Object.values(dayOverrides).filter(o=>o.type==="holiday").length > 0 &&
+                  <span style={{ background:"#fffbeb", color:"#92400e", border:"1px solid #fde68a", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
+                    🏖️ {Object.values(dayOverrides).filter(o=>o.type==="holiday").length} holiday{Object.values(dayOverrides).filter(o=>o.type==="holiday").length!==1?"s":""}
+                  </span>}
+                {Object.values(dayOverrides).filter(o=>o.type==="special").length > 0 &&
+                  <span style={{ background:"#fff7ed", color:"#9a3412", border:"1px solid #fed7aa", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
+                    ⭐ {Object.values(dayOverrides).filter(o=>o.type==="special").length} special
+                  </span>}
+                {Object.values(dayOverrides).filter(o=>o.type==="extra").length > 0 &&
+                  <span style={{ background:"#f5f3ff", color:"#5b21b6", border:"1px solid #ddd6fe", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px" }}>
+                    📌 {Object.values(dayOverrides).filter(o=>o.type==="extra").length} extra
+                  </span>}
+              </span>
+            )}
+          </p>
         </div>
         <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
           {total > 0 && Object.values(dayData||{}).some(d=>d?.notebook) && (
@@ -3544,15 +3896,74 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
               const status = dayStatus[k] || "Not Started";
               const sc = STATUS_CFG[status];
               const isToday = k === todayK;
+              const override = dayOverrides[k]; // { type:"holiday"|"extra"|"special", label:"..." }
+              const isHoliday = override?.type === "holiday";
+              const isExtra   = override?.type === "extra";
+              const isSpecial = override?.type === "special";
+
+              // Visual config for overrides
+              const holBg="#fffbeb", holBorder="#fde68a", holText="#92400e";
+              const extBg="#f5f3ff", extBorder="#ddd6fe", extText="#5b21b6";
+              const speBg="#fff7ed", speBorder="#fed7aa", speText="#9a3412";
+
               return (
-                <div key={idx} className={`day-cell${isToday?" today":""}${hasPlan?" has-plan":""}`}
-                  style={{ background: hasPlan ? sc.bg : "#fafafa", borderColor: hasPlan ? sc.border : "#f1f5f9", cursor: hasPlan ? "pointer" : "default" }}
-                  onClick={() => { if (!hasPlan) return; onSelectDay({ key:k, dayNum:planDays[pidx].dayNum, topic }); }}>
+                <div key={idx}
+                  className={`day-cell${isToday?" today":""}${hasPlan&&!isHoliday&&!isSpecial?" has-plan":""}`}
+                  style={{
+                    background: isHoliday ? holBg : isSpecial ? speBg : isExtra ? extBg : hasPlan ? sc.bg : "#fafafa",
+                    borderColor: isHoliday ? holBorder : isSpecial ? speBorder : isExtra ? extBorder : hasPlan ? sc.border : "#f1f5f9",
+                    cursor: (hasPlan && !isHoliday && !isSpecial) || isExtra || isSpecial ? "pointer" : "default",
+                    position:"relative",
+                  }}
+                  onClick={() => {
+                    if (isHoliday) return;
+                    if (isSpecial) { onSelectDay({ key:k, dayNum:"★", topic: override.label, isSpecial:true }); return; }
+                    if (isExtra)   { onSelectDay({ key:k, dayNum:0,   topic: override.label, isExtra:true });   return; }
+                    if (!hasPlan) return;
+                    onSelectDay({ key:k, dayNum:planDays[pidx].dayNum, topic });
+                  }}>
+
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <span style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6":"#334155" }}>{day}</span>
-                    {hasPlan && <span style={{ width:7, height:7, borderRadius:"50%", background:sc.dot, display:"inline-block", marginTop:3, flexShrink:0 }}/>}
+                    <span style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6": isHoliday?holText : isSpecial?speText : isExtra?extText : "#334155" }}>{day}</span>
+                    <div style={{ display:"flex", gap:3, alignItems:"center" }}>
+                      {isHoliday && <span style={{ fontSize:11 }}>🏖️</span>}
+                      {isSpecial  && <span style={{ fontSize:11 }}>⭐</span>}
+                      {isExtra    && <span style={{ fontSize:11 }}>📌</span>}
+                      {hasPlan && !isHoliday && !isSpecial && !isExtra && <span style={{ width:7, height:7, borderRadius:"50%", background:sc.dot, display:"inline-block", marginTop:3, flexShrink:0 }}/>}
+                    </div>
                   </div>
-                  {hasPlan && <div style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>}
+
+                  {/* Content label */}
+                  {isHoliday && (
+                    <div style={{ fontSize:10, color:holText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                      {override.label}
+                    </div>
+                  )}
+                  {isSpecial && (
+                    <div style={{ fontSize:10, color:speText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                      {override.label}
+                    </div>
+                  )}
+                  {isExtra && (
+                    <div style={{ fontSize:10, color:extText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                      {override.label}
+                    </div>
+                  )}
+                  {hasPlan && !isHoliday && !isSpecial && !isExtra && (
+                    <div style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>
+                  )}
+
+                  {/* Trainer-only: hover "+" override button */}
+                  {!studentMode && (
+                    <button
+                      title={override ? "Edit override" : "Add holiday or extra content"}
+                      onClick={e=>{ e.stopPropagation(); openOverrideModal(k); }}
+                      style={{ position:"absolute", bottom:4, right:4, width:16, height:16, borderRadius:4, background: override?"#f59e0b":"#e2e8f0", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, color: override?"#fff":"#94a3b8", opacity:0, transition:"opacity .15s", fontFamily:"inherit", lineHeight:1 }}
+                      className="day-override-btn"
+                    >
+                      {override ? "✎" : "+"}
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -3572,9 +3983,29 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
           </div>
 
           <div className="lms-card" style={{ padding:16, display:"flex", flexDirection:"column" }}>
-            <p className="lms-section-label">{MONTHS_SHORT[calMonth]} Lessons ({monthEvents.length})</p>
+            <p className="lms-section-label">{MONTHS_SHORT[calMonth]} Schedule ({monthEvents.length + Object.entries(dayOverrides).filter(([k])=>{ const [y,m]=k.split("-").map(Number); return y===calYear&&m===calMonth+1; }).length})</p>
             <div style={{ display:"flex", flexDirection:"column", gap:8, overflowY:"auto", maxHeight:360, paddingRight:2 }}>
-              {monthEvents.length === 0 && <p style={{ fontSize:13, color:"#94a3b8" }}>No lessons this month</p>}
+              {/* Holidays and extras this month */}
+              {Object.entries(dayOverrides)
+                .filter(([k])=>{ const [y,m]=k.split("-").map(Number); return y===calYear&&m===calMonth+1; })
+                .sort(([a],[b])=>a.localeCompare(b))
+                .map(([k, ov]) => {
+                  const d = parseInt(k.split("-")[2]);
+                  const isHol = ov.type==="holiday";
+                  const isSpe = ov.type==="special";
+                  return (
+                    <div key={k} style={{ padding:"9px 12px", borderRadius:10, background:isHol?"#fffbeb":isSpe?"#fff7ed":"#f5f3ff", border:`1.5px solid ${isHol?"#fde68a":isSpe?"#fed7aa":"#ddd6fe"}`, cursor:!studentMode?"pointer":"default", display:"flex", justifyContent:"space-between", alignItems:"center" }}
+                      onClick={()=>{ if(!studentMode) openOverrideModal(k); }}>
+                      <div>
+                        <div style={{ fontSize:11, fontWeight:700, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6" }}>{isHol?"🏖️":isSpe?"⭐":"📌"} {MONTHS_SHORT[calMonth]} {d}</div>
+                        <div style={{ fontSize:12, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6", fontWeight:500, marginTop:1 }}>{ov.label}</div>
+                      </div>
+                      {!studentMode && <Ic n="settings" s={12} c={isHol?"#f59e0b":isSpe?"#f97316":"#8b5cf6"}/>}
+                    </div>
+                  );
+                })
+              }
+              {monthEvents.length === 0 && Object.entries(dayOverrides).filter(([k])=>{ const [y,m]=k.split("-").map(Number); return y===calYear&&m===calMonth+1; }).length===0 && <p style={{ fontSize:13, color:"#94a3b8" }}>No lessons this month</p>}
               {monthEvents.map(([k, pidx]) => {
                 const topic = planDays[pidx]?.topic;
                 const s = dayStatus[k] || "Not Started";
@@ -3665,13 +4096,23 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
 /* ═══════════════════════════════════════════════════════════════════
    DAY PAGE — Full Workspace
 ═══════════════════════════════════════════════════════════════════ */
-function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
+  const [editingTopic, setEditingTopic] = useState(false);
+  const [topicDraft, setTopicDraft]     = useState("");
   const k = day.key;
   const status = dayStatus[k] || "Not Started";
   const sc = STATUS_CFG[status];
   const isTrainer = !studentMode;
+
+  // Detect if topic was edited after content was generated
+  // dayData.generatedForTopic is written whenever any gen function saves content
+  const hasAnyContent = !!(dayData.notebook || dayData.examples || dayData.assignment || dayData.resources || dayData.quiz);
+  const topicChanged  = hasAnyContent && dayData.generatedForTopic && dayData.generatedForTopic !== day.topic
+                        && !day.isExtra && !day.isSpecial; // extra/special use override label, not planDays topic
+
+  const [confirmRegen, setConfirmRegen] = useState(false);
 
   useEffect(() => {
     if (!codeEdit && dayData.codeBlocks?.length > 0) {
@@ -3703,15 +4144,105 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
         </div>
       )}
 
+      {/* ── Topic-changed banner (trainer only) ── */}
+      {topicChanged && !studentMode && (
+        <div style={{ background:"#eff6ff", border:"2px solid #bfdbfe", borderRadius:12, padding:"12px 16px", marginBottom:16, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+          <div style={{ fontSize:18 }}>✏️</div>
+          <div style={{ flex:1, minWidth:180 }}>
+            <p style={{ fontWeight:700, fontSize:13.5, color:"#1e40af", margin:0 }}>Topic renamed — existing content was generated for a different topic</p>
+            <p style={{ fontSize:12, color:"#3b82f6", margin:"3px 0 0 0" }}>
+              Was: <span style={{ textDecoration:"line-through", opacity:.7 }}>{dayData.generatedForTopic}</span>
+              &nbsp;→ Now: <strong>{day.topic}</strong>
+            </p>
+          </div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            <button className="lms-btn lms-btn-blue" style={{ fontSize:12 }}
+              onClick={() => setConfirmRegen(true)}>
+              🔄 Regenerate All
+            </button>
+            <button className="lms-btn lms-btn-ghost" style={{ fontSize:12 }}
+              onClick={() => onGenNotebook && onGenNotebook()}>
+              📓 Notebook only
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Confirm regenerate modal ── */}
+      {confirmRegen && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
+          onClick={e=>{ if(e.target===e.currentTarget) setConfirmRegen(false); }}>
+          <div style={{ background:"#fff", borderRadius:18, padding:28, maxWidth:420, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.28)" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:6 }}>🔄 Regenerate All Content?</p>
+            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.6, marginBottom:8 }}>
+              This will replace the <strong>Notebook, Examples, Resources, Assignment, Quiz and Teaching Guide</strong> for:
+            </p>
+            <div style={{ background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 14px", marginBottom:18, fontSize:13.5, color:"#1e40af", fontWeight:700 }}>
+              Day {day.dayNum}: {day.topic}
+            </div>
+            <p style={{ fontSize:12, color:"#94a3b8", marginBottom:18 }}>All existing content for this day will be overwritten. This cannot be undone.</p>
+            <div style={{ display:"flex", gap:8 }}>
+              <button className="lms-btn lms-btn-blue" style={{ flex:1, justifyContent:"center" }}
+                onClick={() => { setConfirmRegen(false); onGenAll && onGenAll(); }}>
+                ✓ Yes, Regenerate
+              </button>
+              <button className="lms-btn lms-btn-ghost" onClick={() => setConfirmRegen(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display:"flex", alignItems:"flex-start", gap:14, marginBottom:20, flexWrap:"wrap" }}>
         <button className="lms-btn lms-btn-ghost" onClick={onBack}><Ic n="chevL" s={14}/>Calendar</button>
         <div style={{ flex:1, minWidth:200 }}>
           <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-            <div style={{ width:36, height:36, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>{day.dayNum}</div>
-            <div>
-              <h1 style={{ fontSize:20, fontWeight:800, color:"#0f172a", letterSpacing:"-.3px" }}>{day.topic}</h1>
-              <p style={{ fontSize:12, color:"#94a3b8" }}>{day.key}</p>
+            <div style={{ width:36, height:36, background: day.isSpecial ? "linear-gradient(135deg,#f97316,#ea580c)" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize: day.isSpecial ? 18 : 13, flexShrink:0 }}>
+              {day.isSpecial ? "⭐" : day.dayNum}
+            </div>
+            <div style={{ flex:1, minWidth:0 }}>
+              {/* ── Inline topic editor (trainer only) ── */}
+              {editingTopic ? (
+                <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                  <input
+                    autoFocus
+                    value={topicDraft}
+                    onChange={e => setTopicDraft(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter" && topicDraft.trim()) {
+                        onEditTopic(topicDraft.trim());
+                        setEditingTopic(false);
+                      }
+                      if (e.key === "Escape") setEditingTopic(false);
+                    }}
+                    style={{ fontSize:17, fontWeight:800, color:"#0f172a", border:"2px solid #3b82f6", borderRadius:8, padding:"3px 10px", outline:"none", minWidth:220, flex:1, fontFamily:"inherit", letterSpacing:"-.3px" }}
+                  />
+                  <button className="lms-btn lms-btn-blue" style={{ padding:"4px 12px", fontSize:12 }}
+                    onClick={() => { if (topicDraft.trim()) { onEditTopic(topicDraft.trim()); setEditingTopic(false); } }}>
+                    Save
+                  </button>
+                  <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 10px", fontSize:12 }}
+                    onClick={() => setEditingTopic(false)}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <h1 style={{ fontSize:20, fontWeight:800, color:"#0f172a", letterSpacing:"-.3px", margin:0 }}>{day.topic}</h1>
+                  {!studentMode && onEditTopic && !day.isExtra && !day.isSpecial && (
+                    <button
+                      title="Edit topic name"
+                      onClick={() => { setTopicDraft(day.topic); setEditingTopic(true); }}
+                      style={{ background:"none", border:"none", cursor:"pointer", padding:"2px 5px", borderRadius:6, color:"#94a3b8", fontSize:13, lineHeight:1, transition:"color .15s" }}
+                      onMouseEnter={e => e.currentTarget.style.color="#3b82f6"}
+                      onMouseLeave={e => e.currentTarget.style.color="#94a3b8"}
+                    >
+                      ✎
+                    </button>
+                  )}
+                </div>
+              )}
+              <p style={{ fontSize:12, color:"#94a3b8", margin:"2px 0 0 0" }}>{day.key}</p>
             </div>
             <span className="lms-tag" style={{ background:sc.bg, color:sc.text, border:`1.5px solid ${sc.border}` }}>
               <span style={{ width:6, height:6, borderRadius:"50%", background:sc.dot }}/>
@@ -4453,7 +4984,7 @@ function EmptyState({ icon, title, text }) {
 /* ═══════════════════════════════════════════════════════════════════
    SETTINGS PAGE — Supabase-backed, no localStorage
 ═══════════════════════════════════════════════════════════════════ */
-function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqModel, setGroqModel, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel, callAI, notify, sb, courseId, trainerId, setPlanText, setPlanDays, setStartDate, setMonfri, setDayStatus, setDayData }) {
+function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqModel, setGroqModel, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel, callAI, notify, sb, courseId, trainerId, setPlanText, setPlanDays, setStartDate, setMonfri, setDayStatus, setDayData, setDayOverrides }) {
   const [testing,     setTesting]     = useState(false);
   const [testSb,      setTestSb]      = useState(false);
   const [sbStatus,    setSbStatus]    = useState(null);
@@ -4497,6 +5028,7 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       if (course.startDate) setStartDate(course.startDate);
       if (course.monfri !== undefined) setMonfri(course.monfri);
       if (course.dayStatus) setDayStatus(course.dayStatus);
+      if (course.dayOverrides) setDayOverrides(course.dayOverrides);
 
       // FIX: also load lms_day_content (notebooks, assignments, etc.) and merge
       const contentByDay = await sbGetAllDayContent(sb, courseId);
@@ -4533,10 +5065,10 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       // Without the second delete, notebooks/assignments would silently reappear on next load
       // because loadCourse always fetches from lms_day_content.
       await Promise.all([
-        sbSaveCourseData(sb, courseId, { planText:"", planDays:[], dayStatus:{}, dayData:{} }),
+        sbSaveCourseData(sb, courseId, { planText:"", planDays:[], dayStatus:{}, dayData:{}, dayOverrides:{} }),
         sb.delete("lms_day_content", `course_id=eq.${encodeURIComponent(courseId)}`),
       ]);
-      setPlanText(""); setPlanDays([]); setDayStatus({}); setDayData({});
+      setPlanText(""); setPlanDays([]); setDayStatus({}); setDayData({}); setDayOverrides({});
       notify("Course data cleared from Supabase ✓");
     } catch(e) { notify(`Clear failed: ${e.message}`, "err"); }
   };
