@@ -1139,7 +1139,7 @@ const Spin = ({ s=14 }) => (
   </span>
 );
 
-
+import bgImage from "./assets/bg.jpg";
 /* ═══════════════════════════════════════════════════════════════════
    LOGIN SCREEN — uses Supabase for all auth
 ═══════════════════════════════════════════════════════════════════ */
@@ -1280,7 +1280,21 @@ function LoginScreen({ onLogin, sb }) {
 
 
   return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#667eea 0%,#764ba2 100%)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif" }}>
+    
+
+<div style={{
+  minHeight: "100vh",
+  backgroundImage: `url(${bgImage})`,
+  backgroundSize: "cover",
+  backgroundPosition: "center",
+  backgroundRepeat: "no-repeat",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 20,
+  
+  fontFamily: "'Segoe UI','Helvetica Neue',system-ui,sans-serif"
+}}>
       <div style={{ background:"white", borderRadius:20, padding:48, maxWidth:480, width:"100%", boxShadow:"0 25px 70px rgba(0,0,0,.25)" }}>
         <div style={{ textAlign:"center", marginBottom:40 }}>
           <div style={{ fontSize:56, marginBottom:16 }}>📚</div>
