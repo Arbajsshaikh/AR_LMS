@@ -2278,44 +2278,61 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "notebook", topic: day.topic, startedAt: Date.now() } }));
     try {
-      const text = await callAI([
-        { role:"system", content:"You are an expert Python educator. Generate thorough, well-commented Jupyter notebook content." },
-        { role:"user", content:`Create a complete Jupyter notebook for the topic: "${day.topic}".
+      const codeBlockCount = Math.max(1, Math.min(20, parseInt(dayData[k]?.notebookBlocks) || 3));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsSection = subTopics
+        ? `\n\n## Sub-topics & Focus Areas to Integrate\nThe following sub-topics MUST be woven throughout every relevant section — include dedicated concepts, explanations, and code examples for each:\n${subTopics}\n`
+        : "";
 
-Structure your response EXACTLY like this:
+      const codeExamplesTemplate = Array.from({ length: codeBlockCount }, (_, i) =>
+        `## Code Example ${i + 1}: [descriptive name for this example]\n` +
+        "```python\n" +
+        `# Purpose: [what this specific example demonstrates]\n` +
+        `# Concepts covered: [list the concepts from Key Concepts this example applies]\n` +
+        `# [Inline comment on EVERY significant line — no line left unexplained]\n` +
+        `[complete, runnable Python code — minimum 8 lines]\n` +
+        `print("[show the expected output so the student can verify their run]")\n` +
+        "```"
+      ).join("\n\n");
+
+      const practiceCount = Math.max(3, Math.ceil(codeBlockCount / 2));
+
+      const text = await callAI([
+        { role:"system", content:"You are a senior Python educator producing production-quality Jupyter notebook content. Every code block must be syntactically correct, run without errors, and be exhaustively commented. Prioritise pedagogical depth, progressive complexity, and real-world relevance over brevity. Never truncate sections." },
+        { role:"user", content:`Create a complete, detailed Jupyter notebook for the topic: "${day.topic}".${subTopicsSection}
+
+Structure your response EXACTLY as follows — do not skip or rename any section:
 
 ## Overview
-[2-3 paragraphs explaining the topic clearly]
+[3 substantive paragraphs: (1) what the topic is and why it matters in real-world Python development, (2) the mental model a student should build, (3) how it connects to topics already learned]
+
+## Learning Objectives
+[Exactly 5 bullet points — each a specific, measurable outcome: "By the end of this notebook, the student will be able to…"]
+
+## Prerequisites
+[Bulleted list of every concept the student must already understand before this notebook makes sense]
 
 ## Key Concepts
-[bullet points of core concepts]
+[Numbered list — every core concept with: concept name in bold, 2-sentence explanation, and a one-line code illustration where applicable. Minimum ${Math.max(5, codeBlockCount)} concepts.]
 
-## Code Example 1: [name]
-\`\`\`python
-# [Detailed comment explaining what this does]
-[working code with inline comments on every important line]
-print("Expected output shown here")
-\`\`\`
+${codeExamplesTemplate}
 
-## Code Example 2: [name]
-\`\`\`python
-[code with heavy comments]
-\`\`\`
-
-## Code Example 3: [name]
-\`\`\`python
-[code with heavy comments]
-\`\`\`
-
-## Common Mistakes
-[list of common errors and how to avoid them]
+## Common Mistakes & Pitfalls
+[At minimum ${Math.max(4, codeBlockCount)} entries — for each mistake: bold heading, explanation of what students do wrong, WHY it fails, and the corrected version with a short code snippet]
 
 ## Practice Problems
-1. [Problem 1 description]
-2. [Problem 2 description]
-3. [Problem 3 description]
+${Array.from({ length: practiceCount }, (_, i) => `${i + 1}. [Clearly stated problem that directly applies one or more of the above code examples — specify expected input and output]`).join("\n")}
 
-Include at least 3 code examples with extensive comments.` }
+## Summary & Next Steps
+[Concise paragraph summarising every concept covered, then a bulleted list of 4 specific follow-on topics with one sentence on why each is the natural next step]
+
+HARD REQUIREMENTS — violating any of these is an error:
+- Generate EXACTLY ${codeBlockCount} "## Code Example" sections numbered 1 through ${codeBlockCount}
+- Every code block must have an inline comment on EVERY significant line — not just the first line
+- All code must be syntactically correct Python 3 and produce verifiable, deterministic output
+- Each example must increase in complexity relative to the previous one
+- Every sub-topic listed above must appear in at least one Key Concept entry AND at least one Code Example
+- Do not truncate any section — write every part in full` }
       ]);
       validateAIResponse(text, "notebook");
       const codeBlocks = extractCodeBlocks(text);
@@ -2337,31 +2354,60 @@ Include at least 3 code examples with extensive comments.` }
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "examples", topic: day.topic, startedAt: Date.now() } }));
     try {
+      const tasksCount = Math.max(1, Math.min(20, parseInt(dayData[k]?.examplesCount) || 5));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsSection = subTopics
+        ? `\n\n## Sub-topics to Cover\nDistribute the ${tasksCount} tasks across these sub-topics — every sub-topic must appear in at least one task:\n${subTopics}\n`
+        : "";
       // FIX Bug1: Include notebook content as context so tasks extend rather than repeat the notebook
       const notebookCtx = dayData[k]?.notebook
-        ? `\n\nThe student has already studied this notebook content for context (do NOT repeat these examples verbatim — create NEW exercises that EXTEND and APPLY the concepts):\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 1800)}\n---END---`
+        ? `\n\nThe student has already studied this notebook (do NOT repeat these examples verbatim — every task must EXTEND and APPLY the concepts beyond what is shown):\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 1800)}\n---END---`
         : "";
-      const text = await callAI([
-        { role:"system", content:"You are a coding instructor creating practical exercises." },
-        { role:"user", content:`Generate 5 hands-on practice tasks for: "${day.topic}".${notebookCtx}
 
-For each task use this format:
+      const difficultyMap = (i, total) => {
+        const pct = i / (total - 1 || 1);
+        if (pct < 0.25) return "Easy";
+        if (pct < 0.55) return "Medium";
+        if (pct < 0.80) return "Hard";
+        return "Expert";
+      };
 
-### Task [N]: [Title]
-**Difficulty:** Easy / Medium / Hard
-**Description:** [2-3 sentence description]
+      const tasksTemplate = Array.from({ length: tasksCount }, (_, i) =>
+        `### Task ${i + 1}: [Descriptive title that names the specific skill being practised]
+**Difficulty:** ${difficultyMap(i, tasksCount)}
+**Concept tested:** [Which specific concept or sub-topic from the day this task targets]
+**Description:** [3-sentence description: what the student builds, what it demonstrates, why it matters]
 **Requirements:**
-- [requirement 1]
-- [requirement 2]
+- [Concrete requirement 1 — testable and unambiguous]
+- [Concrete requirement 2]
+- [Concrete requirement 3]
 **Expected Output:**
 \`\`\`
-[what the program should output]
+[Exact, copy-pasteable output the student's program must produce — no placeholders]
 \`\`\`
 **Starter Code:**
 \`\`\`python
-# [starter code with hints as comments]
+# Task ${i + 1}: [title]
+# Instructions: [one sentence telling the student exactly what to fill in]
+[meaningful scaffold — function signature, partial logic, or structural hints as TODO comments]
 \`\`\`
-**Hint:** [helpful hint]` }
+**Hint:** [A specific, targeted hint that guides without giving away the solution]
+**Bonus:** [Optional extension for students who finish early — one level harder]`
+      ).join("\n\n---\n\n");
+
+      const text = await callAI([
+        { role:"system", content:"You are a senior Python instructor designing rigorous, hands-on coding exercises. Every task must be independently runnable, have a deterministic expected output, and provide starter code that scaffolds without solving. Tasks must progress clearly from easier to harder." },
+        { role:"user", content:`Generate exactly ${tasksCount} hands-on practice tasks for: "${day.topic}".${subTopicsSection}${notebookCtx}
+
+${tasksTemplate}
+
+HARD REQUIREMENTS:
+- Generate EXACTLY ${tasksCount} tasks numbered Task 1 through Task ${tasksCount}
+- Tasks must be strictly ordered from easiest to hardest — Difficulty label must be accurate
+- Every task must have complete, runnable starter code with meaningful TODO markers
+- Expected Output must be exact and reproducible — no vague placeholders like "[output here]"
+- No task may duplicate a code example already present in the notebook context
+- Sub-topics listed above must be proportionally represented — do not cluster them all in the last tasks` }
       ]);
       validateAIResponse(text, "general");
       updateDay(k, { examples: text, generatedForTopic: day.topic });
@@ -2381,36 +2427,55 @@ For each task use this format:
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "resources", topic: day.topic, startedAt: Date.now() } }));
     try {
-      const text = await callAI([
-        { role:"system", content:"You are creating comprehensive learning resources." },
-        { role:"user", content:`Create a complete resource document for: "${day.topic}".
+      const snippetsCount = Math.max(1, Math.min(20, parseInt(dayData[k]?.resourcesSnippets) || 3));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsSection = subTopics
+        ? `\n\n## Sub-topics to Cover\nAll resource sections must include material for every one of these sub-topics — each must appear in the Quick Reference Card, at least one snippet, and the Cheat Sheet:\n${subTopics}\n`
+        : "";
 
-Include:
+      const snippetsTemplate = Array.from({ length: snippetsCount }, (_, i) =>
+        "```python\n" +
+        `# Snippet ${i + 1}: [Pattern name — name it like a recipe, e.g. "Flatten a nested list"]\n` +
+        `# When to use: [1-sentence use case]\n` +
+        `# Gotcha: [the most common mistake with this pattern]\n` +
+        `[complete, runnable Python 3 code — minimum 6 lines with an inline comment on every significant line]\n` +
+        "```"
+      ).join("\n");
+
+      const text = await callAI([
+        { role:"system", content:"You are producing a dense, production-quality reference document for Python learners. Think 'developer cheat sheet meets university study guide'. Every snippet must run without modification. Every entry must be specific and actionable — no filler." },
+        { role:"user", content:`Create a complete, comprehensive reference document for: "${day.topic}".${subTopicsSection}
 
 ## Quick Reference Card
-[key syntax, commands, or formulas in a scannable format]
+[Scannable formatted table or aligned list — every important syntax element, method, function, and keyword with its signature and a 5-word description. Minimum ${Math.max(10, snippetsCount * 3)} entries. Include every sub-topic listed above.]
 
 ## Concept Summary
-[concise explanation of all key concepts]
+[Each key concept gets its own bold-headed paragraph: plain-English explanation + a concrete real-world analogy. Minimum ${Math.max(5, snippetsCount)} concepts. Cover every sub-topic.]
 
 ## Code Snippets Library
-\`\`\`python
-# [Snippet 1 - most common use case]
-[code]
-\`\`\`
-\`\`\`python
-# [Snippet 2 - another common pattern]
-[code]
-\`\`\`
+${snippetsTemplate}
 
-## Common Patterns & Best Practices
-[numbered list of best practices]
+## Common Patterns vs Anti-Patterns
+[Minimum ${Math.max(4, snippetsCount)} pairs — each formatted as:
+✅ DO — [pattern name]: [code snippet] — [why this is correct]
+❌ DON'T — [anti-pattern name]: [code snippet] — [why this fails or is bad practice]]
 
 ## Cheat Sheet
-[table or list format of the most important things to remember]
+[Structured reference — for each entry use exactly this format:
+• WHAT: [concept] | SYNTAX: [exact syntax] | EXAMPLE: [one-liner] | GOTCHA: [one trap to avoid]
+Minimum ${Math.max(8, snippetsCount * 2)} entries covering every sub-topic.]
 
-## Further Reading
-[list of topics to explore next]` }
+## Error Reference
+[The ${Math.max(4, snippetsCount)} most common errors students encounter — for each: Error name, cause, minimal code that reproduces it, and the exact fix]
+
+## Further Reading & Next Steps
+[${Math.max(5, snippetsCount)} specific follow-on topics — each with: topic name, one sentence on how it builds on today, and a concrete use-case where it's needed]
+
+HARD REQUIREMENTS:
+- Code Snippets Library must contain EXACTLY ${snippetsCount} runnable code blocks
+- Every snippet must produce visible output (add a print statement if needed)
+- Every sub-topic listed above must appear in the Quick Reference Card, ≥1 snippet, and the Cheat Sheet
+- No placeholders — every field must be filled with real, specific content` }
       ]);
       validateAIResponse(text, "general");
       updateDay(k, { resources: text, generatedForTopic: day.topic });
@@ -2430,57 +2495,95 @@ Include:
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "assignment", topic: day.topic, startedAt: Date.now() } }));
     try {
+      const challengesCount = Math.max(1, Math.min(15, parseInt(dayData[k]?.assignmentChallenges) || 3));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsSection = subTopics
+        ? `\n\n## Sub-topics to Assess\nThe assignment MUST include at least one question or challenge that directly tests each of these sub-topics:\n${subTopics}\n`
+        : "";
       const uploaded = (dayData[k]?.uploadedFiles || []).map(f => f.name).join(", ");
-      const filesCtx = uploaded ? `\nThe student has access to these uploaded files: ${uploaded}` : "";
+      const filesCtx = uploaded ? `\nThe student has access to these uploaded reference files: ${uploaded}` : "";
       // FIX Bug1: Include notebook content so assignment tests exactly what was taught
       const notebookCtx = dayData[k]?.notebook
-        ? `\n\nBase the assignment directly on this notebook content — every question and challenge should reference or extend concepts from it:\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 2000)}\n---END---`
+        ? `\n\nBase the assignment DIRECTLY on this notebook — every question and challenge must reference or extend concepts from it, never introduce entirely new topics:\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 2000)}\n---END---`
         : "";
       // Include resources summary if available
       const resourcesCtx = dayData[k]?.resources
-        ? `\n\nAdditional reference material students have access to:\n---RESOURCES (summary)---\n${dayData[k].resources.slice(0, 600)}\n---END---`
+        ? `\n\nAdditional reference material the student has access to:\n---RESOURCES (summary)---\n${dayData[k].resources.slice(0, 600)}\n---END---`
         : "";
+
+      const marksPerChallenge = Math.floor(50 / challengesCount);
+      const lastChallengeMarks = 50 - marksPerChallenge * (challengesCount - 1);
+      const difficultyLabel = (i, total) => {
+        const pct = i / (total - 1 || 1);
+        if (pct < 0.34) return "Foundation";
+        if (pct < 0.67) return "Intermediate";
+        return "Advanced";
+      };
+
+      const challengesTemplate = Array.from({ length: challengesCount }, (_, i) => {
+        const marks = i === challengesCount - 1 ? lastChallengeMarks : marksPerChallenge;
+        return `### Challenge ${i + 1}: [Title that describes what is built] (${marks} marks) — ${difficultyLabel(i, challengesCount)}
+**Problem Statement:** [Clear, unambiguous description — what must be built, what it does, and what real-world scenario it represents]
+**Input specification:** [Exact type, format, and valid range of all inputs]
+**Output specification:** [Exact type and format of the required output — no vague descriptions]
+**Sample test case:**
+\`\`\`
+Input:  [concrete example]
+Output: [corresponding output — must match output spec exactly]
+\`\`\`
+**Edge cases to handle:** [At least 2 specific edge cases the solution must not break on]
+**Starter code:**
+\`\`\`python
+# Challenge ${i + 1}: [Title]
+# Do NOT modify function signatures
+
+[complete function signature + docstring + TODO body — student fills in the logic]
+\`\`\``;
+      }).join("\n\n");
+
       const text = await callAI([
-        { role:"system", content:"You are a university professor creating rigorous, practical assignments." },
-        { role:"user", content:`Create a complete assignment for: "${day.topic}".${filesCtx}${notebookCtx}${resourcesCtx}
+        { role:"system", content:"You are a university-level Python instructor writing rigorous, industry-grade assessments. Every challenge must have an unambiguous input/output contract, working starter code with function signatures, and a detailed rubric. The grading rubric must specify what earns full marks, partial marks, and zero marks for each part." },
+        { role:"user", content:`Create a complete, production-quality assignment for: "${day.topic}".${filesCtx}${subTopicsSection}${notebookCtx}${resourcesCtx}
 
 ## Assignment Brief
-[1 paragraph overview of what students will accomplish]
+[2 paragraphs: (1) real-world scenario that frames the entire assignment, (2) summary of what the student will build and what skills this demonstrates]
 
 ## Learning Objectives
-[3-5 bullet points of what students will demonstrate]
+[Exactly 5 bullet points — each a specific, measurable skill the student proves by completing this assignment]
 
-## Part 1: Theory Questions (20 marks)
-Q1. [Conceptual question] (5 marks)
-Q2. [Application question] (7 marks)
-Q3. [Analysis question] (8 marks)
+## Part 1: Theory & Conceptual Understanding (20 marks)
+Q1. [Deep conceptual question — tests understanding, not just recall — requires a paragraph answer] (7 marks)
+Q2. [Code-reading question — show a code snippet and ask what it does, why it works, or what the output is] (7 marks)
+Q3. [Compare-and-contrast or tradeoff question — two approaches, student analyses both] (6 marks)
 
 ## Part 2: Coding Challenges (50 marks)
+${challengesTemplate}
 
-### Challenge 1: [Name] (15 marks)
-**Problem Statement:** [clear description]
-**Input:** [describe input]
-**Output:** [describe output]
-**Sample:**
-\`\`\`
-Input: [example]
-Output: [example]
-\`\`\`
-
-### Challenge 2: [Name] (15 marks)
-[same format]
-
-### Challenge 3: [Name] (20 marks)
-[harder problem]
-
-## Part 3: Mini Project (30 marks)
-[Real-world project idea]
+## Part 3: Applied Mini-Project (30 marks)
+**Scenario:** [Real-world business or data problem that requires synthesising ALL sub-topics covered in the day]
+**Deliverable:** [Exact filename, format, and what it must contain]
+**Minimum requirements:**
+- [Specific, testable requirement 1]
+- [Specific, testable requirement 2]
+- [Specific, testable requirement 3]
+- [Specific, testable requirement 4]
+**Bonus (up to 10 extra marks):** [Concrete extension — must require a skill one level beyond the main project]
 
 ## Submission Guidelines
-- Format: Python file (.py) or Jupyter notebook (.ipynb)
+- File format: Python file (.py) or Jupyter notebook (.ipynb)
+- Naming convention: \`[StudentName]_Day${day.dayNum}_Assignment\`
+- Every function must have a docstring
+- Deadline: [trainer fills in]
 
 ## Grading Rubric
-[breakdown of how marks are awarded]` }
+[Part-by-part breakdown — for EVERY question and challenge specify: what earns full marks, what earns 50% marks, and what earns zero marks. Be operationally specific — state the criterion a TA can apply mechanically.]
+
+HARD REQUIREMENTS:
+- Part 2 must contain EXACTLY ${challengesCount} challenges numbered Challenge 1 through ${challengesCount}
+- Every challenge must have a function-signature starter code the student fills in
+- Every sub-topic listed above must appear in at least one challenge OR the mini-project
+- Theory questions must reference specific code patterns from the notebook context if available
+- Do not reuse any code verbatim from the notebook — paraphrase the scenario` }
       ]);
       validateAIResponse(text, "assignment");
       updateDay(k, { assignment: text, generatedForTopic: day.topic });
@@ -2494,60 +2597,90 @@ Output: [example]
     }
   };
 
+
+
   const genTeachingGuide = async (day, opts={}) => {
     const k = day.key;
     const busyKey = `tg-${k}`;
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "guide", topic: day.topic, startedAt: Date.now() } }));
     try {
+      const blocksCount = Math.max(2, Math.min(12, parseInt(dayData[k]?.guideBlocks) || 5));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsSection = subTopics
+        ? `\n\n## Sub-topics to Teach\nEach sub-topic listed below must be explicitly assigned to a specific BLOCK — the guide must show WHEN and HOW each is taught:\n${subTopics}\n`
+        : "";
+
+      // Named block types cycling through a curated list
+      const blockTypes = [
+        { name: "Hook & Introduction", duration: 10 },
+        { name: "Core Concept Explanation", duration: 20 },
+        { name: "Live Demo / Code Together", duration: 20 },
+        { name: "Guided Practice", duration: 15 },
+        { name: "Q&A and Wrap-up", duration: 10 },
+        { name: "Independent Practice", duration: 20 },
+        { name: "Common Errors Review", duration: 10 },
+        { name: "Advanced Extension", duration: 15 },
+        { name: "Pair Programming Activity", duration: 20 },
+        { name: "Real-World Application Discussion", duration: 15 },
+        { name: "Synthesis & Reflection", duration: 10 },
+        { name: "Assessment & Exit Ticket", duration: 10 },
+      ];
+
+      const blocksTemplate = Array.from({ length: blocksCount }, (_, i) => {
+        const bt = blockTypes[i] || { name: `Segment ${i + 1}`, duration: 15 };
+        return `---
+## BLOCK ${i + 1}: ${bt.name} (~${bt.duration} min)
+**Primary Teaching Technique:** [Named pedagogy — e.g. "Think-Pair-Share", "Worked Example", "Live Coding with Narration", "Socratic Questioning"]
+**Trainer Script / Approach:** [Word-for-word opening lines and detailed guidance — what to say, what to write on screen, how to pace this block. Minimum 4 sentences.]
+**Student Activity:** [Exactly what students DO during this block — must be active, not passive listening]
+**Key question to ask:** "[A specific, thought-provoking question — not yes/no — that checks understanding of this block's concept]"
+**Sub-topic(s) covered:** [Which sub-topic(s) from the day are taught or practised here]
+**Transition to Block ${i + 2 <= blocksCount ? i + 2 : "wrap-up"}:** [One sentence bridging naturally to the next block]`;
+      }).join("\n\n");
+
       const text = await callAI([
-        { role:"system", content:"You are a master educator coach with 20+ years helping trainers teach technical topics effectively. Be specific, practical, and encouraging." },
-        { role:"user", content:`Create a detailed block-by-block teaching guide for: "${day.topic}".
+        { role:"system", content:"You are a master educator coach with 20+ years helping Python trainers teach effectively. Your guides are block-by-block, operationally specific, and immediately actionable. Write exact scripts, not vague suggestions. Every block must be independently executable even if blocks around it are skipped." },
+        { role:"user", content:`Create a detailed, complete teaching guide for a session on: "${day.topic}".${subTopicsSection}
 
 ---
 ## 🎯 Session Overview
-**Duration:** [recommended total time]
-**Goal:** [what students should be able to do after this session]
-**Prerequisites:** [what students should know first]
+**Recommended Total Duration:** [sum of all ${blocksCount} blocks in minutes]
+**Session Goal:** [One sentence — what the student will be ABLE TO DO at the end, phrased as a skill, not a topic]
+**Prerequisites to verify before starting:** [Specific knowledge the trainer must confirm students have]
+**Equipment & setup checklist:** [Code editor, REPL, files, slides, etc. — everything needed before the first student walks in]
 
 ---
-## BLOCK 1: Hook & Introduction (5-10 min)
-**Technique:** [teaching technique name]
-**Script/Approach:** [Detailed guidance on how to open the session]
-**Question to ask students:** "[engaging opening question]"
-
----
-## BLOCK 2: Core Concept Explanation (15-20 min)
-**Technique:** [e.g. "Analogy-first teaching"]
-**Best Analogy:** [A clear, relatable analogy]
-**Step-by-step explanation:**
-1. [First thing to explain]
-2. [Second concept]
-3. [Third concept]
-**Common student confusion points:**
-- ❌ Students often think: [misconception]
-- ✅ Correct understanding: [clarification]
-
----
-## BLOCK 3: Live Demo / Code Together (20 min)
-**Technique:** [e.g. "Livecoding with narration"]
-**What to demo:** [Specific code to type live]
-
----
-## BLOCK 4: Guided Practice (15 min)
-**Activity:** [specific exercise for students]
-
----
-## BLOCK 5: Q&A and Wrap-up (5-10 min)
-**Closing activity:** [what to do to cement learning]
+${blocksTemplate}
 
 ---
 ## 🚨 Troubleshooting Guide
-[common issues and remedies]
+[The ${Math.max(4, blocksCount)} most common in-class problems — for each:
+• **Symptom:** [observable behaviour]
+• **Root cause:** [why it happens]
+• **Immediate fix:** [exact remedy the trainer applies in under 2 minutes, with code if relevant]
+• **Prevention:** [how to set up the session to avoid it next time]]
 
 ---
-## 💡 Engagement Tips
-[5 specific tips to keep energy high]` }
+## 💡 Engagement & Energy Management
+[Exactly ${Math.max(5, blocksCount)} specific, actionable techniques with timing cues — include what to do when energy drops after the halfway point, and how to handle a silent class]
+
+---
+## ⚡ Differentiation Strategies
+- **Fast finishers:** [specific advanced extension with a concrete deliverable]
+- **Struggling students:** [specific scaffolding — a hint sequence, a simpler sub-task, or a pair assignment]
+- **Mixed-pace groups:** [how to manage when half the class is done and half is stuck]
+
+---
+## 📋 Pre-Session Checklist (run 30 min before class)
+${Array.from({ length: 8 }, (_, i) => `${i + 1}. [Specific preparatory action]`).join("\n")}
+
+HARD REQUIREMENTS:
+- Generate EXACTLY ${blocksCount} BLOCK sections numbered BLOCK 1 through BLOCK ${blocksCount}
+- Every block MUST have ALL 6 fields: Technique, Script, Student Activity, Key Question, Sub-topic(s), Transition
+- Sub-topics listed above must each be explicitly named in the "Sub-topic(s) covered" field of at least one block
+- Scripts must be specific enough that a trainer who has never taught the topic before could deliver the session
+- Do not use vague phrases like "explain the concept" or "show some examples" — be operationally precise` }
       ]);
       validateAIResponse(text, "general");
       updateDay(k, { teachingGuide: text, generatedForTopic: day.topic });
@@ -2567,30 +2700,46 @@ Output: [example]
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "quiz", topic: day.topic, startedAt: Date.now() } }));
     try {
+      const questionsCount = Math.max(2, Math.min(20, parseInt(dayData[k]?.quizCount) || 6));
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicsNote = subTopics
+        ? `\n\nSub-topic distribution — distribute questions proportionally so every sub-topic below is tested by at least one question:\n${subTopics}\n`
+        : "";
       // FIX Bug1: Include notebook so quiz tests exactly what was taught
       const notebookCtx = dayData[k]?.notebook
-        ? `\n\nBase ALL questions STRICTLY on this notebook content — only test concepts, code patterns, and facts that appear in it:\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 2000)}\n---END---`
+        ? `\n\nBase ALL questions STRICTLY on this notebook — only test concepts, code patterns, and facts explicitly present in it:\n---NOTEBOOK---\n${dayData[k].notebook.slice(0, 2000)}\n---END---`
         : "";
-      const text = await callAI([
-        { role:"system", content:"You are a quiz generator. Return ONLY valid JSON — no markdown fences, no preamble. The JSON must be an array of exactly 6 question objects." },
-        { role:"user", content:`Generate 6 multiple-choice quiz questions for the topic: "${day.topic}".${notebookCtx}
 
-Return a JSON array only, like this exact structure:
+      const easyCount  = Math.max(1, Math.round(questionsCount * 0.30));
+      const medCount   = Math.max(1, Math.round(questionsCount * 0.40));
+      const hardCount  = Math.max(1, questionsCount - easyCount - medCount);
+
+      const text = await callAI([
+        { role:"system", content:`You are a quiz generator. Return ONLY valid JSON — no markdown fences, no preamble, no trailing text. The JSON must be a single array of exactly ${questionsCount} question objects. Any character outside the JSON array is a fatal error.` },
+        { role:"user", content:`Generate exactly ${questionsCount} multiple-choice quiz questions for: "${day.topic}".${subTopicsNote}${notebookCtx}
+
+Return a JSON array matching this EXACT structure — no deviations:
 [
   {
-    "q": "What does X do?",
-    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
+    "q": "Complete question text ending with a question mark?",
+    "options": ["A) first option", "B) second option", "C) third option", "D) fourth option"],
     "answer": 1,
-    "explanation": "B is correct because..."
+    "explanation": "B is correct because [specific technical reason]. A is wrong because [reason]. C is wrong because [reason]. D is wrong because [reason]."
   }
 ]
 
-Rules:
+Difficulty distribution — strictly follow this allocation:
+- Questions 1–${easyCount}: Easy — factual recall or direct concept identification
+- Questions ${easyCount + 1}–${easyCount + medCount}: Medium — application, code tracing, or selecting the correct approach
+- Questions ${easyCount + medCount + 1}–${questionsCount}: Hard — synthesis, edge-case reasoning, or predicting subtle output differences
+
+Hard rules:
 - answer is 0-indexed (0=A, 1=B, 2=C, 3=D)
-- Mix easy, medium, and hard questions
-- Include code-based questions where relevant
-- Explanations must be educational and clear
-- Return ONLY the JSON array, nothing else` }
+- At least ${Math.ceil(questionsCount * 0.4)} questions must include a Python code snippet in the question or options
+- All 4 options must be plausible to someone who partially understands the topic — no obviously absurd distractors
+- Explanation must address WHY each wrong option is wrong, not just why the correct option is right
+- If sub-topics are listed, every sub-topic must appear in at least one question
+- Return ONLY the JSON array — not a single character before [ or after ]` }
       ]);
       // Strip any accidental markdown fences
       const clean = text.replace(/```json|```/g, "").trim();
@@ -4307,14 +4456,47 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
         ))}
       </div>
 
+      {/* ── Sub-topics input — trainer only, shared across ALL generators for this day ── */}
+      {!studentMode && (
+        <div style={{ marginBottom:18, background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:12, padding:"12px 16px" }}>
+          <label style={{ display:"flex", alignItems:"center", gap:7, marginBottom:7, cursor:"default" }}>
+            <span style={{ fontSize:16 }}>📌</span>
+            <span style={{ fontSize:11.5, fontWeight:700, color:"#92400e", textTransform:"uppercase", letterSpacing:".07em" }}>Sub-topics / Focus areas</span>
+            <span style={{ fontSize:12, fontWeight:500, color:"#b45309", textTransform:"none", letterSpacing:"normal" }}>— applied to every generator for this day</span>
+          </label>
+          <input
+            type="text"
+            className="lms-input"
+            value={dayData.subTopics || ""}
+            onChange={e => updateDay(k, { subTopics: e.target.value })}
+            placeholder="e.g. list comprehension, lambda functions, map/filter — leave blank to use main topic only"
+            style={{ fontSize:12.5, background:"#fff" }}
+          />
+          <p style={{ fontSize:11.5, color:"#92400e", marginTop:6, lineHeight:1.5 }}>
+            All generators (Notebook, Examples, Resources, Assignment, Quiz, Guide) will incorporate these sub-topics into their prompts.
+          </p>
+        </div>
+      )}
+
       {/* ── NOTEBOOK ── */}
       {tab==="notebook" && (
         <div style={{ animation:"lms-in .2s ease" }}>
-          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
             {!studentMode && (
-              <button className="lms-btn lms-btn-blue" disabled={!!busy[`nb-${k}`]} onClick={onGenNotebook}>
-                {busy[`nb-${k}`]?<><Spin/>Generating...</>:<><Ic n="brain" s={14}/>Generate Notebook</>}
-              </button>
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:6, background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:8, padding:"5px 10px", height:36 }}>
+                  <span style={{ fontSize:11.5, color:"#1e40af", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Code blocks</span>
+                  <input
+                    type="number" min={1} max={20}
+                    value={dayData.notebookBlocks ?? 3}
+                    onChange={e => updateDay(k, { notebookBlocks: Math.max(1, Math.min(20, parseInt(e.target.value) || 3)) })}
+                    style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#1e40af", outline:"none", padding:0, textAlign:"center" }}
+                  />
+                </div>
+                <button className="lms-btn lms-btn-blue" disabled={!!busy[`nb-${k}`]} onClick={onGenNotebook}>
+                  {busy[`nb-${k}`]?<><Spin/>Generating...</>:<><Ic n="brain" s={14}/>Generate Notebook</>}
+                </button>
+              </>
             )}
             {dayData.notebook && (
               <>
@@ -4399,11 +4581,22 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
       {/* ── LIVE EXAMPLES ── */}
       {tab==="examples" && (
         <div style={{ animation:"lms-in .2s ease" }}>
-          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
             {!studentMode && (
-              <button className="lms-btn lms-btn-amber" disabled={!!busy[`ex-${k}`]} onClick={onGenExamples}>
-                {busy[`ex-${k}`]?<><Spin/>Generating...</>:<><Ic n="zap" s={14}/>Generate Live Tasks</>}
-              </button>
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:6, background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"5px 10px", height:36 }}>
+                  <span style={{ fontSize:11.5, color:"#92400e", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Tasks</span>
+                  <input
+                    type="number" min={1} max={20}
+                    value={dayData.examplesCount ?? 5}
+                    onChange={e => updateDay(k, { examplesCount: Math.max(1, Math.min(20, parseInt(e.target.value) || 5)) })}
+                    style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#92400e", outline:"none", padding:0, textAlign:"center" }}
+                  />
+                </div>
+                <button className="lms-btn lms-btn-amber" disabled={!!busy[`ex-${k}`]} onClick={onGenExamples}>
+                  {busy[`ex-${k}`]?<><Spin/>Generating...</>:<><Ic n="zap" s={14}/>Generate Live Tasks</>}
+                </button>
+              </>
             )}
             {dayData.examples && (
               <button className="lms-btn lms-btn-ghost" onClick={()=>downloadBlob(dayData.examples, `Day${day.dayNum}_exercises.md`)}>
@@ -4424,11 +4617,22 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
       {/* ── RESOURCES ── */}
       {tab==="resources" && (
         <div style={{ animation:"lms-in .2s ease" }}>
-          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
             {!studentMode && (
-              <button className="lms-btn lms-btn-violet" disabled={!!busy[`rs-${k}`]} onClick={onGenResources}>
-                {busy[`rs-${k}`]?<><Spin/>Generating...</>:<><Ic n="file" s={14}/>Auto-Generate Resources</>}
-              </button>
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:6, background:"#faf5ff", border:"1.5px solid #e9d5ff", borderRadius:8, padding:"5px 10px", height:36 }}>
+                  <span style={{ fontSize:11.5, color:"#6b21a8", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Snippets</span>
+                  <input
+                    type="number" min={1} max={20}
+                    value={dayData.resourcesSnippets ?? 3}
+                    onChange={e => updateDay(k, { resourcesSnippets: Math.max(1, Math.min(20, parseInt(e.target.value) || 3)) })}
+                    style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#6b21a8", outline:"none", padding:0, textAlign:"center" }}
+                  />
+                </div>
+                <button className="lms-btn lms-btn-violet" disabled={!!busy[`rs-${k}`]} onClick={onGenResources}>
+                  {busy[`rs-${k}`]?<><Spin/>Generating...</>:<><Ic n="file" s={14}/>Auto-Generate Resources</>}
+                </button>
+              </>
             )}
             {dayData.resources && (
               <button className="lms-btn lms-btn-ghost" onClick={()=>downloadBlob(dayData.resources, `Day${day.dayNum}_resources.md`)}>
@@ -4513,9 +4717,20 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
         <div style={{ animation:"lms-in .2s ease" }}>
           <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
             {!studentMode && (
-              <button className="lms-btn lms-btn-rose" disabled={!!busy[`as-${k}`]} onClick={onGenAssignment}>
-                {busy[`as-${k}`]?<><Spin/>Generating...</>:<><Ic n="clip" s={14}/>Generate Assignment</>}
-              </button>
+              <>
+                <div style={{ display:"flex", alignItems:"center", gap:6, background:"#fff1f2", border:"1.5px solid #fecdd3", borderRadius:8, padding:"5px 10px", height:36 }}>
+                  <span style={{ fontSize:11.5, color:"#9f1239", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Challenges</span>
+                  <input
+                    type="number" min={1} max={15}
+                    value={dayData.assignmentChallenges ?? 3}
+                    onChange={e => updateDay(k, { assignmentChallenges: Math.max(1, Math.min(15, parseInt(e.target.value) || 3)) })}
+                    style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#9f1239", outline:"none", padding:0, textAlign:"center" }}
+                  />
+                </div>
+                <button className="lms-btn lms-btn-rose" disabled={!!busy[`as-${k}`]} onClick={onGenAssignment}>
+                  {busy[`as-${k}`]?<><Spin/>Generating...</>:<><Ic n="clip" s={14}/>Generate Assignment</>}
+                </button>
+              </>
             )}
             {dayData.assignment && (
               <>
@@ -4568,7 +4783,16 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
       {/* ── TEACHING GUIDE (trainer only) ── */}
       {tab==="guide" && isTrainer && (
         <div style={{ animation:"lms-in .2s ease" }}>
-          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6, background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:8, padding:"5px 10px", height:36 }}>
+              <span style={{ fontSize:11.5, color:"#14532d", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Blocks</span>
+              <input
+                type="number" min={2} max={12}
+                value={dayData.guideBlocks ?? 5}
+                onChange={e => updateDay(k, { guideBlocks: Math.max(2, Math.min(12, parseInt(e.target.value) || 5)) })}
+                style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#14532d", outline:"none", padding:0, textAlign:"center" }}
+              />
+            </div>
             <button className="lms-btn lms-btn-green" disabled={!!busy[`tg-${k}`]} onClick={onGenTeachingGuide}>
               {busy[`tg-${k}`]?<><Spin/>Generating...</>:<><Ic n="teacher" s={14}/>Generate Teaching Guide</>}
             </button>
@@ -4802,10 +5026,21 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
     <div style={{ animation:"lms-in .2s ease" }}>
       <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
         {!studentMode && (
-          <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" }}
-            disabled={!!busy[`qz-${k}`]} onClick={onGenQuiz}>
+          <>
+            <div style={{ display:"flex", alignItems:"center", gap:6, background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"5px 10px", height:36 }}>
+              <span style={{ fontSize:11.5, color:"#92400e", whiteSpace:"nowrap", userSelect:"none", fontWeight:600 }}>Questions</span>
+              <input
+                type="number" min={2} max={20}
+                value={dayData.quizCount ?? 6}
+                onChange={e => updateDay(k, { quizCount: Math.max(2, Math.min(20, parseInt(e.target.value) || 6)) })}
+                style={{ width:42, border:"none", background:"transparent", fontSize:14, fontWeight:800, color:"#92400e", outline:"none", padding:0, textAlign:"center" }}
+              />
+            </div>
+            <button className="lms-btn" style={{ background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" }}
+              disabled={!!busy[`qz-${k}`]} onClick={onGenQuiz}>
             {busy[`qz-${k}`]?<><Spin/>Generating...</>:<><Ic n="brain" s={14}/>Generate Quiz</>}
           </button>
+          </>
         )}
         {questions && (
           <>
@@ -4822,7 +5057,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
       </div>
 
       {!questions && (
-        <EmptyState icon="brain" title="No quiz yet" text="Generate an AI-powered 6-question multiple-choice quiz for this topic. Instant auto-grading with explanations." />
+        <EmptyState icon="brain" title="No quiz yet" text="Set how many questions you want, then click Generate Quiz for an AI-powered multiple-choice quiz with auto-grading and explanations." />
       )}
 
       {questions && (
