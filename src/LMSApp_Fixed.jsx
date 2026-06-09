@@ -15,6 +15,380 @@ const STATUS_CFG = {
 };
 const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
 
+/* ═══════════════════════════════════════════════════════════════════
+   DATA GENERATOR ENGINE  (ported from DataForge ML v2.0)
+   Self-contained — no external deps beyond what LMS already imports.
+═══════════════════════════════════════════════════════════════════ */
+
+// ── Seeded RNG ────────────────────────────────────────────────────
+function dgRand(seedRef) {
+  seedRef.v += 0x6D2B79F5;
+  let t = seedRef.v;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function dgChoice(r, arr) { return arr[Math.floor(dgRand(r) * arr.length)]; }
+function dgNormal(r) {
+  let u = 0, v = 0;
+  while (u === 0) u = dgRand(r);
+  while (v === 0) v = dgRand(r);
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+// ── Column-value generator ────────────────────────────────────────
+function dgGenerateCol(col, n, seedRef) {
+  const out = [];
+  const [lo, hi] = col.range || [0, 1];
+  const span = hi - lo;
+  const cats = col.categories?.length ? col.categories : ["A", "B", "C", "D"];
+  for (let i = 0; i < n; i++) {
+    if (col.missing_pct > 0 && dgRand(seedRef) * 100 < col.missing_pct) { out.push(null); continue; }
+    let val;
+    if (col.type === "numeric") {
+      val = lo + span * 0.38 + dgNormal(seedRef) * span * 0.28;
+      if (col.outlier_pct > 0 && dgRand(seedRef) * 100 < col.outlier_pct)
+        val = dgRand(seedRef) > 0.5 ? hi + span * (0.6 + dgRand(seedRef) * 1.8) : lo - span * (0.4 + dgRand(seedRef) * 1.2);
+      val = Math.round(Math.max(lo - span * 0.4, Math.min(hi + span * 2.2, val)) * 1e5) / 1e5;
+    } else if (col.type === "numeric_int") {
+      val = Math.round(lo + span * 0.35 + dgNormal(seedRef) * span * 0.29);
+      if (col.outlier_pct > 0 && dgRand(seedRef) * 100 < col.outlier_pct)
+        val = dgRand(seedRef) > 0.5 ? Math.round(hi + span * (0.5 + dgRand(seedRef) * 1.6)) : Math.round(lo - span * (0.3 + dgRand(seedRef) * 1.1));
+      val = Math.max(-999999, Math.min(999999, val));
+    } else if (col.type === "categorical") {
+      val = dgChoice(seedRef, cats);
+    } else if (col.type === "boolean") {
+      val = dgRand(seedRef) > 0.42 ? "True" : "False";
+    } else if (col.type === "date") {
+      const start = new Date(2019, 0, 1).getTime();
+      const end   = new Date(2025, 10, 1).getTime();
+      val = new Date(start + dgRand(seedRef) * (end - start)).toISOString().slice(0, 10);
+    } else {
+      val = `${col.name.slice(0, 3).toUpperCase()}${String(10000 + i).slice(1)}`;
+    }
+    out.push(val);
+  }
+  return out;
+}
+
+// ── Build full dataset from schema ───────────────────────────────
+function dgBuildDataset(schema) {
+  const seedRef = { v: schema.seed || 712481 };
+  const cols = (schema.columns || []).map((c, i) => ({
+    id: `col_${i}`, name: c.name, type: c.type,
+    range: c.range, categories: c.categories,
+    missing_pct: c.missing_pct ?? 0, outlier_pct: c.outlier_pct ?? 0,
+  }));
+  const colValues = cols.map(c => dgGenerateCol(c, schema.rows, seedRef));
+  const rows = [];
+  for (let i = 0; i < schema.rows; i++) rows.push(cols.map((_, ci) => colValues[ci][i]));
+  return {
+    name: (schema.topic || "ml_dataset").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""),
+    headers: cols.map(c => c.name),
+    rows,
+    columnsMeta: cols,
+  };
+}
+
+// ── CSV export helper ─────────────────────────────────────────────
+function dgToCSV(ds) {
+  const escape = v => {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [ds.headers, ...ds.rows].map(row => row.map(escape).join(",")).join("\n");
+}
+
+// ── Call Groq to get a dataset schema (subtopic-aware) ───────────
+async function dgCallGroqForSchema(userPrompt, apiKey, model, rows, seed) {
+  const system = `You are an expert ML data engineer and educator. Your job is to:
+1. Design a synthetic dataset whose columns are DIRECTLY USABLE for the given ML topic and every sub-topic listed.
+2. Write a COMPLETE, RUNNABLE Python project that covers ALL listed sub-topics PLUS closely related companion techniques.
+
+═══ COLUMN DESIGN RULES ═══
+- 6-10 columns with REALISTIC snake_case names perfectly suited to the domain (e.g. for linear regression: house_size_sqft, num_bedrooms, location_tier, year_built, price_usd)
+- Columns must enable EVERY sub-topic:
+  • min_max_scaling / standard_scaling   → include 2+ numeric cols with VERY different ranges (e.g. [18,75] vs [20000,900000])
+  • one_hot_encoding / label_encoding    → include 2+ categorical cols with 3-6 categories each
+  • train_test_split / cross_validation  → include a clear numeric TARGET column last
+  • grid_search / model_selection        → target column present, feature columns vary in type
+  • accuracy / r2 / metrics              → target column clearly defined (classification=boolean, regression=numeric)
+  • any sub-topic about missing data     → missing_pct 3-8% on 2-3 cols
+  • any sub-topic about outliers         → outlier_pct 3-7% on numeric cols
+- Always add deliberate imperfections so preprocessing is genuinely needed
+
+═══ PYTHON CODE RULES ═══
+The python_code field must be a COMPLETE, PRODUCTION-QUALITY script (400-800 lines) that:
+
+SECTION 1 — IMPORTS & LOAD
+  • All necessary imports (pandas, numpy, sklearn, matplotlib, warnings)
+  • Load CSV with correct filename
+  • df.head(), df.info(), df.describe(), df.isnull().sum()
+
+SECTION 2 — ONE SECTION PER SUB-TOPIC (use "# ═══ SUB-TOPIC: <name> ═══" headers)
+  For EVERY sub-topic requested, implement it properly:
+  • MinMaxScaler → show before/after ranges, sklearn MinMaxScaler
+  • StandardScaler → show mean/std before/after
+  • OneHotEncoder → ColumnTransformer approach + show expanded columns
+  • LabelEncoder → ordinal columns
+  • train_test_split → with stratify where applicable, show shapes
+  • GridSearchCV → param_grid with 2-3 params, best_params_, best_score_
+  • accuracy_score → classification_report, confusion_matrix
+  • r2_score → MAE, MSE, RMSE, R², Adjusted R²
+
+SECTION 3 — RELATED COMPANION TECHNIQUES (always include)
+  If topic is Linear Regression → also implement:
+    • Lasso (L1 regularization) with alpha tuning
+    • Ridge (L2 regularization) with alpha tuning
+    • ElasticNet
+    • Comparison table: LR vs Lasso vs Ridge vs ElasticNet (MAE/RMSE/R²)
+    • VIF (Variance Inflation Factor) for multicollinearity check
+    • Residual plot code (matplotlib)
+  If topic involves classification → also implement:
+    • ROC-AUC curve code
+    • Precision-Recall curve
+    • Cross-validation with StratifiedKFold
+  If topic involves clustering → also implement:
+    • Elbow method
+    • Silhouette score
+  Always add at least 3-5 companion techniques relevant to the main topic.
+
+SECTION 4 — COMPLETE ML PIPELINE
+  • Build a full sklearn Pipeline with all preprocessing + model
+  • fit/predict/score
+  • Print final comparison summary of all models tried
+
+SECTION 5 — SAVE ARTIFACTS
+  • Save preprocessed CSV
+  • Save model with joblib.dump
+
+Code must be copy-paste ready for Google Colab / Jupyter with zero modification.
+Use f-strings for all printed output. Add inline comments explaining WHY each step is done.
+
+═══ RETURN FORMAT ═══
+Return ONLY valid JSON (no markdown, no backticks):
+{
+  "topic": "short_dataset_name",
+  "rows": ${rows},
+  "seed": ${seed},
+  "description": "What the dataset demonstrates and which sub-topics it covers",
+  "columns": [
+    {
+      "name": "snake_case_col",
+      "type": "numeric|numeric_int|categorical|boolean|date|id",
+      "range": [min, max],
+      "categories": ["CatA","CatB","CatC"],
+      "missing_pct": 2.5,
+      "outlier_pct": 3.0
+    }
+  ],
+  "python_code": "<complete script as described above — escape all newlines as \\n, escape all quotes>",
+  "practice_steps": ["Step 1: ...", "Step 2: ...", "Step 3: ...", "Step 4: ...", "Step 5: ..."]
+}`;
+
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      temperature: 0.45,
+      max_tokens: 6000,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userPrompt },
+      ],
+    }),
+  });
+  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  const json = await res.json();
+  const content = json.choices?.[0]?.message?.content || "{}";
+  return JSON.parse(content);
+}
+
+// ── Default fallback schema (Linear Regression / general ML practice) ─────
+const DG_DEFAULT_SCHEMA = {
+  topic: "house_price_prediction",
+  rows: 200,
+  seed: 712481,
+  description: "House price dataset for practising MinMax/Standard scaling (wildly different ranges), OneHot encoding (location_tier, house_type), train-test split, GridSearchCV on Ridge/Lasso, and regression metrics (MAE, RMSE, R², Adjusted R²). Includes ~3-5% missing values and outliers so data-cleaning is required.",
+  columns: [
+    { name: "house_size_sqft",  type: "numeric",     range: [400,  5200],    missing_pct: 2,   outlier_pct: 4 },
+    { name: "num_bedrooms",     type: "numeric_int",  range: [1,    7],       missing_pct: 1,   outlier_pct: 2 },
+    { name: "num_bathrooms",    type: "numeric_int",  range: [1,    5],       missing_pct: 1,   outlier_pct: 0 },
+    { name: "year_built",       type: "numeric_int",  range: [1960, 2023],    missing_pct: 1.5, outlier_pct: 0 },
+    { name: "distance_to_city_km", type: "numeric",  range: [0.5,  45],      missing_pct: 2,   outlier_pct: 3 },
+    { name: "annual_property_tax", type: "numeric",  range: [800,  18000],   missing_pct: 3,   outlier_pct: 5 },
+    { name: "location_tier",    type: "categorical", categories: ["Premium","Mid-Range","Budget","Suburban","Rural"], missing_pct: 1, outlier_pct: 0 },
+    { name: "house_type",       type: "categorical", categories: ["Apartment","Villa","Townhouse","Bungalow","Duplex"], missing_pct: 1, outlier_pct: 0 },
+    { name: "has_garage",       type: "boolean",     missing_pct: 0, outlier_pct: 0 },
+    { name: "price_usd",        type: "numeric",     range: [85000, 950000], missing_pct: 0,   outlier_pct: 6 },
+  ],
+  python_code: `import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# ═══ SECTION 1: LOAD & EXPLORE ═══
+df = pd.read_csv('house_price_prediction.csv')
+print("Shape:", df.shape)
+print(df.head(3).to_string())
+print("\\nDtypes:\\n", df.dtypes)
+print("\\nMissing values:\\n", df.isnull().sum())
+print("\\nDescribe:\\n", df.describe().to_string())
+
+# ═══ SECTION 2: DEFINE COLUMNS ═══
+TARGET      = 'price_usd'
+NUM_COLS    = ['house_size_sqft','num_bedrooms','num_bathrooms','year_built',
+               'distance_to_city_km','annual_property_tax']
+CAT_COLS    = ['location_tier','house_type','has_garage']
+
+X = df.drop(columns=[TARGET])
+y = df[TARGET]
+
+# ═══ SUB-TOPIC: Train-Test Split ═══
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+print(f"\\nTrain: {X_train.shape} | Test: {X_test.shape}")
+
+# ═══ SUB-TOPIC: MinMax Scaling (show before / after) ═══
+print("\\n--- MinMax Scaling demo (before) ---")
+print(X_train[NUM_COLS].describe().loc[['min','max']].to_string())
+mm_scaler = MinMaxScaler()
+X_train_mm = mm_scaler.fit_transform(X_train[NUM_COLS])
+print("\\n--- MinMax Scaling demo (after — all values between 0 and 1) ---")
+print(pd.DataFrame(X_train_mm, columns=NUM_COLS).describe().loc[['min','max']].to_string())
+
+# ═══ SUB-TOPIC: OneHot Encoding ═══
+ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+X_train_cat = ohe.fit_transform(X_train[CAT_COLS])
+print(f"\\n--- OneHot Encoding: {len(CAT_COLS)} cols → {X_train_cat.shape[1]} columns ---")
+print("New category columns:", ohe.get_feature_names_out(CAT_COLS).tolist())
+
+# ═══ SECTION 3: FULL PREPROCESSING PIPELINE ═══
+num_pipe = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler',  MinMaxScaler()),
+])
+cat_pipe = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('ohe',     OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+])
+preprocessor = ColumnTransformer([
+    ('num', num_pipe, NUM_COLS),
+    ('cat', cat_pipe, CAT_COLS),
+])
+
+# ═══ SUB-TOPIC: Linear Regression ═══
+lr_pipe = Pipeline([('pre', preprocessor), ('model', LinearRegression())])
+lr_pipe.fit(X_train, y_train)
+y_pred_lr = lr_pipe.predict(X_test)
+
+def reg_metrics(name, y_true, y_pred, n, p):
+    mae   = mean_absolute_error(y_true, y_pred)
+    rmse  = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2    = r2_score(y_true, y_pred)
+    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1)
+    print(f"  {name:<25} MAE={mae:>10,.0f}  RMSE={rmse:>10,.0f}  R²={r2:.4f}  Adj-R²={adj_r2:.4f}")
+    return {'name':name,'MAE':mae,'RMSE':rmse,'R2':r2,'AdjR2':adj_r2}
+
+print("\\n═══ Model Comparison ═══")
+results = []
+n_test, p = len(y_test), X_train.shape[1]
+results.append(reg_metrics("Linear Regression", y_test, y_pred_lr, n_test, p))
+
+# ═══ SUB-TOPIC: Accuracy Score → R², MAE, RMSE, Adjusted R² ═══
+print(f"\\n  (R² is the regression equivalent of accuracy score)")
+print(f"  R² = {r2_score(y_test, y_pred_lr):.4f}  means the model explains")
+print(f"  {r2_score(y_test, y_pred_lr)*100:.1f}% of the variance in house prices.")
+
+# ═══ SUB-TOPIC: GridSearchCV ═══
+print("\\n--- GridSearchCV on Ridge ---")
+ridge_pipe = Pipeline([('pre', preprocessor), ('model', Ridge())])
+param_grid = {'model__alpha': [0.01, 0.1, 1, 10, 100, 1000]}
+gs = GridSearchCV(ridge_pipe, param_grid, cv=5, scoring='r2', n_jobs=-1)
+gs.fit(X_train, y_train)
+print(f"  Best alpha: {gs.best_params_['model__alpha']}  |  CV R²: {gs.best_score_:.4f}")
+y_pred_ridge = gs.predict(X_test)
+results.append(reg_metrics("Ridge (best alpha)", y_test, y_pred_ridge, n_test, p))
+
+# ═══ COMPANION: Lasso (L1 Regularization) ═══
+lasso_pipe = Pipeline([('pre', preprocessor), ('model', Lasso())])
+lasso_gs   = GridSearchCV(lasso_pipe, {'model__alpha': [0.1, 1, 10, 100]}, cv=5, scoring='r2', n_jobs=-1)
+lasso_gs.fit(X_train, y_train)
+y_pred_lasso = lasso_gs.predict(X_test)
+results.append(reg_metrics("Lasso (L1, best alpha)", y_test, y_pred_lasso, n_test, p))
+
+# ═══ COMPANION: ElasticNet ═══
+en_pipe = Pipeline([('pre', preprocessor), ('model', ElasticNet())])
+en_gs   = GridSearchCV(en_pipe, {'model__alpha':[0.1,1,10],'model__l1_ratio':[.2,.5,.8]}, cv=5, scoring='r2', n_jobs=-1)
+en_gs.fit(X_train, y_train)
+y_pred_en = en_gs.predict(X_test)
+results.append(reg_metrics("ElasticNet", y_test, y_pred_en, n_test, p))
+
+# ═══ COMPANION: VIF — Multicollinearity Check ═══
+print("\\n--- VIF (Variance Inflation Factor) ---")
+try:
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    X_num_filled = X_train[NUM_COLS].fillna(X_train[NUM_COLS].median())
+    vif_data = pd.DataFrame({'feature': NUM_COLS,
+                              'VIF': [variance_inflation_factor(X_num_filled.values, i)
+                                      for i in range(len(NUM_COLS))]})
+    print(vif_data.sort_values('VIF', ascending=False).to_string(index=False))
+    print("  (VIF > 10 = severe multicollinearity)")
+except ImportError:
+    print("  statsmodels not available — skipping VIF (pip install statsmodels)")
+
+# ═══ Final Summary Table ═══
+print("\\n═══════════════════════════════════════════════════════")
+print(f"  {'Model':<26} {'MAE':>12} {'RMSE':>12} {'R²':>8} {'Adj-R²':>8}")
+print("  " + "-"*68)
+for r in results:
+    print(f"  {r['name']:<26} {r['MAE']:>12,.0f} {r['RMSE']:>12,.0f} {r['R2']:>8.4f} {r['AdjR2']:>8.4f}")
+print("═══════════════════════════════════════════════════════")
+
+# ═══ SAVE ARTIFACTS ═══
+import joblib, os
+os.makedirs('output', exist_ok=True)
+# Save preprocessed CSV (training set)
+X_pre = pd.DataFrame(preprocessor.fit_transform(X_train, y_train))
+X_pre.to_csv('output/house_price_preprocessed.csv', index=False)
+joblib.dump(gs.best_estimator_, 'output/ridge_best_model.pkl')
+print("\\n✅ Saved preprocessed CSV → output/house_price_preprocessed.csv")
+print("✅ Saved best Ridge model   → output/ridge_best_model.pkl")
+`,
+  practice_steps: [
+    "Step 1: Load the CSV, run df.head(), df.describe(), df.isnull().sum() — understand the feature ranges and missing data before touching anything.",
+    "Step 2: Apply MinMaxScaler to the numeric columns. Print the [min, max] before and after to confirm all values land between 0 and 1.",
+    "Step 3: Apply OneHotEncoder to the categorical columns (location_tier, house_type, has_garage). Print get_feature_names_out() to see the new binary columns.",
+    "Step 4: Use train_test_split (test_size=0.2, random_state=42). Build a ColumnTransformer pipeline combining imputer + scaler + encoder, then fit a LinearRegression. Compute MAE, RMSE, R², and Adjusted R².",
+    "Step 5: Run GridSearchCV on Ridge with alphas [0.01, 0.1, 1, 10, 100, 1000]. Compare best Ridge vs LinearRegression vs Lasso in a summary table. Check VIF scores to spot multicollinear features.",
+  ],
+};
+
+// ── Preset prompts keyed to common ML topics ─────────────────────
+const DG_PRESETS = [
+  { label: "Outlier Detection",      prompt: "Generate a dataset for outlier detection using IQR and Z-score. Include numeric columns with clear outliers (3-8%)." },
+  { label: "MinMax Scaling",         prompt: "Create a dataset where numeric columns have drastically different scales (0-5 vs 4000-380000). Needs MinMax scaling." },
+  { label: "One-Hot Encoding",       prompt: "Dataset with 3-4 categorical columns (3-6 unordered categories each) suitable for OneHotEncoder with ColumnTransformer." },
+  { label: "Missing Value Imputation", prompt: "Dataset where 3-10% values are randomly missing. Practice mean/median/mode imputation with SimpleImputer." },
+  { label: "Train-Test Split",       prompt: "Classification dataset with features and binary target. Practice train_test_split with stratify parameter." },
+  { label: "Correlation Analysis",   prompt: "Dataset with 6-8 numeric columns at varying correlation levels. Practice correlation matrix and feature selection." },
+  { label: "Label Encoding",         prompt: "Dataset with ordinal categorical columns (education, income bracket) for LabelEncoder + nominal cols for OneHotEncoder." },
+  { label: "Feature Engineering",    prompt: "Raw dataset needing feature engineering: date decomposition, ratio features, log transforms on skewed columns." },
+];
+
+// ── TYPE metadata ─────────────────────────────────────────────────
+const DG_TYPE_COLORS  = { numeric:"#f59b13", numeric_int:"#da8a60", categorical:"#db4d7e", boolean:"#6793d9", date:"#3da2c4", id:"#8e8e93" };
+const DG_TYPE_LABELS  = { numeric:"Float", numeric_int:"Int", categorical:"Categorical", boolean:"Boolean", date:"Date", id:"ID" };
+
 // ─── Supabase credentials stored in sessionStorage (cleared on tab close)
 // Users enter URL+key once in Settings; we cache them for the session only.
 // ── Supabase credentials come from .env (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
@@ -451,7 +825,7 @@ async function sbGetDayContent(sb, courseId, dayKey) {
   const result = {};
   for (const row of (rows || [])) {
     try {
-      result[row.content_type] = row.content_type === "quiz"
+      result[row.content_type] = (row.content_type === "quiz" || row.content_type === "dataGenerator")
         ? JSON.parse(row.content)
         : row.content;
     } catch {
@@ -470,7 +844,7 @@ async function sbGetAllDayContent(sb, courseId) {
   for (const row of (rows || [])) {
     if (!byDay[row.day_key]) byDay[row.day_key] = {};
     try {
-      byDay[row.day_key][row.content_type] = row.content_type === "quiz"
+      byDay[row.day_key][row.content_type] = (row.content_type === "quiz" || row.content_type === "dataGenerator")
         ? JSON.parse(row.content)
         : row.content;
     } catch {
@@ -609,7 +983,7 @@ async function buildDayZip(day, dayData, selection) {
   const JSZip = await loadJSZip();
   const zip = new JSZip();
   const folder = zip.folder(`Day${day.dayNum}_${day.topic.replace(/[^a-zA-Z0-9]+/g,"_")}`);
-  const { notebook, codeBlocks, examples, resources, assignment, quiz, notes, teachingGuide } = dayData;
+  const { notebook, codeBlocks, examples, resources, assignment, quiz, notes, teachingGuide, dataGenerator } = dayData;
 
   if (selection.notebook && notebook) {
     folder.file(`Day${day.dayNum}_notebook.md`,
@@ -681,6 +1055,26 @@ async function buildDayZip(day, dayData, selection) {
       `# Teaching Guide: Day ${day.dayNum} - ${day.topic}\n\n${teachingGuide}`);
   }
 
+  // ── Data Generator export: CSV + Python code ──
+  if (selection.dataGenerator && dataGenerator?.schema) {
+    try {
+      const ds = dgBuildDataset(dataGenerator.schema);
+      folder.file(`Day${day.dayNum}_dataset.csv`, dgToCSV(ds));
+      if (dataGenerator.code) {
+        folder.file(`Day${day.dayNum}_preprocessing.py`, dataGenerator.code);
+        // Also pack as a ready-to-run .ipynb
+        const dgCells = [
+          { cell_type:"markdown", metadata:{}, source:[`# Day ${day.dayNum}: ${day.topic} — Practice Dataset\n\n${dataGenerator.desc || ""}`] },
+          { cell_type:"code",     metadata:{}, source:[dataGenerator.code], outputs:[], execution_count:null },
+        ];
+        const dgNb = JSON.stringify({ nbformat:4, nbformat_minor:5,
+          metadata:{ kernelspec:{ display_name:"Python 3", language:"python", name:"python3" }, language_info:{ name:"python" }},
+          cells: dgCells }, null, 2);
+        folder.file(`Day${day.dayNum}_dataset_notebook.ipynb`, dgNb);
+      }
+    } catch(_) { /* non-fatal — skip if schema rebuild fails */ }
+  }
+
   // README manifest
   const files = [];
   if (selection.notebook && notebook)           files.push("📓 notebook (.md + .ipynb)");
@@ -690,6 +1084,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.quiz && quiz?.length)           files.push("🎯 quiz (student sheet + answer key + .json)");
   if (selection.notes && notes?.trim())         files.push("🗒️ personal notes (.md)");
   if (selection.guide && teachingGuide)         files.push("🧑‍🏫 teaching guide (.md)");
+  if (selection.dataGenerator && dataGenerator) files.push("🗃️ dataset (.csv + preprocessing .py + .ipynb)");
 
   folder.file("README.md",
     `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI With ARBAJ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
@@ -700,22 +1095,24 @@ async function buildDayZip(day, dayData, selection) {
 
 function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
   const available = {
-    notebook:   !!dayData.notebook,
-    examples:   !!dayData.examples,
-    resources:  !!dayData.resources,
-    assignment: !!dayData.assignment,
-    quiz:       Array.isArray(dayData.quiz) && dayData.quiz.length > 0,
-    notes:      !!dayData.notes?.trim(),
-    guide:      !!dayData.teachingGuide && isTrainer,
+    notebook:      !!dayData.notebook,
+    examples:      !!dayData.examples,
+    resources:     !!dayData.resources,
+    assignment:    !!dayData.assignment,
+    quiz:          Array.isArray(dayData.quiz) && dayData.quiz.length > 0,
+    notes:         !!dayData.notes?.trim(),
+    guide:         !!dayData.teachingGuide && isTrainer,
+    dataGenerator: !!dayData.dataGenerator?.schema,
   };
 
   const ITEMS = [
-    { key:"notebook",   label:"📓 Notebook",       sub:"(.md + .ipynb)" },
-    { key:"examples",   label:"⚡ Exercises",       sub:"(.md)" },
-    { key:"resources",  label:"📂 Resources",       sub:"(.md)" },
-    { key:"assignment", label:"📝 Assignment",      sub:"(.md + .ipynb skeleton)" },
-    { key:"quiz",       label:"🎯 Quiz",            sub:"(student sheet + answer key)" },
-    { key:"notes",      label:"🗒️ My Notes",        sub:"(.md)" },
+    { key:"notebook",      label:"📓 Notebook",          sub:"(.md + .ipynb)" },
+    { key:"examples",      label:"⚡ Exercises",          sub:"(.md)" },
+    { key:"resources",     label:"📂 Resources",          sub:"(.md)" },
+    { key:"assignment",    label:"📝 Assignment",         sub:"(.md + .ipynb skeleton)" },
+    { key:"quiz",          label:"🎯 Quiz",               sub:"(student sheet + answer key)" },
+    { key:"notes",         label:"🗒️ My Notes",           sub:"(.md)" },
+    { key:"dataGenerator", label:"🗃️ Dataset + Code",     sub:"(.csv + .py + .ipynb)" },
     ...(isTrainer ? [{ key:"guide", label:"🧑‍🏫 Teaching Guide", sub:"(.md)" }] : []),
   ].filter(i => available[i.key]);
 
@@ -2191,7 +2588,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, ...light } = v;
           lightDayData[k] = light;
         }
         // FIX: conflict guard — check updated_at before writing
@@ -2244,7 +2641,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -3147,6 +3544,7 @@ Hard rules:
                   updateDay={updateDay} notify={notify}
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
+                  groqKey={groqKey} groqModel={groqModel}
                   onEditTopic={(newTopic) => {
                     // Find the planDays index for this day key and update only its topic
                     const pidx = dayMap[selDay.key];
@@ -4259,7 +4657,521 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
 /* ═══════════════════════════════════════════════════════════════════
    DAY PAGE — Full Workspace
 ═══════════════════════════════════════════════════════════════════ */
-function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic }) {
+/* ═══════════════════════════════════════════════════════════════════
+   DATA GENERATOR TAB  — lives inside DayPage as a full tab panel
+   Receives: day, groqKey, groqModel, notify
+   All state is local — no LMS state is mutated.
+═══════════════════════════════════════════════════════════════════ */
+function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay, studentMode }) {
+  const topicHint  = day?.topic || "";
+  const k          = day?.key || "";
+  // Read sub-topics set in the shared DayPage sub-topics field
+  const subTopics  = (dayData?.subTopics || "").trim();
+
+  // Restore previously saved generator state (schema + code) if present
+  const savedDg = dayData?.dataGenerator || null;
+
+  // Build the default prompt automatically from topic + subtopics whenever they change
+  function buildAutoPrompt(topic, subs) {
+    if (!subs) {
+      return `Generate a dataset for practising: ${topic}`;
+    }
+    const subList = subs.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
+    return (
+      `ML Topic: "${topic}"\n\n` +
+      `Sub-topics that MUST be practisable on this dataset:\n` +
+      subList.map((s, i) => `  ${i + 1}. ${s}`).join("\n") +
+      `\n\nDesign the dataset columns so every sub-topic above can be directly applied. ` +
+      `Also include Python code sections for related companion techniques (e.g. if topic is Linear Regression, also add Lasso, Ridge, ElasticNet, VIF, residual plots).`
+    );
+  }
+
+  const [dgPrompt,  setDgPrompt]  = useState(() => buildAutoPrompt(topicHint, subTopics));
+  const [dgRows,    setDgRows]    = useState(savedDg?.schema?.rows || 200);
+  const [dgSeed,    setDgSeed]    = useState(savedDg?.schema?.seed || 712481);
+  const [dgSchema,  setDgSchema]  = useState(savedDg?.schema  || DG_DEFAULT_SCHEMA);
+  const [dgDataset, setDgDataset] = useState(null);
+  const [dgCode,    setDgCode]    = useState(savedDg?.code    || DG_DEFAULT_SCHEMA.python_code);
+  const [dgDesc,    setDgDesc]    = useState(savedDg?.desc    || DG_DEFAULT_SCHEMA.description);
+  const [dgSteps,   setDgSteps]   = useState(savedDg?.steps   || DG_DEFAULT_SCHEMA.practice_steps || []);
+  const [dgBusy,    setDgBusy]    = useState(false);
+  const [dgPage,    setDgPage]    = useState(0);
+  const [dgCodeCopied, setDgCodeCopied] = useState(false);
+  const DG_PAGE_SIZE = 30;
+
+  // Auto-refresh prompt whenever the DayPage sub-topics field changes
+  useEffect(() => {
+    setDgPrompt(buildAutoPrompt(topicHint, subTopics));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topicHint, subTopics]);
+
+  // Build dataset whenever schema changes
+  useEffect(() => {
+    const ds = dgBuildDataset(dgSchema);
+    setDgDataset(ds);
+    setDgPage(0);
+  }, [dgSchema]);
+
+  // Parse subtopics into a clean array for display
+  const subTopicList = subTopics
+    ? subTopics.split(/[,\n]+/).map(s => s.trim()).filter(Boolean)
+    : [];
+
+  // Save generated state to day_data so students can see it and it persists across sessions
+  const saveToDay = (schema, code, desc, steps) => {
+    if (!updateDay || !k || studentMode) return;
+    updateDay(k, {
+      dataGenerator: { schema, code, desc, steps, savedAt: new Date().toISOString() }
+    });
+  };
+
+  const handleGenerate = async () => {
+    const prompt = dgPrompt.trim();
+    if (!prompt) return;
+
+    if (!groqKey) {
+      // Fallback: build default schema keyed to the topic
+      const s = { ...DG_DEFAULT_SCHEMA, rows: dgRows, seed: dgSeed, topic: topicHint || "practice_dataset" };
+      setDgSchema(s);
+      setDgCode(s.python_code);
+      setDgDesc(s.description);
+      setDgSteps(s.practice_steps || []);
+      saveToDay(s, s.python_code, s.description, s.practice_steps || []);
+      notify("⚠️ No Groq key — loaded default schema. Add Groq key in Settings for AI-generated datasets.", "warn");
+      return;
+    }
+
+    setDgBusy(true);
+    try {
+      // Build the full enriched prompt with topic + subtopics context
+      const subSection = subTopicList.length > 0
+        ? `\n\nSub-topics to cover (EACH must be directly practisable on the dataset):\n${subTopicList.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}`
+        : "";
+      const full =
+        `Main ML Topic: "${topicHint}"${subSection}\n\n` +
+        `${prompt}\n\n` +
+        `Generate ${dgRows} rows. Seed: ${dgSeed}.\n\n` +
+        `IMPORTANT: columns must be DOMAIN-SPECIFIC (not generic col1/col2). ` +
+        `Python code must have one clearly labelled section per sub-topic, ` +
+        `plus companion techniques related to "${topicHint}" (e.g. regularization variants, residual analysis, model comparison table).`;
+
+      const schema = await dgCallGroqForSchema(full, groqKey, groqModel || "llama-3.3-70b-versatile", dgRows, dgSeed);
+      schema.rows = dgRows;
+      schema.seed = dgSeed;
+      const code  = schema.python_code || "# No code generated";
+      const desc  = schema.description || "";
+      const steps = schema.practice_steps || [];
+      setDgSchema(schema);
+      setDgCode(code);
+      setDgDesc(desc);
+      setDgSteps(steps);
+      saveToDay(schema, code, desc, steps);
+      const subMsg = subTopicList.length ? ` covering ${subTopicList.length} sub-topics` : "";
+      notify(`✅ Generated ${dgRows} × ${(schema.columns || []).length} dataset for "${topicHint}"${subMsg}`, "success");
+    } catch (e) {
+      const msg = e.message?.slice(0, 160) || "unknown";
+      notify("❌ Dataset generation failed: " + msg, "error");
+      // Graceful fallback
+      const s = { ...DG_DEFAULT_SCHEMA, rows: dgRows, seed: dgSeed, topic: topicHint || "practice_dataset" };
+      setDgSchema(s);
+      setDgCode(s.python_code);
+      setDgDesc(s.description);
+      setDgSteps(s.practice_steps || []);
+      saveToDay(s, s.python_code, s.description, s.practice_steps || []);
+    } finally {
+      setDgBusy(false);
+    }
+  };
+
+  const handlePreset = (prompt) => {
+    setDgPrompt(`Topic context: "${topicHint}"\n\n${prompt}`);
+  };
+
+  const downloadCSV = () => {
+    if (!dgDataset) return;
+    downloadBlob(dgToCSV(dgDataset), `Day${day?.dayNum || "X"}_${dgDataset.name}.csv`, "text/csv");
+    notify("📥 CSV downloaded", "success");
+  };
+
+  const downloadPy = () => {
+    downloadBlob(dgCode, `Day${day?.dayNum || "X"}_${dgDataset?.name || "dataset"}_preprocessing.py`);
+    notify("📥 Python file downloaded", "success");
+  };
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(dgCode).then(() => {
+      setDgCodeCopied(true);
+      setTimeout(() => setDgCodeCopied(false), 2000);
+    });
+  };
+
+  const previewRows = dgDataset ? dgDataset.rows.slice(dgPage * DG_PAGE_SIZE, (dgPage + 1) * DG_PAGE_SIZE) : [];
+  const totalPages  = dgDataset ? Math.ceil(dgDataset.rows.length / DG_PAGE_SIZE) : 1;
+
+  // Stats
+  const numericCols  = (dgDataset?.columnsMeta || []).filter(c => c.type === "numeric" || c.type === "numeric_int").length;
+  const catCols      = (dgDataset?.columnsMeta || []).filter(c => c.type === "categorical").length;
+  const nullCellsCount = (dgDataset?.rows || []).reduce((a, r) => a + r.filter(v => v === null).length, 0);
+  const outlierCols  = (dgDataset?.columnsMeta || []).filter(c => c.outlier_pct > 0).length;
+
+  return (
+    <div style={{ animation: "lms-in .2s ease" }}>
+
+      {/* ── Header banner ── */}
+      <div style={{ background:"linear-gradient(135deg,#1e293b,#0f172a)", borderRadius:16, padding:"18px 20px", marginBottom:20, display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+        <div style={{ width:44, height:44, background:"linear-gradient(135deg,#f59b13,#da8a60)", borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>🗃️</div>
+        <div style={{ flex:1, minWidth:180 }}>
+          <p style={{ fontWeight:800, fontSize:15, color:"#f8f9fa", margin:0, letterSpacing:"-.2px" }}>
+            Data Generator — Day {day?.dayNum}: {topicHint}
+          </p>
+          {subTopicList.length > 0 ? (
+            <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:6 }}>
+              {subTopicList.map((s, i) => (
+                <span key={i} style={{ fontSize:11, fontWeight:700, background:"#f59b1322", color:"#fbbf24", border:"1px solid #f59b1355", borderRadius:20, padding:"2px 9px", letterSpacing:".02em" }}>
+                  {s}
+                </span>
+              ))}
+              {savedDg?.savedAt && (
+                <span style={{ fontSize:11, color:"#22c55e", background:"#22c55e22", border:"1px solid #22c55e44", borderRadius:20, padding:"2px 9px", fontWeight:600 }}>
+                  ✓ Saved {new Date(savedDg.savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}
+                </span>
+              )}
+            </div>
+          ) : (
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:4, flexWrap:"wrap" }}>
+              <p style={{ fontSize:12, color:"#94a3b8", margin:0 }}>
+                Generate synthetic practice datasets with Python preprocessing code, tailored to today's topic.
+                {!studentMode && " Add sub-topics above the tabs to target specific techniques."}
+              </p>
+              {savedDg?.savedAt && (
+                <span style={{ fontSize:11, color:"#22c55e", background:"#22c55e22", border:"1px solid #22c55e44", borderRadius:20, padding:"2px 9px", fontWeight:600, whiteSpace:"nowrap" }}>
+                  ✓ Saved {new Date(savedDg.savedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          {dgDataset && (
+            <>
+              <button className="lms-btn lms-btn-amber" onClick={downloadCSV} style={{ fontSize:12 }}>
+                <Ic n="download" s={13}/>CSV
+              </button>
+              <button className="lms-btn lms-btn-ghost" onClick={downloadPy} style={{ fontSize:12, color:"#e2e8f0", background:"#334155", border:"none" }}>
+                <Ic n="download" s={13}/>Python .py
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── Prompt & controls (trainer) / Status (student) ── */}
+      <div className="lms-card" style={{ padding:18, marginBottom:18 }}>
+        {!studentMode && (
+          <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>
+            Describe the dataset you need for practice
+          </p>
+        )}
+
+        {/* ── Sub-topic context notice — trainer only ── */}
+        {!studentMode && subTopicList.length > 0 && (
+          <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12.5, color:"#166534", lineHeight:1.6 }}>
+            <strong>✅ Sub-topics active ({subTopicList.length}):</strong>{" "}
+            {subTopicList.join(" · ")}<br/>
+            <span style={{ fontSize:11.5, color:"#15803d", opacity:.85 }}>
+              The generated dataset columns and Python code will directly target each sub-topic above, plus related companion techniques.
+            </span>
+          </div>
+        )}
+        {subTopicList.length === 0 && !studentMode && (
+          <div style={{ background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:10, padding:"9px 13px", marginBottom:12, fontSize:12, color:"#92400e" }}>
+            💡 <strong>Tip:</strong> Fill in the <em>Sub-topics / Focus areas</em> field above the tabs to auto-target specific techniques (e.g. <em>min max scaling, onehot encoder, train test split, gridsearch cv, accuracy score</em>).
+          </div>
+        )}
+
+        {/* Trainer-only: prompt + generate controls */}
+        {!studentMode && (
+          <>
+            <textarea
+              value={dgPrompt}
+              onChange={e => setDgPrompt(e.target.value)}
+              rows={3}
+              className="lms-input"
+              placeholder={`e.g. "Generate a dataset for practising outlier detection on ${topicHint} data with IQR method..."`}
+              style={{ fontSize:13, resize:"vertical", minHeight:80 }}
+            />
+
+            {/* Quick presets */}
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:10, marginBottom:14 }}>
+              {DG_PRESETS.map(p => (
+                <button key={p.label}
+                  onClick={() => handlePreset(p.prompt)}
+                  style={{ padding:"4px 10px", borderRadius:20, background:"#f1f5f9", border:"1.5px solid #e2e8f0", fontSize:11.5, fontWeight:650, color:"#475569", cursor:"pointer", transition:"background .15s" }}
+                  onMouseEnter={e => e.currentTarget.style.background="#e2e8f0"}
+                  onMouseLeave={e => e.currentTarget.style.background="#f1f5f9"}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Row count + seed + generate */}
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
+              <div>
+                <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Rows</p>
+                <input type="number" min={20} max={5000} value={dgRows}
+                  onChange={e => setDgRows(Math.max(20, parseInt(e.target.value) || 200))}
+                  className="lms-input" style={{ width:90, fontWeight:700 }} />
+              </div>
+              <div>
+                <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Seed</p>
+                <input type="number" value={dgSeed}
+                  onChange={e => setDgSeed(parseInt(e.target.value) || 1)}
+                  className="lms-input" style={{ width:90, fontWeight:700 }} />
+              </div>
+              <button className="lms-btn lms-btn-blue" disabled={dgBusy} onClick={handleGenerate} style={{ padding:"9px 20px", fontWeight:800 }}>
+                {dgBusy ? <><Spin s={13}/>Generating…</> : <><Ic n="brain" s={14}/>Generate Dataset</>}
+              </button>
+              {!groqKey && (
+                <span style={{ fontSize:12, color:"#92400e", background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"6px 10px" }}>
+                  ⚠️ No Groq key — add it in Settings for AI datasets
+                </span>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Student-only: show status of dataset availability */}
+        {studentMode && !savedDg && (
+          <div style={{ padding:"14px 16px", background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:10, fontSize:13, color:"#64748b", textAlign:"center" }}>
+            🕐 Your trainer hasn't published a dataset for this day yet. Check back later.
+          </div>
+        )}
+      </div>
+
+      {/* ── Stats bar ── */}
+      {dgDataset && (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))", gap:10, marginBottom:18 }}>
+          {[
+            { k:"Rows",           v: dgDataset.rows.length.toLocaleString() },
+            { k:"Columns",        v: dgDataset.headers.length },
+            { k:"Numeric",        v: numericCols },
+            { k:"Categorical",    v: catCols },
+            { k:"Missing cells",  v: nullCellsCount },
+            { k:"Cols w/ outliers", v: outlierCols },
+          ].map(s => (
+            <div key={s.k} className="lms-card" style={{ padding:"10px 14px" }}>
+              <p style={{ fontSize:10, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em", margin:"0 0 4px 0" }}>{s.k}</p>
+              <p style={{ fontSize:22, fontWeight:800, color:"#0f172a", margin:0, letterSpacing:"-.3px" }}>{s.v}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Main grid: table + code ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:16 }}>
+
+        {/* Dataset description */}
+        {dgDesc && (
+          <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:12, padding:"12px 16px", fontSize:13, color:"#92400e", lineHeight:1.6 }}>
+            <strong>📊 What this dataset demonstrates:</strong> {dgDesc}
+          </div>
+        )}
+
+        {/* ── Practice steps ── */}
+        {dgSteps.length > 0 && (
+          <div className="lms-card" style={{ padding:16 }}>
+            <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:12 }}>
+              🧭 Practice Steps
+            </p>
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {dgSteps.map((step, i) => (
+                <div key={i} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                  <div style={{ width:24, height:24, background:"#3b82f6", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:12, flexShrink:0, marginTop:1 }}>
+                    {i + 1}
+                  </div>
+                  <p style={{ fontSize:13.5, color:"#374151", margin:0, lineHeight:1.6 }}>{step.replace(/^Step \d+:\s*/i, "")}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Data preview table ── */}
+        {dgDataset && (
+          <div className="lms-card" style={{ padding:0, overflow:"hidden" }}>
+            <div style={{ padding:"14px 16px 10px 16px", borderBottom:"1.5px solid #f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
+              <div>
+                <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", margin:0 }}>Dataset Preview</p>
+                <p style={{ fontSize:12.5, color:"#475569", fontWeight:600, margin:"2px 0 0 0" }}>
+                  {dgSchema.topic} — {dgDataset.rows.length.toLocaleString()} rows × {dgDataset.headers.length} cols
+                </p>
+              </div>
+              <button className="lms-btn lms-btn-amber" onClick={downloadCSV} style={{ fontSize:12 }}>
+                <Ic n="download" s={13}/>Download CSV
+              </button>
+            </div>
+            <div style={{ overflowX:"auto", maxHeight:380 }}>
+              <table style={{ width:"100%", fontSize:12.5, borderCollapse:"collapse" }}>
+                <thead style={{ position:"sticky", top:0, background:"#f8fafc", zIndex:2 }}>
+                  <tr>
+                    <th style={{ padding:"8px 10px", textAlign:"left", fontWeight:750, color:"#94a3b8", fontSize:11, borderBottom:"1.5px solid #f1f5f9", width:32 }}>#</th>
+                    {dgDataset.headers.map((h, i) => {
+                      const meta = dgDataset.columnsMeta[i];
+                      return (
+                        <th key={h + i} style={{ padding:"8px 10px", textAlign:"left", fontWeight:750, color:"#0f172a", borderBottom:"1.5px solid #f1f5f9", whiteSpace:"nowrap" }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                            <span style={{ width:7, height:7, borderRadius:"50%", background: DG_TYPE_COLORS[meta?.type] || "#888", flexShrink:0 }}/>
+                            {h}
+                          </div>
+                          <div style={{ fontSize:10.5, color:"#94a3b8", fontWeight:600, marginTop:1 }}>
+                            {DG_TYPE_LABELS[meta?.type] || ""}
+                            {meta?.range ? ` [${meta.range[0]}–${meta.range[1]}]` : ""}
+                            {meta?.outlier_pct > 0 ? ` ⚠${meta.outlier_pct}%` : ""}
+                            {meta?.missing_pct > 0 ? ` ∅${meta.missing_pct}%` : ""}
+                          </div>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewRows.map((row, ri) => (
+                    <tr key={ri} style={{ borderBottom:"1px solid #f8fafc" }}
+                      onMouseEnter={e => e.currentTarget.style.background="#fffbeb"}
+                      onMouseLeave={e => e.currentTarget.style.background=""}
+                    >
+                      <td style={{ padding:"7px 10px", color:"#94a3b8", fontWeight:600, fontSize:11 }}>{dgPage * DG_PAGE_SIZE + ri}</td>
+                      {row.map((cell, ci) => {
+                        const meta = dgDataset.columnsMeta[ci];
+                        const isOutlier = meta?.outlier_pct > 0 && typeof cell === "number" && meta.range &&
+                          (cell < meta.range[0] * 0.75 || cell > meta.range[1] * 1.25);
+                        return (
+                          <td key={ci} style={{
+                            padding:"7px 10px", whiteSpace:"nowrap", fontWeight: isOutlier ? 700 : 550,
+                            color: cell === null ? "#94a3b8" : isOutlier ? "#dc2626" : "#374151",
+                            background: isOutlier ? "#fef2f2" : "",
+                            fontStyle: cell === null ? "italic" : "normal",
+                          }}>
+                            {cell === null ? "NaN" : String(cell)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 14px", borderTop:"1.5px solid #f1f5f9", fontSize:12.5 }}>
+              <span style={{ color:"#64748b" }}>Page {dgPage + 1} / {totalPages}</span>
+              <div style={{ display:"flex", gap:6 }}>
+                <button className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12 }}
+                  disabled={dgPage === 0} onClick={() => setDgPage(p => p - 1)}>← Prev</button>
+                <button className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12 }}
+                  disabled={dgPage >= totalPages - 1} onClick={() => setDgPage(p => p + 1)}>Next →</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Column details ── */}
+        {dgDataset && (
+          <div className="lms-card" style={{ padding:16 }}>
+            <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:12 }}>
+              Column Details & Data Characteristics
+            </p>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:10 }}>
+              {dgDataset.columnsMeta.map((c, i) => {
+                const vals     = dgDataset.rows.map(r => r[i]).filter(v => v !== null);
+                const isNum    = typeof vals[0] === "number";
+                const unique   = new Set(vals.map(String)).size;
+                const nullsInC = dgDataset.rows.filter(r => r[i] === null).length;
+                const actualMin = isNum ? Math.min(...vals).toFixed(3) : "";
+                const actualMax = isNum ? Math.max(...vals).toFixed(3) : "";
+                return (
+                  <div key={c.id} style={{ background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:12, padding:"12px 14px" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:4 }}>
+                      <span style={{ width:8, height:8, borderRadius:"50%", background: DG_TYPE_COLORS[c.type] || "#888", flexShrink:0 }}/>
+                      <span style={{ fontWeight:760, fontSize:13 }}>{c.name}</span>
+                    </div>
+                    <span style={{ fontSize:11, fontWeight:700, color: DG_TYPE_COLORS[c.type], background: DG_TYPE_COLORS[c.type] + "22", padding:"2px 7px", borderRadius:6 }}>
+                      {DG_TYPE_LABELS[c.type]}
+                    </span>
+                    <div style={{ marginTop:8, fontSize:11.5, color:"#475569", lineHeight:1.7 }}>
+                      {isNum && <div>Range: <strong>{actualMin} – {actualMax}</strong></div>}
+                      <div>{unique} unique · {nullsInC} nulls</div>
+                      {c.outlier_pct > 0 && <div style={{ color:"#dc2626", fontWeight:700 }}>⚠ {c.outlier_pct}% outliers injected</div>}
+                      {c.missing_pct > 0 && <div style={{ color:"#92400e", fontWeight:650 }}>∅ {c.missing_pct}% missing</div>}
+                      {c.categories?.length > 0 && <div style={{ color:"#6b7280", fontSize:10.8 }}>cats: {c.categories.join(", ")}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Python preprocessing code ── */}
+        <div style={{ background:"#141518", borderRadius:16, overflow:"hidden", border:"1.5px solid #334155" }}>
+          <div style={{ padding:"14px 16px", borderBottom:"1px solid #334155", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
+            <div>
+              <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", margin:0 }}>Generated Preprocessing Code</p>
+              <p style={{ fontSize:12, color:"#475569", margin:"2px 0 0 0" }}>Copy-paste into Jupyter / Google Colab</p>
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={copyCode}
+                style={{ padding:"6px 14px", borderRadius:8, background: dgCodeCopied ? "#22c55e" : "#334155", color:"#e2e8f0", fontSize:12, fontWeight:750, border:"none", cursor:"pointer", transition:"background .2s" }}>
+                {dgCodeCopied ? "✅ Copied!" : "📋 Copy Code"}
+              </button>
+              <button onClick={downloadPy}
+                style={{ padding:"6px 14px", borderRadius:8, background:"#1e293b", color:"#94a3b8", fontSize:12, fontWeight:650, border:"1px solid #334155", cursor:"pointer" }}>
+                <Ic n="download" s={12} c="#94a3b8"/>Save .py
+              </button>
+            </div>
+          </div>
+          <pre style={{
+            padding:"16px 18px", margin:0, fontSize:12, lineHeight:1.7,
+            color:"#e9e0cf", overflowX:"auto", maxHeight:500, overflowY:"auto",
+            fontFamily:"'JetBrains Mono','Fira Code','Cascadia Code',monospace",
+            whiteSpace:"pre-wrap", wordBreak:"break-word",
+          }}>
+            {dgCode}
+          </pre>
+        </div>
+
+        {/* ── How to use this data ── */}
+        <div className="lms-card" style={{ padding:16, background:"#f0f9ff", border:"1.5px solid #bae6fd" }}>
+          <p style={{ fontSize:11, fontWeight:800, color:"#0369a1", textTransform:"uppercase", letterSpacing:".07em", marginBottom:10 }}>
+            💡 How to Use This Dataset for Practice
+          </p>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:10 }}>
+            {[
+              { n:"1", t:"Download CSV",     d:"Click Download CSV to save the dataset to your machine." },
+              { n:"2", t:"Open in Colab",    d:'Go to colab.research.google.com → New Notebook → upload CSV or mount Drive.' },
+              { n:"3", t:"Run the Code",     d:"Paste the Python code above into a cell and run it to preprocess the data." },
+              { n:"4", t:"Extend & Explore", d:"Modify the code, try different parameters, and apply what you learned in the notebook." },
+            ].map(s => (
+              <div key={s.n} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                <div style={{ width:26, height:26, background:"#0ea5e9", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>
+                  {s.n}
+                </div>
+                <div>
+                  <p style={{ fontWeight:700, fontSize:13, color:"#0c4a6e", margin:0 }}>{s.t}</p>
+                  <p style={{ fontSize:12, color:"#0369a1", margin:"2px 0 0 0", lineHeight:1.5 }}>{s.d}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+
+function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -4294,6 +5206,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
     { id:"resources", label:"📂 Resources" },
     { id:"assignment",label:"📝 Assignment" },
     { id:"quiz",      label:"🎯 Quiz" },
+    // Data Generator tab: always visible for trainers; for students only if trainer has published data
+    ...(!studentMode || dayData?.dataGenerator ? [{ id:"data", label:"🗃️ Data Generator" }] : []),
     { id:"notes",     label:"🗒️ Notes" },
     ...(isTrainer ? [{ id:"guide", label:"🧑‍🏫 Guide" }] : []),
   ];
@@ -4765,6 +5679,19 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           onGenQuiz={onGenQuiz}
           updateDay={updateDay}
           notify={notify}
+          studentMode={studentMode}
+        />
+      )}
+
+      {/* ── DATA GENERATOR ── */}
+      {tab==="data" && (
+        <DataGeneratorTab
+          day={day}
+          dayData={dayData}
+          groqKey={groqKey}
+          groqModel={groqModel}
+          notify={notify}
+          updateDay={updateDay}
           studentMode={studentMode}
         />
       )}
