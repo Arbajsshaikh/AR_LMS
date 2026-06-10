@@ -4825,9 +4825,15 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   const [dgRows,    setDgRows]    = useState(savedDg?.schema?.rows || 200);
   const [dgSeed,    setDgSeed]    = useState(savedDg?.schema?.seed || 712481);
   const [dgSchema,  setDgSchema]  = useState(savedDg?.schema  || DG_DEFAULT_SCHEMA);
-  // For students: seed dgDataset directly from the saved snapshot so they get the exact same data.
+  // For students: prefer the saved snapshot; fall back to rebuilding from schema (older saves
+  // that were made before the dataset-snapshot field was added won't have savedDg.dataset).
   // For trainers: start null and let the schema useEffect build it.
-  const [dgDataset, setDgDataset] = useState(() => studentMode && savedDg?.dataset ? savedDg.dataset : null);
+  const [dgDataset, setDgDataset] = useState(() => {
+    if (!studentMode) return null;
+    if (savedDg?.dataset) return savedDg.dataset;
+    if (savedDg?.schema)  return dgBuildDataset(savedDg.schema);
+    return null;
+  });
   const [dgCode,    setDgCode]    = useState(savedDg?.code    || DG_DEFAULT_SCHEMA.python_code);
   const [dgDesc,    setDgDesc]    = useState(savedDg?.desc    || DG_DEFAULT_SCHEMA.description);
   const [dgSteps,   setDgSteps]   = useState(savedDg?.steps   || DG_DEFAULT_SCHEMA.practice_steps || []);
@@ -4848,11 +4854,18 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   // Student: restore from saved snapshot whenever dayData.dataGenerator changes (e.g. after Supabase sync).
   useEffect(() => {
     if (studentMode) {
-      // Always prefer the saved snapshot — don't re-run the RNG for students
       if (savedDg?.dataset) {
+        // Prefer the saved snapshot — exact same data the trainer saw
         setDgDataset(savedDg.dataset);
-        setDgCode(savedDg.code || "");
-        setDgDesc(savedDg.desc || "");
+        setDgCode(savedDg.code   || "");
+        setDgDesc(savedDg.desc   || "");
+        setDgSteps(savedDg.steps || []);
+        setDgPage(0);
+      } else if (savedDg?.schema) {
+        // Older save: no dataset snapshot → rebuild deterministically from schema
+        setDgDataset(dgBuildDataset(savedDg.schema));
+        setDgCode(savedDg.code   || "");
+        setDgDesc(savedDg.desc   || "");
         setDgSteps(savedDg.steps || []);
         setDgPage(0);
       }
