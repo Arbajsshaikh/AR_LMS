@@ -3,7 +3,10 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama-3.1-8b-instant"];
+const GROQ_MODELS = [ "llama-3.1-8b-instant",
+  "llama-3.3-70b-versatile",
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
