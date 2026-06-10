@@ -3,8 +3,7 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = [ "llama-3.1-8b-instant",
-  "llama-3.3-70b-versatile",
+const GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile",
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b"];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
@@ -786,8 +785,8 @@ async function sbGetStorageFileUrl(sbUrl, sbKey, storagePath) {
   return data?.signedURL ? `${sbUrl}/storage/v1${data.signedURL}` : null;
 }
 
-async function sbSaveFile(sb, courseId, dayKey, fileObj) {
-  await sb.upsert("lms_day_files", {
+async function sbSaveFile(sb, courseId, dayKey, fileObj, trainerId) {
+  const row = {
     id: fileObj.id,
     course_id: courseId,
     day_key: dayKey,
@@ -797,7 +796,10 @@ async function sbSaveFile(sb, courseId, dayKey, fileObj) {
     data_url: fileObj.dataUrl || null,           // legacy: kept for backward compat
     storage_path: fileObj.storagePath || null,   // FIX #9: preferred storage path
     created_at: fileObj.uploadedAt || new Date().toISOString(),
-  });
+  };
+  // Include trainer_id if provided — needed for RLS policies on lms_day_files
+  if (trainerId) row.trainer_id = trainerId;
+  await sb.upsert("lms_day_files", row);
 }
 
 async function sbDeleteFile(sb, fileId) {
@@ -806,10 +808,10 @@ async function sbDeleteFile(sb, fileId) {
 
 // ── FIX #4: DAY CONTENT — separate table, one row per (course, day, type) ──
 // content_type: 'notebook' | 'examples' | 'resources' | 'assignment' | 'quiz' | 'teachingGuide'
-async function sbSaveDayContent(sb, courseId, dayKey, contentType, content) {
+async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
   const payload = typeof content === "object" ? JSON.stringify(content) : (content || "");
-  await sb.upsert("lms_day_content", {
+  const row = {
     id,
     course_id: courseId,
     day_key: dayKey,
@@ -817,7 +819,10 @@ async function sbSaveDayContent(sb, courseId, dayKey, contentType, content) {
     content: payload,
     updated_at: new Date().toISOString(),
     created_at: new Date().toISOString(),
-  });
+  };
+  // Include trainer_id if provided — needed for RLS policies on lms_day_content
+  if (trainerId) row.trainer_id = trainerId;
+  await sb.upsert("lms_day_content", row);
 }
 
 async function sbGetDayContent(sb, courseId, dayKey) {
@@ -2411,10 +2416,15 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       // FIX: always set dayData (even if empty) so React state is consistent
       setDayData(mergedDayData);
 
-      // Fetch uploaded files per day — use ALL known day keys (course row + content table)
+      // Fetch uploaded files per day — use ALL known day keys:
+      // course row + content table + extra/special override days (they may have files but no AI content yet)
+      const overrideDayKeys = Object.entries(course.dayOverrides || {})
+        .filter(([, ov]) => ov.type === "extra" || ov.type === "special")
+        .map(([k]) => k);
       const allDayKeys = Array.from(new Set([
         ...Object.keys(mergedDayData),
         ...Object.keys(contentByDay),
+        ...overrideDayKeys,
       ]));
       if (allDayKeys.length > 0) {
         const results = await Promise.allSettled(
@@ -2455,9 +2465,14 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         }
         const contentByDay = await sbGetAllDayContent(sb, courseId);
         // FIX: merge course.dayData so days only in the course row are included
+        // Also include extra/special override day keys so their files are fetched
+        const overrideDayKeys = Object.entries(course?.dayOverrides || {})
+          .filter(([, ov]) => ov.type === "extra" || ov.type === "special")
+          .map(([k]) => k);
         const mergedKeys = Array.from(new Set([
           ...Object.keys(contentByDay),
           ...Object.keys(course?.dayData || {}),
+          ...overrideDayKeys,
         ]));
         setDayData(prev => {
           const next = { ...prev };
@@ -2655,12 +2670,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     if (!studentMode && sb && courseId) {
       for (const [field, value] of Object.entries(patch)) {
         if (AI_CONTENT_TYPES.includes(field) && value !== undefined) {
-          sbSaveDayContent(sb, courseId, key, field, value)
+          sbSaveDayContent(sb, courseId, key, field, value, trainerId)
             .catch(e => console.warn(`Failed to save ${field} for ${key}:`, e.message));
         }
       }
     }
-  }, [studentMode, sb, courseId]);
+  }, [studentMode, sb, courseId, trainerId]);
 
   /* ════ AI caller ════ */
   const callAI = useCallback(async (messages) => {
@@ -3272,7 +3287,7 @@ Hard rules:
             }
             fileObj.dataUrl = e.target.result;
           }
-          try { await sbSaveFile(sb, courseId, key, fileObj); }
+          try { await sbSaveFile(sb, courseId, key, fileObj, trainerId); }
           catch(err) { notify(`"${file.name}" DB save failed: ${err.message}`, "warn"); }
         } else {
           // No Supabase — store in memory only (session-only)
@@ -4671,7 +4686,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   // Read sub-topics set in the shared DayPage sub-topics field
   const subTopics  = (dayData?.subTopics || "").trim();
 
-  // Restore previously saved generator state (schema + code) if present
+  // Restore previously saved generator state (schema + code + dataset snapshot) if present
   const savedDg = dayData?.dataGenerator || null;
 
   // Build the default prompt automatically from topic + subtopics whenever they change
@@ -4693,7 +4708,9 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   const [dgRows,    setDgRows]    = useState(savedDg?.schema?.rows || 200);
   const [dgSeed,    setDgSeed]    = useState(savedDg?.schema?.seed || 712481);
   const [dgSchema,  setDgSchema]  = useState(savedDg?.schema  || DG_DEFAULT_SCHEMA);
-  const [dgDataset, setDgDataset] = useState(null);
+  // For students: seed dgDataset directly from the saved snapshot so they get the exact same data.
+  // For trainers: start null and let the schema useEffect build it.
+  const [dgDataset, setDgDataset] = useState(() => studentMode && savedDg?.dataset ? savedDg.dataset : null);
   const [dgCode,    setDgCode]    = useState(savedDg?.code    || DG_DEFAULT_SCHEMA.python_code);
   const [dgDesc,    setDgDesc]    = useState(savedDg?.desc    || DG_DEFAULT_SCHEMA.description);
   const [dgSteps,   setDgSteps]   = useState(savedDg?.steps   || DG_DEFAULT_SCHEMA.practice_steps || []);
@@ -4702,29 +4719,56 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   const [dgCodeCopied, setDgCodeCopied] = useState(false);
   const DG_PAGE_SIZE = 30;
 
-  // Auto-refresh prompt whenever the DayPage sub-topics field changes
+  // Auto-refresh prompt whenever the DayPage sub-topics field changes (trainer only)
   useEffect(() => {
+    if (studentMode) return;
     setDgPrompt(buildAutoPrompt(topicHint, subTopics));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topicHint, subTopics]);
 
-  // Build dataset whenever schema changes
+  // Trainer: rebuild live dataset whenever schema changes.
+  // Student: restore from saved snapshot whenever dayData.dataGenerator changes (e.g. after Supabase sync).
   useEffect(() => {
+    if (studentMode) {
+      // Always prefer the saved snapshot — don't re-run the RNG for students
+      if (savedDg?.dataset) {
+        setDgDataset(savedDg.dataset);
+        setDgCode(savedDg.code || "");
+        setDgDesc(savedDg.desc || "");
+        setDgSteps(savedDg.steps || []);
+        setDgPage(0);
+      }
+      return;
+    }
     const ds = dgBuildDataset(dgSchema);
     setDgDataset(ds);
     setDgPage(0);
-  }, [dgSchema]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dgSchema, studentMode, dayData?.dataGenerator]);
 
   // Parse subtopics into a clean array for display
   const subTopicList = subTopics
     ? subTopics.split(/[,\n]+/).map(s => s.trim()).filter(Boolean)
     : [];
 
-  // Save generated state to day_data so students can see it and it persists across sessions
-  const saveToDay = (schema, code, desc, steps) => {
+  // Save the FULL snapshot to Supabase via updateDay:
+  //   schema   — needed for CSV re-generation and export ZIP
+  //   code     — Python preprocessing script
+  //   desc     — AI-written description of the dataset
+  //   steps    — practice steps
+  //   dataset  — { headers, columnsMeta, rows } — exact snapshot so students
+  //              get identical data without re-running dgBuildDataset
+  const saveToDay = (schema, code, desc, steps, dataset) => {
     if (!updateDay || !k || studentMode) return;
     updateDay(k, {
-      dataGenerator: { schema, code, desc, steps, savedAt: new Date().toISOString() }
+      dataGenerator: {
+        schema,
+        code,
+        desc,
+        steps,
+        dataset,           // full snapshot — persisted to lms_day_content
+        savedAt: new Date().toISOString(),
+      }
     });
   };
 
@@ -4735,11 +4779,13 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
     if (!groqKey) {
       // Fallback: build default schema keyed to the topic
       const s = { ...DG_DEFAULT_SCHEMA, rows: dgRows, seed: dgSeed, topic: topicHint || "practice_dataset" };
+      const ds = dgBuildDataset(s);
       setDgSchema(s);
+      setDgDataset(ds);
       setDgCode(s.python_code);
       setDgDesc(s.description);
       setDgSteps(s.practice_steps || []);
-      saveToDay(s, s.python_code, s.description, s.practice_steps || []);
+      saveToDay(s, s.python_code, s.description, s.practice_steps || [], ds);
       notify("⚠️ No Groq key — loaded default schema. Add Groq key in Settings for AI-generated datasets.", "warn");
       return;
     }
@@ -4764,11 +4810,14 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
       const code  = schema.python_code || "# No code generated";
       const desc  = schema.description || "";
       const steps = schema.practice_steps || [];
+      // Build dataset snapshot here so we can persist it immediately
+      const ds = dgBuildDataset(schema);
       setDgSchema(schema);
+      setDgDataset(ds);
       setDgCode(code);
       setDgDesc(desc);
       setDgSteps(steps);
-      saveToDay(schema, code, desc, steps);
+      saveToDay(schema, code, desc, steps, ds);
       const subMsg = subTopicList.length ? ` covering ${subTopicList.length} sub-topics` : "";
       notify(`✅ Generated ${dgRows} × ${(schema.columns || []).length} dataset for "${topicHint}"${subMsg}`, "success");
     } catch (e) {
@@ -4776,11 +4825,13 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
       notify("❌ Dataset generation failed: " + msg, "error");
       // Graceful fallback
       const s = { ...DG_DEFAULT_SCHEMA, rows: dgRows, seed: dgSeed, topic: topicHint || "practice_dataset" };
+      const ds = dgBuildDataset(s);
       setDgSchema(s);
+      setDgDataset(ds);
       setDgCode(s.python_code);
       setDgDesc(s.description);
       setDgSteps(s.practice_steps || []);
-      saveToDay(s, s.python_code, s.description, s.practice_steps || []);
+      saveToDay(s, s.python_code, s.description, s.practice_steps || [], ds);
     } finally {
       setDgBusy(false);
     }
@@ -4868,89 +4919,86 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
         </div>
       </div>
 
-      {/* ── Prompt & controls (trainer) / Status (student) ── */}
-      <div className="lms-card" style={{ padding:18, marginBottom:18 }}>
-        {!studentMode && (
+      {/* ── Prompt & controls (trainer only) ── */}
+      {!studentMode && (
+        <div className="lms-card" style={{ padding:18, marginBottom:18 }}>
           <p style={{ fontSize:11, fontWeight:800, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>
             Describe the dataset you need for practice
           </p>
-        )}
 
-        {/* ── Sub-topic context notice — trainer only ── */}
-        {!studentMode && subTopicList.length > 0 && (
-          <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12.5, color:"#166534", lineHeight:1.6 }}>
-            <strong>✅ Sub-topics active ({subTopicList.length}):</strong>{" "}
-            {subTopicList.join(" · ")}<br/>
-            <span style={{ fontSize:11.5, color:"#15803d", opacity:.85 }}>
-              The generated dataset columns and Python code will directly target each sub-topic above, plus related companion techniques.
-            </span>
-          </div>
-        )}
-        {subTopicList.length === 0 && !studentMode && (
-          <div style={{ background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:10, padding:"9px 13px", marginBottom:12, fontSize:12, color:"#92400e" }}>
-            💡 <strong>Tip:</strong> Fill in the <em>Sub-topics / Focus areas</em> field above the tabs to auto-target specific techniques (e.g. <em>min max scaling, onehot encoder, train test split, gridsearch cv, accuracy score</em>).
-          </div>
-        )}
-
-        {/* Trainer-only: prompt + generate controls */}
-        {!studentMode && (
-          <>
-            <textarea
-              value={dgPrompt}
-              onChange={e => setDgPrompt(e.target.value)}
-              rows={3}
-              className="lms-input"
-              placeholder={`e.g. "Generate a dataset for practising outlier detection on ${topicHint} data with IQR method..."`}
-              style={{ fontSize:13, resize:"vertical", minHeight:80 }}
-            />
-
-            {/* Quick presets */}
-            <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:10, marginBottom:14 }}>
-              {DG_PRESETS.map(p => (
-                <button key={p.label}
-                  onClick={() => handlePreset(p.prompt)}
-                  style={{ padding:"4px 10px", borderRadius:20, background:"#f1f5f9", border:"1.5px solid #e2e8f0", fontSize:11.5, fontWeight:650, color:"#475569", cursor:"pointer", transition:"background .15s" }}
-                  onMouseEnter={e => e.currentTarget.style.background="#e2e8f0"}
-                  onMouseLeave={e => e.currentTarget.style.background="#f1f5f9"}
-                >
-                  {p.label}
-                </button>
-              ))}
+          {/* Sub-topic context notice */}
+          {subTopicList.length > 0 && (
+            <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12.5, color:"#166534", lineHeight:1.6 }}>
+              <strong>✅ Sub-topics active ({subTopicList.length}):</strong>{" "}
+              {subTopicList.join(" · ")}<br/>
+              <span style={{ fontSize:11.5, color:"#15803d", opacity:.85 }}>
+                The generated dataset columns and Python code will directly target each sub-topic above, plus related companion techniques.
+              </span>
             </div>
+          )}
+          {subTopicList.length === 0 && (
+            <div style={{ background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:10, padding:"9px 13px", marginBottom:12, fontSize:12, color:"#92400e" }}>
+              💡 <strong>Tip:</strong> Fill in the <em>Sub-topics / Focus areas</em> field above the tabs to auto-target specific techniques (e.g. <em>min max scaling, onehot encoder, train test split, gridsearch cv, accuracy score</em>).
+            </div>
+          )}
 
-            {/* Row count + seed + generate */}
-            <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
-              <div>
-                <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Rows</p>
-                <input type="number" min={20} max={5000} value={dgRows}
-                  onChange={e => setDgRows(Math.max(20, parseInt(e.target.value) || 200))}
-                  className="lms-input" style={{ width:90, fontWeight:700 }} />
-              </div>
-              <div>
-                <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Seed</p>
-                <input type="number" value={dgSeed}
-                  onChange={e => setDgSeed(parseInt(e.target.value) || 1)}
-                  className="lms-input" style={{ width:90, fontWeight:700 }} />
-              </div>
-              <button className="lms-btn lms-btn-blue" disabled={dgBusy} onClick={handleGenerate} style={{ padding:"9px 20px", fontWeight:800 }}>
-                {dgBusy ? <><Spin s={13}/>Generating…</> : <><Ic n="brain" s={14}/>Generate Dataset</>}
+          <textarea
+            value={dgPrompt}
+            onChange={e => setDgPrompt(e.target.value)}
+            rows={3}
+            className="lms-input"
+            placeholder={`e.g. "Generate a dataset for practising outlier detection on ${topicHint} data with IQR method..."`}
+            style={{ fontSize:13, resize:"vertical", minHeight:80 }}
+          />
+
+          {/* Quick presets */}
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:10, marginBottom:14 }}>
+            {DG_PRESETS.map(p => (
+              <button key={p.label}
+                onClick={() => handlePreset(p.prompt)}
+                style={{ padding:"4px 10px", borderRadius:20, background:"#f1f5f9", border:"1.5px solid #e2e8f0", fontSize:11.5, fontWeight:650, color:"#475569", cursor:"pointer", transition:"background .15s" }}
+                onMouseEnter={e => e.currentTarget.style.background="#e2e8f0"}
+                onMouseLeave={e => e.currentTarget.style.background="#f1f5f9"}
+              >
+                {p.label}
               </button>
-              {!groqKey && (
-                <span style={{ fontSize:12, color:"#92400e", background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"6px 10px" }}>
-                  ⚠️ No Groq key — add it in Settings for AI datasets
-                </span>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* Student-only: show status of dataset availability */}
-        {studentMode && !savedDg && (
-          <div style={{ padding:"14px 16px", background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:10, fontSize:13, color:"#64748b", textAlign:"center" }}>
-            🕐 Your trainer hasn't published a dataset for this day yet. Check back later.
+            ))}
           </div>
-        )}
-      </div>
+
+          {/* Row count + seed + generate */}
+          <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"flex-end" }}>
+            <div>
+              <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Rows</p>
+              <input type="number" min={20} max={5000} value={dgRows}
+                onChange={e => setDgRows(Math.max(20, parseInt(e.target.value) || 200))}
+                className="lms-input" style={{ width:90, fontWeight:700 }} />
+            </div>
+            <div>
+              <p style={{ fontSize:11, fontWeight:700, color:"#64748b", marginBottom:4 }}>Seed</p>
+              <input type="number" value={dgSeed}
+                onChange={e => setDgSeed(parseInt(e.target.value) || 1)}
+                className="lms-input" style={{ width:90, fontWeight:700 }} />
+            </div>
+            <button className="lms-btn lms-btn-blue" disabled={dgBusy} onClick={handleGenerate} style={{ padding:"9px 20px", fontWeight:800 }}>
+              {dgBusy ? <><Spin s={13}/>Generating…</> : <><Ic n="brain" s={14}/>Generate Dataset</>}
+            </button>
+            {!groqKey && (
+              <span style={{ fontSize:12, color:"#92400e", background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"6px 10px" }}>
+                ⚠️ No Groq key — add it in Settings for AI datasets
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Student: "not published yet" placeholder ── */}
+      {studentMode && !savedDg && (
+        <div style={{ padding:"28px 20px", background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:16, marginBottom:18, textAlign:"center" }}>
+          <div style={{ fontSize:32, marginBottom:10 }}>🕐</div>
+          <p style={{ fontWeight:700, fontSize:15, color:"#374151", margin:"0 0 6px 0" }}>Dataset not published yet</p>
+          <p style={{ fontSize:13, color:"#64748b", margin:0 }}>Your trainer hasn't generated a dataset for this day yet. Check back later.</p>
+        </div>
+      )}
 
       {/* ── Stats bar ── */}
       {dgDataset && (
@@ -6215,10 +6263,14 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
       for (const [k, v] of Object.entries(contentByDay)) {
         mergedDayData[k] = { ...(mergedDayData[k] || {}), ...v };
       }
-      // Fetch uploaded files for all known day keys
+      // Fetch uploaded files for all known day keys, including extra/special override days
+      const overrideDayKeys = Object.entries(course.dayOverrides || {})
+        .filter(([, ov]) => ov.type === "extra" || ov.type === "special")
+        .map(([k]) => k);
       const allDayKeys = Array.from(new Set([
         ...Object.keys(mergedDayData),
         ...Object.keys(contentByDay),
+        ...overrideDayKeys,
       ]));
       if (allDayKeys.length > 0) {
         const fileResults = await Promise.allSettled(
