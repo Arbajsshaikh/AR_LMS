@@ -331,7 +331,7 @@ const DG_DEFAULT_SCHEMA = {
   topic: "house_price_prediction",
   rows: 200,
   seed: 712481,
-  description: "House price dataset for practising MinMax/Standard scaling (wildly different ranges), OneHot encoding (location_tier, house_type), train-test split, GridSearchCV on Ridge/Lasso, and regression metrics (MAE, RMSE, R², Adjusted R²). Includes ~3-5% missing values and outliers so data-cleaning is required.",
+  description: "House price dataset for practicing MinMax/Standard scaling (wildly different ranges), OneHot encoding (location_tier, house_type), train-test split, GridSearchCV on Ridge/Lasso, and regression metrics (MAE, RMSE, R², Adjusted R²). Includes ~3-5% missing values and outliers so data-cleaning is required.",
   columns: [
     { name: "house_size_sqft",  type: "numeric",     range: [400,  5200],    missing_pct: 2,   outlier_pct: 4 },
     { name: "num_bedrooms",     type: "numeric_int",  range: [1,    7],       missing_pct: 1,   outlier_pct: 2 },
@@ -4809,7 +4809,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   // Build the default prompt automatically from topic + subtopics whenever they change
   function buildAutoPrompt(topic, subs) {
     if (!subs) {
-      return `Generate a dataset for practising: ${topic}`;
+      return `Generate a dataset for practicing: ${topic}`;
     }
     const subList = subs.split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
     return (
@@ -5125,7 +5125,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
             onChange={e => setDgPrompt(e.target.value)}
             rows={3}
             className="lms-input"
-            placeholder={`e.g. "Generate a dataset for practising outlier detection on ${topicHint} data with IQR method..."`}
+            placeholder={`e.g. "Generate a dataset for practicing outlier detection on ${topicHint} data with IQR method..."`}
             style={{ fontSize:13, resize:"vertical", minHeight:80 }}
           />
 
