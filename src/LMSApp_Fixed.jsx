@@ -3,9 +3,17 @@ import { useState, useEffect, useCallback, useRef, Component } from "react";
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
 ═══════════════════════════════════════════════════════════════════ */
-const GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile",
+// Production models from console.groq.com/docs/models (June 2026)
+// llama-3.1-8b-instant  : 131k ctx, 131k max completion — fast, free tier
+// llama-3.3-70b-versatile: 131k ctx, 32k max completion — best quality
+// openai/gpt-oss-20b    : 131k ctx, 65k max completion — fast + capable
+// openai/gpt-oss-120b   : 131k ctx, 65k max completion — highest quality
+const GROQ_MODELS = [
+  "llama-3.1-8b-instant",
+  "llama-3.3-70b-versatile",
   "openai/gpt-oss-20b",
-  "openai/gpt-oss-120b"];
+  "openai/gpt-oss-120b",
+];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -102,11 +110,10 @@ function dgToCSV(ds) {
   return [ds.headers, ...ds.rows].map(row => row.map(escape).join(",")).join("\n");
 }
 
-// ── Call Groq to get a dataset schema (subtopic-aware) ───────────
+// ── Call Groq to get a dataset schema + metadata (no python_code) ─
 async function dgCallGroqForSchema(userPrompt, apiKey, model, rows, seed) {
   const system = `You are an expert ML data engineer and educator. Your job is to:
 1. Design a synthetic dataset whose columns are DIRECTLY USABLE for the given ML topic and every sub-topic listed.
-2. Write a COMPLETE, RUNNABLE Python project that covers ALL listed sub-topics PLUS closely related companion techniques.
 
 ═══ COLUMN DESIGN RULES ═══
 - 6-10 columns with REALISTIC snake_case names perfectly suited to the domain (e.g. for linear regression: house_size_sqft, num_bedrooms, location_tier, year_built, price_usd)
@@ -119,54 +126,6 @@ async function dgCallGroqForSchema(userPrompt, apiKey, model, rows, seed) {
   • any sub-topic about missing data     → missing_pct 3-8% on 2-3 cols
   • any sub-topic about outliers         → outlier_pct 3-7% on numeric cols
 - Always add deliberate imperfections so preprocessing is genuinely needed
-
-═══ PYTHON CODE RULES ═══
-The python_code field must be a COMPLETE, PRODUCTION-QUALITY script (400-800 lines) that:
-
-SECTION 1 — IMPORTS & LOAD
-  • All necessary imports (pandas, numpy, sklearn, matplotlib, warnings)
-  • Load CSV with correct filename
-  • df.head(), df.info(), df.describe(), df.isnull().sum()
-
-SECTION 2 — ONE SECTION PER SUB-TOPIC (use "# ═══ SUB-TOPIC: <name> ═══" headers)
-  For EVERY sub-topic requested, implement it properly:
-  • MinMaxScaler → show before/after ranges, sklearn MinMaxScaler
-  • StandardScaler → show mean/std before/after
-  • OneHotEncoder → ColumnTransformer approach + show expanded columns
-  • LabelEncoder → ordinal columns
-  • train_test_split → with stratify where applicable, show shapes
-  • GridSearchCV → param_grid with 2-3 params, best_params_, best_score_
-  • accuracy_score → classification_report, confusion_matrix
-  • r2_score → MAE, MSE, RMSE, R², Adjusted R²
-
-SECTION 3 — RELATED COMPANION TECHNIQUES (always include)
-  If topic is Linear Regression → also implement:
-    • Lasso (L1 regularization) with alpha tuning
-    • Ridge (L2 regularization) with alpha tuning
-    • ElasticNet
-    • Comparison table: LR vs Lasso vs Ridge vs ElasticNet (MAE/RMSE/R²)
-    • VIF (Variance Inflation Factor) for multicollinearity check
-    • Residual plot code (matplotlib)
-  If topic involves classification → also implement:
-    • ROC-AUC curve code
-    • Precision-Recall curve
-    • Cross-validation with StratifiedKFold
-  If topic involves clustering → also implement:
-    • Elbow method
-    • Silhouette score
-  Always add at least 3-5 companion techniques relevant to the main topic.
-
-SECTION 4 — COMPLETE ML PIPELINE
-  • Build a full sklearn Pipeline with all preprocessing + model
-  • fit/predict/score
-  • Print final comparison summary of all models tried
-
-SECTION 5 — SAVE ARTIFACTS
-  • Save preprocessed CSV
-  • Save model with joblib.dump
-
-Code must be copy-paste ready for Google Colab / Jupyter with zero modification.
-Use f-strings for all printed output. Add inline comments explaining WHY each step is done.
 
 ═══ RETURN FORMAT ═══
 Return ONLY valid JSON (no markdown, no backticks):
@@ -185,7 +144,6 @@ Return ONLY valid JSON (no markdown, no backticks):
       "outlier_pct": 3.0
     }
   ],
-  "python_code": "<complete script as described above — escape all newlines as \\n, escape all quotes>",
   "practice_steps": ["Step 1: ...", "Step 2: ...", "Step 3: ...", "Step 4: ...", "Step 5: ..."]
 }`;
 
@@ -195,7 +153,7 @@ Return ONLY valid JSON (no markdown, no backticks):
     body: JSON.stringify({
       model,
       temperature: 0.45,
-      max_tokens: 6000,
+      max_tokens: 2000,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -207,6 +165,165 @@ Return ONLY valid JSON (no markdown, no backticks):
   const json = await res.json();
   const content = json.choices?.[0]?.message?.content || "{}";
   return JSON.parse(content);
+}
+
+// ── Per-model max completion tokens (from console.groq.com/docs/models) ──
+// llama-3.1-8b-instant    : 131k context, 131k max completion
+// llama-3.3-70b-versatile : 131k context, 32k max completion
+// openai/gpt-oss-20b      : 131k context, 65k max completion
+// openai/gpt-oss-120b     : 131k context, 65k max completion
+// All models have plenty of room — the real issue was JSON-wrapping overhead.
+const DG_MODEL_TOKEN_BUDGET = {
+  "llama-3.1-8b-instant":     8000,
+  "llama-3.3-70b-versatile":  8000,
+  "openai/gpt-oss-20b":       8000,
+  "openai/gpt-oss-120b":      8000,
+};
+function dgGetTokenBudget(model) {
+  return DG_MODEL_TOKEN_BUDGET[model] || 8000;
+}
+
+// ── Is this a "context too large" / "token limit" Groq error? ────
+function dgIsTokenError(errText) {
+  const t = (errText || "").toLowerCase();
+  return (
+    t.includes("context_length_exceeded") ||
+    t.includes("max_tokens") ||
+    t.includes("context length") ||
+    t.includes("request too large") ||
+    t.includes("invalid_request_error")
+  );
+}
+
+// ── Call Groq to generate Python code based on an already-built schema ─
+// KEY DESIGN: ALL models return raw Python code — NO JSON wrapping.
+// Using response_format: json_object forces the model to escape every \n and "
+// in a 400-800 line script, which reliably causes invalid_request_error or
+// broken JSON parses. Raw Python is simpler, faster, and works on every model.
+// On any failure, auto-retry once with a shorter script target (250 lines).
+async function dgCallGroqForCode(schema, subTopicList, apiKey, model) {
+  const colSummary = (schema.columns || []).map(c => {
+    const parts = [`name: ${c.name}`, `type: ${c.type}`];
+    if (c.range)              parts.push(`range:[${c.range[0]},${c.range[1]}]`);
+    if (c.categories?.length) parts.push(`cats:[${c.categories.join(",")}]`);
+    if (c.missing_pct)        parts.push(`miss:${c.missing_pct}%`);
+    if (c.outlier_pct)        parts.push(`out:${c.outlier_pct}%`);
+    return `  ${parts.join(" | ")}`;
+  }).join("\n");
+
+  const subSection = subTopicList.length > 0
+    ? `Sub-topics (each needs its own labelled section):\n${subTopicList.map((s, i) => `  ${i + 1}. ${s}`).join("\n")}\n\n`
+    : "";
+
+  const userMsg =
+    `Dataset: ${schema.topic}.csv\n` +
+    `Topic: ${schema.topic} | Rows: ${schema.rows}\n` +
+    `Description: ${schema.description || ""}\n\n` +
+    `${subSection}` +
+    `Columns:\n${colSummary}`;
+
+  // ── System prompt — full version ──────────────────────────────────
+  const systemFull = `You are an expert ML educator. Write a COMPLETE Python script for the given dataset.
+Output ONLY raw Python code — no markdown fences, no explanation text, no JSON.
+
+Include these sections with exact comment headers:
+# ═══ SECTION 1: IMPORTS & LOAD ═══
+# ═══ SUB-TOPIC: <name> ═══   (one section per sub-topic listed)
+# ═══ COMPANION TECHNIQUES ═══
+# ═══ FULL SKLEARN PIPELINE ═══
+# ═══ SAVE ARTIFACTS ═══
+
+SECTION 1 — IMPORTS & LOAD
+  • All necessary imports (pandas, numpy, sklearn, matplotlib, warnings)
+  • Load CSV using the EXACT filename given (topic + .csv, e.g. logistic_regression.csv)
+  • df.head(), df.info(), df.describe(), df.isnull().sum()
+
+SECTION 2 — ONE SECTION PER SUB-TOPIC
+  • MinMaxScaler → before/after range comparison
+  • StandardScaler → before/after mean/std
+  • OneHotEncoder → ColumnTransformer, show get_feature_names_out()
+  • LabelEncoder → ordinal columns
+  • train_test_split → with stratify where applicable, print shapes
+  • GridSearchCV → param_grid 2-3 params, best_params_, best_score_
+  • accuracy_score → classification_report, confusion_matrix
+  • r2_score → MAE, MSE, RMSE, R², Adjusted R²
+
+SECTION 3 — COMPANION TECHNIQUES (always include 3-5 relevant to topic)
+  Regression → Lasso, Ridge, ElasticNet, VIF, residual plot, model comparison table
+  Classification → ROC-AUC, Precision-Recall curve, StratifiedKFold CV
+  Clustering → Elbow method, Silhouette score
+
+SECTION 4 — FULL SKLEARN PIPELINE
+  • ColumnTransformer + Pipeline, fit/predict/score, final comparison table
+
+SECTION 5 — SAVE ARTIFACTS
+  • joblib.dump for model, save preprocessed CSV
+
+Rules: Use f-strings, add inline comments, run in Google Colab with zero modification.
+Target: 300-500 lines of clean, well-commented Python.`;
+
+  // ── System prompt — condensed (retry fallback) ────────────────────
+  const systemShort = `You are an expert ML educator. Write a concise but complete Python script (150-250 lines).
+Output ONLY raw Python code — no markdown, no JSON, no explanation.
+
+Use these comment headers: # ═══ SECTION 1: IMPORTS & LOAD ═══  |  # ═══ SUB-TOPIC: <name> ═══  |  # ═══ PIPELINE & SAVE ═══
+
+- Load CSV with the exact filename (topic.csv)
+- One sklearn implementation per sub-topic listed
+- For regression add: Lasso, Ridge, comparison table
+- For classification add: ROC-AUC, StratifiedKFold
+- Use f-strings, must run in Google Colab`;
+
+  // ── Strip markdown fences from raw Python response ────────────────
+  function cleanRawPython(text) {
+    return (text || "")
+      .replace(/^```python\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```\s*$/gi, "")
+      .trim() || "# No code generated";
+  }
+
+  // ── Inner fetch helper — always raw Python, no JSON mode ─────────
+  async function fetchCode(maxTokens, short) {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: 0.4,
+        max_tokens: maxTokens,
+        // NO response_format — raw Python avoids JSON-escaping failures entirely
+        messages: [
+          { role: "system", content: short ? systemShort : systemFull },
+          { role: "user",   content: userMsg },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      const err = new Error(errText);
+      err.isTokenError = dgIsTokenError(errText);
+      throw err;
+    }
+
+    const json    = await res.json();
+    const content = json.choices?.[0]?.message?.content || "";
+    return cleanRawPython(content);
+  }
+
+  const budget = dgGetTokenBudget(model);
+
+  // ── Attempt 1: full prompt ────────────────────────────────────────
+  try {
+    return await fetchCode(budget, false);
+  } catch (e) {
+    // ── Attempt 2: retry with shorter prompt + reduced budget ─────────
+    if (e.isTokenError) {
+      return await fetchCode(Math.min(budget, 4000), true);
+    }
+    throw e;
+  }
 }
 
 // ── Default fallback schema (Linear Regression / general ML practice) ─────
@@ -4715,6 +4832,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
   const [dgDesc,    setDgDesc]    = useState(savedDg?.desc    || DG_DEFAULT_SCHEMA.description);
   const [dgSteps,   setDgSteps]   = useState(savedDg?.steps   || DG_DEFAULT_SCHEMA.practice_steps || []);
   const [dgBusy,    setDgBusy]    = useState(false);
+  const [dgCodeBusy, setDgCodeBusy] = useState(false);
   const [dgPage,    setDgPage]    = useState(0);
   const [dgCodeCopied, setDgCodeCopied] = useState(false);
   const DG_PAGE_SIZE = 30;
@@ -4772,7 +4890,8 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
     });
   };
 
-  const handleGenerate = async () => {
+  // ── Step 1: Generate dataset schema + metadata ────────────────
+  const handleGenerateDataset = async () => {
     const prompt = dgPrompt.trim();
     if (!prompt) return;
 
@@ -4782,6 +4901,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
       const ds = dgBuildDataset(s);
       setDgSchema(s);
       setDgDataset(ds);
+      // Keep existing code (default) so the code block still shows something
       setDgCode(s.python_code);
       setDgDesc(s.description);
       setDgSteps(s.practice_steps || []);
@@ -4801,25 +4921,26 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
         `${prompt}\n\n` +
         `Generate ${dgRows} rows. Seed: ${dgSeed}.\n\n` +
         `IMPORTANT: columns must be DOMAIN-SPECIFIC (not generic col1/col2). ` +
-        `Python code must have one clearly labelled section per sub-topic, ` +
-        `plus companion techniques related to "${topicHint}" (e.g. regularization variants, residual analysis, model comparison table).`;
+        `Design columns so every sub-topic above can be directly applied.`;
 
       const schema = await dgCallGroqForSchema(full, groqKey, groqModel || "llama-3.3-70b-versatile", dgRows, dgSeed);
       schema.rows = dgRows;
       schema.seed = dgSeed;
-      const code  = schema.python_code || "# No code generated";
       const desc  = schema.description || "";
       const steps = schema.practice_steps || [];
-      // Build dataset snapshot here so we can persist it immediately
+      // Build dataset snapshot immediately
       const ds = dgBuildDataset(schema);
       setDgSchema(schema);
       setDgDataset(ds);
-      setDgCode(code);
+      setDgCode("");
       setDgDesc(desc);
       setDgSteps(steps);
-      saveToDay(schema, code, desc, steps, ds);
+      // Save schema + dataset with empty code — don't persist stale code
+      // from a previous topic. Students get the real code only after the
+      // trainer clicks "Generate Code" in step 2.
+      saveToDay(schema, "", desc, steps, ds);
       const subMsg = subTopicList.length ? ` covering ${subTopicList.length} sub-topics` : "";
-      notify(`✅ Generated ${dgRows} × ${(schema.columns || []).length} dataset for "${topicHint}"${subMsg}`, "success");
+      notify(`✅ Dataset generated (${dgRows} × ${(schema.columns || []).length}) for "${topicHint}"${subMsg}. Now click "Generate Code" to build the Python script.`, "success");
     } catch (e) {
       const msg = e.message?.slice(0, 160) || "unknown";
       notify("❌ Dataset generation failed: " + msg, "error");
@@ -4834,6 +4955,50 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
       saveToDay(s, s.python_code, s.description, s.practice_steps || [], ds);
     } finally {
       setDgBusy(false);
+    }
+  };
+
+  // ── Step 2: Generate Python code based on the already-built schema ─
+  const handleGenerateCode = async () => {
+    if (!dgDataset || !dgSchema) return;
+
+    if (!groqKey) {
+      notify("⚠️ No Groq key — add it in Settings to generate Python code.", "warn");
+      return;
+    }
+
+    setDgCodeBusy(true);
+    try {
+      const code = await dgCallGroqForCode(dgSchema, subTopicList, groqKey, groqModel || "llama-3.3-70b-versatile");
+      setDgCode(code);
+      saveToDay(dgSchema, code, dgDesc, dgSteps, dgDataset);
+      notify("✅ Python code generated successfully.", "success");
+    } catch (e) {
+      const raw = e.message || "";
+      // Parse Groq's JSON error body for a clean message
+      let friendlyMsg = raw.slice(0, 200);
+      try {
+        const parsed = JSON.parse(raw);
+        const groqMsg = parsed?.error?.message || "";
+        if (groqMsg) friendlyMsg = groqMsg.slice(0, 200);
+      } catch {}
+
+      const isTokenErr = dgIsTokenError(raw);
+      if (isTokenErr) {
+        notify(
+          `❌ Model "${groqModel}" hit its token limit. Try switching to "llama-3.3-70b-versatile" or "openai/gpt-oss-20b" in Settings → Groq Model.`,
+          "error"
+        );
+      } else {
+        notify("❌ Code generation failed: " + friendlyMsg, "error");
+      }
+      // Graceful fallback so the code panel is never blank
+      if (!dgCode || dgCode === "# No code generated") {
+        setDgCode(DG_DEFAULT_SCHEMA.python_code);
+        saveToDay(dgSchema, DG_DEFAULT_SCHEMA.python_code, dgDesc, dgSteps, dgDataset);
+      }
+    } finally {
+      setDgCodeBusy(false);
     }
   };
 
@@ -4979,9 +5144,15 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
                 onChange={e => setDgSeed(parseInt(e.target.value) || 1)}
                 className="lms-input" style={{ width:90, fontWeight:700 }} />
             </div>
-            <button className="lms-btn lms-btn-blue" disabled={dgBusy} onClick={handleGenerate} style={{ padding:"9px 20px", fontWeight:800 }}>
-              {dgBusy ? <><Spin s={13}/>Generating…</> : <><Ic n="brain" s={14}/>Generate Dataset</>}
+            <button className="lms-btn lms-btn-blue" disabled={dgBusy || dgCodeBusy} onClick={handleGenerateDataset} style={{ padding:"9px 20px", fontWeight:800 }}>
+              {dgBusy ? <><Spin s={13}/>Generating Dataset…</> : <><Ic n="brain" s={14}/>Generate Dataset</>}
             </button>
+            {dgDataset && (
+              <button className="lms-btn" disabled={dgBusy || dgCodeBusy} onClick={handleGenerateCode}
+                style={{ padding:"9px 20px", fontWeight:800, background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"#fff", border:"none" }}>
+                {dgCodeBusy ? <><Spin s={13}/>Generating Code…</> : <><Ic n="code" s={14}/>Generate Code</>}
+              </button>
+            )}
             {!groqKey && (
               <span style={{ fontSize:12, color:"#92400e", background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:8, padding:"6px 10px" }}>
                 ⚠️ No Groq key — add it in Settings for AI datasets
@@ -5170,6 +5341,12 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
               <p style={{ fontSize:12, color:"#475569", margin:"2px 0 0 0" }}>Copy-paste into Jupyter / Google Colab</p>
             </div>
             <div style={{ display:"flex", gap:8 }}>
+              {!studentMode && (
+                <button onClick={handleGenerateCode} disabled={dgCodeBusy || dgBusy || !dgDataset}
+                  style={{ padding:"6px 14px", borderRadius:8, background: dgCodeBusy ? "#4c1d95" : "linear-gradient(135deg,#7c3aed,#6d28d9)", color:"#fff", fontSize:12, fontWeight:750, border:"none", cursor: (!dgDataset || dgCodeBusy || dgBusy) ? "not-allowed" : "pointer", opacity: (!dgDataset || dgCodeBusy || dgBusy) ? 0.6 : 1, display:"flex", alignItems:"center", gap:5, transition:"opacity .2s" }}>
+                  {dgCodeBusy ? <><Spin s={11}/>Generating…</> : <><Ic n="code" s={11} c="#fff"/>Re-generate Code</>}
+                </button>
+              )}
               <button onClick={copyCode}
                 style={{ padding:"6px 14px", borderRadius:8, background: dgCodeCopied ? "#22c55e" : "#334155", color:"#e2e8f0", fontSize:12, fontWeight:750, border:"none", cursor:"pointer", transition:"background .2s" }}>
                 {dgCodeCopied ? "✅ Copied!" : "📋 Copy Code"}
@@ -5182,11 +5359,14 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
           </div>
           <pre style={{
             padding:"16px 18px", margin:0, fontSize:12, lineHeight:1.7,
-            color:"#e9e0cf", overflowX:"auto", maxHeight:500, overflowY:"auto",
+            color: dgCode ? "#e9e0cf" : "#475569", overflowX:"auto", maxHeight:500, overflowY:"auto",
             fontFamily:"'JetBrains Mono','Fira Code','Cascadia Code',monospace",
             whiteSpace:"pre-wrap", wordBreak:"break-word",
           }}>
-            {dgCode}
+            {dgCode || (studentMode
+              ? "# Code not published yet — check back after your trainer generates it."
+              : "# Click \"Generate Code\" above to generate the Python preprocessing script for this dataset."
+            )}
           </pre>
         </div>
 
