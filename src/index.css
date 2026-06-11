@@ -2,9 +2,16 @@
 
 body {
   font-family: 'Segoe UI', 'Helvetica Neue', system-ui, sans-serif;
-  background: #f8fafc;
+  /* Background image — /public/bg.jpg is served at /bg.jpg by Vite */
+  background-color: #f8fafc;
+  background-image: url('/bg1.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
   color: #0f172a;
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
 }
 
 /* ── LMS button base ── */
