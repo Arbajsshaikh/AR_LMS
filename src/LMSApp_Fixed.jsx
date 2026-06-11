@@ -3154,6 +3154,8 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [calMonth, setCalMonth] = useState(new Date().getMonth());
 
   const [dayStatus, setDayStatus] = useState({});
+  // Trainer's day_status — stored separately for read-only display to students
+  const [trainerDayStatus, setTrainerDayStatus] = useState({});
   const [selDay,    setSelDay]    = useState(null);
   // Per-student activity tracking (students only) — saved to lms_student_activity
   const [studentActivity, setStudentActivity] = useState({});
@@ -3207,7 +3209,11 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       // Trainer: load course-level day status. Student: load their own personal status.
       if (studentMode && studentId) {
         const studentStatus = await sbLoadStudentDayStatus(sb, studentId, courseId).catch(() => ({}));
-        setDayStatus(Object.keys(studentStatus).length > 0 ? studentStatus : {});
+        // Only apply DB result if it has actual entries — never wipe in-memory status with an empty result
+        // (guards against table-not-yet-created, RLS block, or race with the debounced save)
+        if (Object.keys(studentStatus).length > 0) setDayStatus(studentStatus);
+        // Also store trainer's day_status for read-only display to student
+        if (course.dayStatus) setTrainerDayStatus(course.dayStatus);
         // Load student's own activity record
         const act = await sbLoadMyActivity(sb, studentId, courseId).catch(() => ({}));
         const withJoin = { ...act, joinedAt: act.joinedAt || new Date().toISOString(), lastSeen: new Date().toISOString() };
@@ -3277,9 +3283,17 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           // Students: re-fetch their own personal status (not the trainer course status)
           if (studentId) {
             sbLoadStudentDayStatus(sb, studentId, courseId)
-              .then(s => setDayStatus(s || {}))
+              .then(s => {
+                // Only update if DB returned actual entries — merge onto current state so an
+                // empty DB result (table missing, RLS block, or save-race) never wipes local changes
+                if (s && Object.keys(s).length > 0) {
+                  setDayStatus(prev => ({ ...prev, ...s }));
+                }
+              })
               .catch(() => {});
           }
+          // Always sync trainer's day_status for read-only display to student
+          if (course.dayStatus) setTrainerDayStatus(course.dayStatus);
           if (course.dayOverrides)          setDayOverrides(course.dayOverrides);
         }
         const contentByDay = await sbGetAllDayContent(sb, courseId);
@@ -3465,9 +3479,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
      not on every Realtime sync that updates dayData/planDays/etc. */
   useEffect(() => {
     if (!studentMode || !sb || !courseId || !studentId) return;
+    // Don't bother saving an empty map — nothing to persist and it would overwrite real data
+    if (Object.keys(dayStatus).length === 0) return;
     const timer = setTimeout(() => {
       sbSaveStudentDayStatus(sb, studentId, courseId, dayStatus)
-        .catch(e => console.warn("Student status save error:", e.message));
+        .catch(e => console.error("Student status save failed:", e.message,
+          "\nEnsure lms_student_day_status table exists and RLS allows student to upsert their own row."));
     }, 800);
     return () => clearTimeout(timer);
   }, [dayStatus, courseId, sb, studentMode, studentId]);
@@ -4440,7 +4457,7 @@ Hard rules:
                   </div>
                 </div>
               )}
-              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onGenWeek={async(days,onProgress)=>{
+              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onGenWeek={async(days,onProgress)=>{
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
                 let done=0; const total=days.length*gens.length; const failed=[];
                 for(const d of days){ for(const{fn,label}of gens){ try{await fn(d,{silent:true});}catch(e){failed.push(`Day ${d.dayNum} ${label}: ${e.message}`);} done++; onProgress&&onProgress(done,total); } }
@@ -4448,7 +4465,7 @@ Hard rules:
               }} />}
               {!leaderboardOpen && page==="day" && selDay && (
                 <DayPage
-                  day={selDay} dayData={dayData[selDay.key]||{}} dayStatus={dayStatus} setDayStatus={setDayStatus}
+                  day={selDay} dayData={dayData[selDay.key]||{}} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus}
                   busy={busy} pendingGen={pendingGen}
                   codeEdit={codeEdits[selDay.key]||""} setCodeEdit={v=>setCodeEdits(p=>({...p,[selDay.key]:v}))}
                   codeOutput={codeOutputs[selDay.key]||""}
@@ -5011,7 +5028,7 @@ Day 2: [Topic]
 /* ═══════════════════════════════════════════════════════════════════
    CALENDAR PAGE — FIX 10: responsive layout
 ═══════════════════════════════════════════════════════════════════ */
-function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides }) {
+function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides }) {
   const todayK = todayKey();
   const dim = daysInMonth(calYear, calMonth);
   const fw  = firstWeekday(calYear, calMonth);
@@ -5395,6 +5412,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
               const isHoliday = override?.type === "holiday";
               const isExtra   = override?.type === "extra";
               const isSpecial = override?.type === "special";
+              // Trainer's status for this day — shown read-only to students
+              const trainerStatus = trainerDayStatus[k];
+              const tsc = trainerStatus ? STATUS_CFG[trainerStatus] : null;
 
               // Visual config for overrides
               const holBg="#fffbeb", holBorder="#fde68a", holText="#92400e";
@@ -5446,6 +5466,16 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
                   )}
                   {hasPlan && !isHoliday && !isSpecial && !isExtra && (
                     <div style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>
+                  )}
+
+                  {/* Student view: show trainer's status badge at bottom of cell */}
+                  {studentMode && hasPlan && tsc && trainerStatus !== "Not Started" && (
+                    <div style={{ display:"flex", alignItems:"center", gap:3, marginTop:4 }}>
+                      <span style={{ fontSize:9, color:tsc.text, fontWeight:700, background:tsc.bg, border:`1px solid ${tsc.border}`, borderRadius:4, padding:"1px 4px", lineHeight:1.4, whiteSpace:"nowrap" }}>
+                        <span style={{ width:5, height:5, borderRadius:"50%", background:tsc.dot, display:"inline-block", marginRight:2, verticalAlign:"middle" }}/>
+                        {trainerStatus === "Completed" ? "✓ Done" : "Live"}
+                      </span>
+                    </div>
                   )}
 
                   {/* Trainer-only: hover "+" override button */}
@@ -5506,12 +5536,22 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
                 const s = dayStatus[k] || "Not Started";
                 const sc = STATUS_CFG[s];
                 const d = parseInt(k.split("-")[2]);
+                const tStatus = trainerDayStatus[k];
+                const tsc2 = tStatus ? STATUS_CFG[tStatus] : null;
                 return (
                   <div key={k} style={{ padding:"9px 12px", borderRadius:10, background:sc.bg, border:`1.5px solid ${sc.border}`, cursor:"pointer" }}
                     onClick={() => onSelectDay({ key:k, dayNum:planDays[pidx].dayNum, topic })}>
                     <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                       <span style={{ fontSize:11, fontWeight:700, color:sc.text }}>Day {planDays[pidx]?.dayNum} · {MONTHS_SHORT[calMonth]} {d}</span>
-                      <span style={{ width:6, height:6, borderRadius:"50%", background:sc.dot }}/>
+                      <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+                        {studentMode && tsc2 && tStatus !== "Not Started" && (
+                          <span style={{ fontSize:9.5, color:tsc2.text, fontWeight:700, background:tsc2.bg, border:`1px solid ${tsc2.border}`, borderRadius:4, padding:"1px 5px", lineHeight:1.4 }}>
+                            <span style={{ width:5, height:5, borderRadius:"50%", background:tsc2.dot, display:"inline-block", marginRight:2, verticalAlign:"middle" }}/>
+                            Trainer: {tStatus}
+                          </span>
+                        )}
+                        <span style={{ width:6, height:6, borderRadius:"50%", background:sc.dot }}/>
+                      </div>
                     </div>
                     <div style={{ fontSize:12, color:sc.text, fontWeight:500, marginTop:2, lineHeight:1.3 }}>{topic}</div>
                   </div>
@@ -6462,7 +6502,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, trackActivity }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, trackActivity }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -6471,6 +6511,9 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
   const status = dayStatus[k] || "Not Started";
   const sc = STATUS_CFG[status];
   const isTrainer = !studentMode;
+  // Trainer's status for this day — shown read-only to students
+  const trainerStatus = trainerDayStatus[k];
+  const tsc = trainerStatus ? STATUS_CFG[trainerStatus] : null;
 
   // Detect if topic was edited after content was generated
   // dayData.generatedForTopic is written whenever any gen function saves content
@@ -6616,6 +6659,14 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
               <span style={{ width:6, height:6, borderRadius:"50%", background:sc.dot }}/>
               {status}
             </span>
+            {/* Student view: show trainer's live status for this day — read-only */}
+            {studentMode && tsc && (
+              <span className="lms-tag" style={{ background:tsc.bg, color:tsc.text, border:`1.5px solid ${tsc.border}` }}
+                title="Status marked by your trainer">
+                <span style={{ width:6, height:6, borderRadius:"50%", background:tsc.dot }}/>
+                Trainer: {trainerStatus}
+              </span>
+            )}
             {dayData.quizScore && (
               <span className="lms-tag" style={{ background:"#fffbeb", color:"#92400e", border:"1.5px solid #fde68a", cursor:"pointer" }}
                 onClick={()=>setTab("quiz")}>
