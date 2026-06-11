@@ -1783,7 +1783,7 @@ const Spin = ({ s=14 }) => (
   </span>
 );
 
-import bgImage from "./assets/bg.jpg";
+
 /* ═══════════════════════════════════════════════════════════════════
    LOGIN SCREEN — uses Supabase for all auth
 ═══════════════════════════════════════════════════════════════════ */
@@ -1923,142 +1923,303 @@ function LoginScreen({ onLogin, sb }) {
 
 
 
-  return (
-    
+  // ── Derived state for new unified design ──
+  const isRegisterMode = mode === "register" || mode === "trainer-register";
+  const selectedRole   = mode === "trainer" || mode === "trainer-register" || mode === "trainer-pending" ? "trainer" : mode === "student" || mode === "register" ? "student" : null;
 
-<div style={{
-  minHeight: "100vh",
-  backgroundImage: `url(${bgImage})`,
-  backgroundSize: "cover",
-  backgroundPosition: "center",
-  backgroundRepeat: "no-repeat",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 20,
-  
-  fontFamily: "'Segoe UI','Helvetica Neue',system-ui,sans-serif"
-}}>
-      <div style={{ background:"white", borderRadius:20, padding:48, maxWidth:480, width:"100%", boxShadow:"0 25px 70px rgba(0,0,0,.25)" }}>
-        <div style={{ textAlign:"center", marginBottom:40 }}>
-          <div style={{ fontSize:56, marginBottom:16 }}>📚</div>
-          <h1 style={{ fontSize:32, fontWeight:800, color:"#1a202c", margin:0, letterSpacing:"-0.5px" }}>LMS Portal</h1>
-          <p style={{ color:"#64748b", fontSize:14, margin:"12px 0 0 0", lineHeight:1.6 }}>Interactive Learning Management System</p>
+  // Shared input style
+  const inputSt = {
+    width: "100%", padding: "12px 16px 12px 44px", border: "1.5px solid #e2e8f0",
+    borderRadius: 50, fontSize: 14, color: "#2d3748", outline: "none",
+    background: "#fafafa", boxSizing: "border-box", transition: "border-color .2s",
+  };
+  const inputWrap = { position: "relative", width: "100%" };
+  const iconSt = { position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", color: "#a0aec0", fontSize: 15, pointerEvents: "none" };
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "linear-gradient(135deg, #c4b5fd 0%, #a78bfa 40%, #7c3aed 100%)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20,
+      fontFamily: "'Segoe UI','Helvetica Neue',system-ui,sans-serif",
+    }}>
+      {/* Card */}
+      <div style={{
+        display: "flex",
+        borderRadius: 24,
+        overflow: "hidden",
+        width: "100%",
+        maxWidth: mode === "register" ? 860 : 780,
+        minHeight: 520,
+        boxShadow: "0 32px 80px rgba(109,40,217,.35)",
+        background: "white",
+        transition: "max-width .3s",
+      }}>
+
+        {/* ── LEFT PANEL ── */}
+        <div style={{
+          flex: "0 0 42%",
+          background: "linear-gradient(160deg, #7c3aed 0%, #6d28d9 45%, #5b21b6 100%)",
+          padding: "48px 36px",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
+          position: "relative",
+          overflow: "hidden",
+        }}>
+          {/* Decorative blobs */}
+          <div style={{ position:"absolute", top:-60, right:-60, width:180, height:180, borderRadius:"50%", background:"rgba(255,255,255,.08)" }} />
+          <div style={{ position:"absolute", bottom:-40, left:-40, width:140, height:140, borderRadius:"50%", background:"rgba(255,255,255,.06)" }} />
+          {/* Wavy lines SVG */}
+          <svg style={{ position:"absolute", bottom:60, right:0, opacity:.18, width:140 }} viewBox="0 0 140 120" fill="none">
+            <path d="M10 100 C 30 70, 50 130, 70 100 S 110 70, 130 100" stroke="white" strokeWidth="2" fill="none"/>
+            <path d="M10 80 C 30 50, 50 110, 70 80 S 110 50, 130 80"  stroke="white" strokeWidth="2" fill="none"/>
+            <path d="M10 60 C 30 30, 50 90,  70 60 S 110 30, 130 60"  stroke="white" strokeWidth="2" fill="none"/>
+          </svg>
+          {/* Dots grid */}
+          <div style={{ position:"absolute", top:24, right:24, display:"grid", gridTemplateColumns:"repeat(4,8px)", gap:5, opacity:.4 }}>
+            {Array.from({length:16}).map((_,i)=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:"white"}}/>)}
+          </div>
+          {/* Plus signs */}
+          <div style={{ position:"absolute", top:32, left:32, color:"rgba(255,255,255,.4)", fontSize:20, fontWeight:300 }}>+</div>
+          <div style={{ position:"absolute", bottom:100, left:48, color:"rgba(255,255,255,.3)", fontSize:20, fontWeight:300 }}>+</div>
+          {/* Circle outlines */}
+          <div style={{ position:"absolute", top:120, left:24, width:24, height:24, borderRadius:"50%", border:"2px solid rgba(255,255,255,.35)" }} />
+          <div style={{ position:"absolute", bottom:40, left:28, width:18, height:18, borderRadius:"50%", border:"2px solid rgba(255,255,255,.3)" }} />
+
+          <div style={{ position:"relative", zIndex:1 }}>
+            <div style={{ fontSize:38, marginBottom:8 }}>📚</div>
+            <h2 style={{ color:"white", fontSize:13, fontWeight:600, letterSpacing:".08em", textTransform:"uppercase", margin:"0 0 24px 0", opacity:.8 }}>LMS Portal</h2>
+          </div>
+          <div style={{ position:"relative", zIndex:1 }}>
+            <h1 style={{ color:"white", fontSize:26, fontWeight:800, margin:"0 0 12px 0", lineHeight:1.25 }}>
+              {mode === "trainer-pending" ? "Almost there!" : isRegisterMode ? "Join us today!" : "Welcome back!"}
+            </h1>
+            <p style={{ color:"rgba(255,255,255,.75)", fontSize:13.5, lineHeight:1.7, margin:0 }}>
+              {mode === "trainer-pending"
+                ? "Your account is under review. An admin will approve it shortly."
+                : isRegisterMode
+                  ? "Create your account and start your learning journey."
+                  : "Sign in to access your courses, progress, and more."}
+            </p>
+          </div>
         </div>
 
-        {error && <div style={{ background:"#fed7d7", color:"#c53030", padding:12, borderRadius:8, marginBottom:20, fontSize:13 }}>{error}</div>}
+        {/* ── RIGHT PANEL ── */}
+        <div style={{ flex:1, padding:"44px 44px", display:"flex", flexDirection:"column", justifyContent:"center", overflowY:"auto" }}>
 
-        {mode === "select" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            <button onClick={() => setMode("trainer")} style={{ padding:14, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🏫 Trainer Login</button>
-            <button onClick={() => setMode("trainer-register")} style={{ padding:14, background:"#4f46e5", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>🆕 New Trainer Account</button>
-            <button onClick={() => setMode("student")} style={{ padding:14, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>👨‍🎓 Student Login</button>
-            <button onClick={() => setMode("register")} style={{ padding:14, background:"#e2e8f0", color:"#2d3748", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>✍️ Student Registration</button>
-          </div>
-        )}
-
-        {mode === "trainer" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="text" value={trainerUsername} onChange={e=>setTrainerUsername(e.target.value)} placeholder="Username" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
-            <button onClick={handleTrainerLogin} disabled={loading} style={{ padding:12, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
-          </div>
-        )}
-
-        {mode === "trainer-register" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-            <p style={{ fontWeight:700, fontSize:15, color:"#1a202c", margin:0 }}>Create Trainer Account</p>
-            <input type="text" value={newTrainerName} onChange={e=>setNewTrainerName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="text" value={newTrainerUsername} onChange={e=>setNewTrainerUsername(e.target.value)} placeholder="Username (unique)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="password" value={newTrainerPass} onChange={e=>setNewTrainerPass(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, padding:"10px 14px", fontSize:12.5, color:"#92400e", lineHeight:1.6 }}>
-              🔒 New trainer accounts require admin approval before login is granted.
-            </div>
-            <button onClick={handleTrainerRegister} disabled={loading} style={{ padding:12, background:"#4f46e5", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Creating...":"Request Trainer Account"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
-          </div>
-        )}
-
-        {mode === "trainer-pending" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:16, textAlign:"center" }}>
-            <div style={{ fontSize:52 }}>⏳</div>
-            <p style={{ fontWeight:800, fontSize:18, color:"#1a202c", margin:0 }}>Account Created!</p>
-            <p style={{ fontSize:13.5, color:"#64748b", lineHeight:1.7, margin:0 }}>
-              Your trainer account has been submitted. An admin will review and approve it shortly. Once approved, you can log in normally.
-            </p>
-            <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, padding:"12px 16px", fontSize:13, color:"#166534", textAlign:"left", lineHeight:1.6 }}>
-              ✅ Account registered successfully<br/>
-              🔒 Status: <strong>Pending admin approval</strong><br/>
-              📧 Contact admin if not approved within 24 hrs
-            </div>
-            <button onClick={()=>setMode("trainer")} style={{ padding:12, background:"#667eea", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>Go to Trainer Login</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#4a5568", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back to Home</button>
-          </div>
-        )}
-
-        {mode === "student" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            {/* FIX #3: password required for student login */}
-            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Password" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} onKeyDown={e=>e.key==="Enter"&&handleStudentLogin()} />
-            <button onClick={handleStudentLogin} disabled={loading} style={{ padding:12, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Logging in...":"Login"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
-          </div>
-        )}
-
-        {mode === "register" && (
-          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-            <input type="text" value={studentName} onChange={e=>setStudentName(e.target.value)} placeholder="Full Name" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-            {/* FIX #3: require password at registration */}
-            <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={{ padding:10, border:"1px solid #cbd5e1", borderRadius:6, fontSize:14 }} />
-
-            {/* Multi-course selection — grouped by trainer */}
-            <div style={{ border:"1px solid #cbd5e1", borderRadius:8, overflow:"hidden" }}>
-              <div style={{ background:"#f7f7f7", padding:"8px 12px", fontSize:13, fontWeight:700, color:"#4a5568", borderBottom:"1px solid #e2e8f0" }}>
-                📚 Select Course(s) to Enroll In {studentCourseIds.length > 0 && <span style={{ marginLeft:6, background:"#764ba2", color:"#fff", borderRadius:99, fontSize:11, padding:"1px 7px" }}>{studentCourseIds.length} selected</span>}
+          {/* Trainer-pending state */}
+          {mode === "trainer-pending" && (
+            <div style={{ display:"flex", flexDirection:"column", gap:16, textAlign:"center" }}>
+              <div style={{ fontSize:52 }}>⏳</div>
+              <p style={{ fontWeight:800, fontSize:20, color:"#1a202c", margin:0 }}>Account Created!</p>
+              <p style={{ fontSize:13.5, color:"#64748b", lineHeight:1.7, margin:0 }}>
+                Your trainer account has been submitted. An admin will review and approve it shortly. Once approved you can sign in normally.
+              </p>
+              <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, padding:"12px 16px", fontSize:13, color:"#166534", textAlign:"left", lineHeight:1.6 }}>
+                ✅ Account registered successfully<br/>
+                🔒 Status: <strong>Pending admin approval</strong><br/>
+                📧 Contact admin if not approved within 24 hrs
               </div>
-              <div style={{ maxHeight:220, overflowY:"auto", padding:"8px 4px" }}>
-                {allCourses.length === 0
-                  ? <p style={{ padding:"12px 16px", color:"#94a3b8", fontSize:13 }}>No courses available yet.</p>
-                  : (() => {
-                      // Group courses by trainer
-                      const byTrainer = {};
-                      allCourses.forEach(c => {
-                        const tName = trainersMap[c.trainerId]?.name || "Unknown Trainer";
-                        if (!byTrainer[tName]) byTrainer[tName] = [];
-                        byTrainer[tName].push(c);
-                      });
-                      return Object.entries(byTrainer).map(([tName, courses]) => (
-                        <div key={tName}>
-                          <div style={{ padding:"5px 12px 3px", fontSize:11, fontWeight:700, color:"#764ba2", textTransform:"uppercase", letterSpacing:".06em" }}>👨‍🏫 {tName}</div>
-                          {courses.map(c => {
-                            const checked = studentCourseIds.includes(c.id);
-                            return (
-                              <label key={c.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 14px", cursor:"pointer", background:checked?"#f5f3ff":"transparent", transition:"background .12s" }}>
-                                <input type="checkbox" checked={checked}
-                                  onChange={e => {
-                                    if (e.target.checked) setStudentCourseIds(prev => [...prev, c.id]);
-                                    else setStudentCourseIds(prev => prev.filter(id => id !== c.id));
-                                  }}
-                                  style={{ width:15, height:15, accentColor:"#764ba2", cursor:"pointer" }}
-                                />
-                                <span style={{ fontSize:13.5, color:checked?"#5b21b6":"#2d3748", fontWeight:checked?600:400 }}>{c.name}</span>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      ));
-                    })()
-                }
-              </div>
+              <button onClick={()=>setMode("trainer")} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14 }}>Go to Sign In</button>
+              <button onClick={()=>setMode("select")} style={{ padding:"11px 0", background:"transparent", color:"#7c3aed", border:"1.5px solid #7c3aed", borderRadius:50, fontWeight:600, cursor:"pointer", fontSize:13 }}>← Back to Home</button>
             </div>
+          )}
 
-            <button onClick={handleStudentRegister} disabled={loading} style={{ padding:12, background:"#764ba2", color:"white", border:"none", borderRadius:8, fontWeight:600, cursor:"pointer" }}>{loading?"Registering...":"Register"}</button>
-            <button onClick={()=>setMode("select")} style={{ padding:12, background:"#e2e8f0", color:"#667eea", border:"1px solid #667eea", borderRadius:8, fontWeight:600, cursor:"pointer" }}>← Back</button>
-          </div>
-        )}
+          {/* All non-pending modes */}
+          {mode !== "trainer-pending" && (
+            <>
+              <h2 style={{ fontSize:24, fontWeight:800, color:"#1a202c", margin:"0 0 6px 0" }}>
+                {isRegisterMode ? "Create Account" : "Sign In"}
+              </h2>
+              <p style={{ color:"#94a3b8", fontSize:13, margin:"0 0 24px 0" }}>
+                {isRegisterMode ? "Fill in the details below to get started." : "Enter your credentials to continue."}
+              </p>
+
+              {error && (
+                <div style={{ background:"#fff1f2", color:"#be123c", padding:"10px 14px", borderRadius:10, marginBottom:16, fontSize:13, border:"1px solid #fecdd3" }}>{error}</div>
+              )}
+
+              {/* ── ROLE SELECTOR (shown on select / trainer / student / register) ── */}
+              {(mode === "select" || mode === "trainer" || mode === "student" || mode === "register") && (
+                <div style={{ display:"flex", gap:10, marginBottom:22 }}>
+                  {[
+                    { key:"trainer", label:"Trainer", icon:"👨‍🏫" },
+                    { key:"student", label:"Student", icon:"👨‍🎓" },
+                  ].map(r => {
+                    const active = selectedRole === r.key;
+                    return (
+                      <button key={r.key}
+                        onClick={() => {
+                          setError("");
+                          if (r.key === "trainer") setMode(mode === "register" || mode === "select" ? "trainer" : "trainer");
+                          else setMode(mode === "register" ? "register" : "student");
+                        }}
+                        style={{
+                          flex:1, padding:"10px 0", borderRadius:50, fontWeight:600, fontSize:13.5,
+                          cursor:"pointer", transition:"all .18s",
+                          background: active ? "linear-gradient(135deg,#7c3aed,#6d28d9)" : "#f1f5f9",
+                          color: active ? "white" : "#64748b",
+                          border: active ? "none" : "1.5px solid #e2e8f0",
+                          boxShadow: active ? "0 4px 14px rgba(124,58,237,.35)" : "none",
+                        }}
+                      >{r.icon} {r.label}</button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* ── TRAINER LOGIN ── */}
+              {mode === "trainer" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>👤</span>
+                    <input type="text" value={trainerUsername} onChange={e=>setTrainerUsername(e.target.value)} placeholder="Username" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>🔒</span>
+                    <input type="password" value={trainerPass} onChange={e=>setTrainerPass(e.target.value)} placeholder="Password" style={inputSt} onKeyDown={e=>e.key==="Enter"&&handleTrainerLogin()} />
+                  </div>
+                  <button onClick={handleTrainerLogin} disabled={loading} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, marginTop:4, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
+                    {loading ? "Signing in…" : "Sign In"}
+                  </button>
+                  <p style={{ textAlign:"center", fontSize:13, color:"#64748b", margin:0 }}>
+                    New trainer?{" "}
+                    <span onClick={()=>{setError("");setMode("trainer-register");}} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>Create an Account</span>
+                  </p>
+                </div>
+              )}
+
+              {/* ── STUDENT LOGIN ── */}
+              {mode === "student" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>✉️</span>
+                    <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>🔒</span>
+                    {/* FIX #3: password required for student login */}
+                    <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Password" style={inputSt} onKeyDown={e=>e.key==="Enter"&&handleStudentLogin()} />
+                  </div>
+                  <button onClick={handleStudentLogin} disabled={loading} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, marginTop:4, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
+                    {loading ? "Signing in…" : "Sign In"}
+                  </button>
+                  <p style={{ textAlign:"center", fontSize:13, color:"#64748b", margin:0 }}>
+                    New here?{" "}
+                    <span onClick={()=>{setError("");setMode("register");}} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>Create an Account</span>
+                  </p>
+                </div>
+              )}
+
+              {/* ── SELECT (initial state — role picker handles navigation) ── */}
+              {mode === "select" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+                  <p style={{ textAlign:"center", color:"#94a3b8", fontSize:13, margin:0 }}>Select a role above to get started.</p>
+                </div>
+              )}
+
+              {/* ── TRAINER REGISTER ── */}
+              {mode === "trainer-register" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:13 }}>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>👤</span>
+                    <input type="text" value={newTrainerName} onChange={e=>setNewTrainerName(e.target.value)} placeholder="Full Name" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>🪪</span>
+                    <input type="text" value={newTrainerUsername} onChange={e=>setNewTrainerUsername(e.target.value)} placeholder="Username (unique)" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>🔒</span>
+                    <input type="password" value={newTrainerPass} onChange={e=>setNewTrainerPass(e.target.value)} placeholder="Password" style={inputSt} />
+                  </div>
+                  <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:10, padding:"9px 14px", fontSize:12, color:"#92400e", lineHeight:1.6 }}>
+                    🔒 New trainer accounts require admin approval before login is granted.
+                  </div>
+                  <button onClick={handleTrainerRegister} disabled={loading} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
+                    {loading ? "Creating…" : "Request Trainer Account"}
+                  </button>
+                  <p style={{ textAlign:"center", fontSize:13, color:"#64748b", margin:0 }}>
+                    Already have an account?{" "}
+                    <span onClick={()=>{setError("");setMode("trainer");}} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>Sign In</span>
+                  </p>
+                </div>
+              )}
+
+              {/* ── STUDENT REGISTER ── */}
+              {mode === "register" && (
+                <div style={{ display:"flex", flexDirection:"column", gap:13 }}>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>👤</span>
+                    <input type="text" value={studentName} onChange={e=>setStudentName(e.target.value)} placeholder="Full Name" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>✉️</span>
+                    <input type="email" value={studentEmail} onChange={e=>setStudentEmail(e.target.value)} placeholder="your@email.com" style={inputSt} />
+                  </div>
+                  <div style={inputWrap}>
+                    <span style={iconSt}>🔒</span>
+                    {/* FIX #3: require password at registration */}
+                    <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={inputSt} />
+                  </div>
+
+                  {/* Multi-course selection — grouped by trainer */}
+                  <div style={{ border:"1.5px solid #e2e8f0", borderRadius:14, overflow:"hidden" }}>
+                    <div style={{ background:"#f8f5ff", padding:"8px 14px", fontSize:12.5, fontWeight:700, color:"#5b21b6", borderBottom:"1px solid #ede9fe" }}>
+                      📚 Select Course(s) to Enroll In {studentCourseIds.length > 0 && <span style={{ marginLeft:6, background:"#7c3aed", color:"#fff", borderRadius:99, fontSize:11, padding:"1px 8px" }}>{studentCourseIds.length} selected</span>}
+                    </div>
+                    <div style={{ maxHeight:200, overflowY:"auto", padding:"6px 4px" }}>
+                      {allCourses.length === 0
+                        ? <p style={{ padding:"12px 16px", color:"#94a3b8", fontSize:13 }}>No courses available yet.</p>
+                        : (() => {
+                            const byTrainer = {};
+                            allCourses.forEach(c => {
+                              const tName = trainersMap[c.trainerId]?.name || "Unknown Trainer";
+                              if (!byTrainer[tName]) byTrainer[tName] = [];
+                              byTrainer[tName].push(c);
+                            });
+                            return Object.entries(byTrainer).map(([tName, courses]) => (
+                              <div key={tName}>
+                                <div style={{ padding:"5px 12px 3px", fontSize:11, fontWeight:700, color:"#7c3aed", textTransform:"uppercase", letterSpacing:".06em" }}>👨‍🏫 {tName}</div>
+                                {courses.map(c => {
+                                  const checked = studentCourseIds.includes(c.id);
+                                  return (
+                                    <label key={c.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 14px", cursor:"pointer", background:checked?"#f5f3ff":"transparent", transition:"background .12s" }}>
+                                      <input type="checkbox" checked={checked}
+                                        onChange={e => {
+                                          if (e.target.checked) setStudentCourseIds(prev => [...prev, c.id]);
+                                          else setStudentCourseIds(prev => prev.filter(id => id !== c.id));
+                                        }}
+                                        style={{ width:15, height:15, accentColor:"#7c3aed", cursor:"pointer" }}
+                                      />
+                                      <span style={{ fontSize:13.5, color:checked?"#5b21b6":"#2d3748", fontWeight:checked?600:400 }}>{c.name}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            ));
+                          })()
+                      }
+                    </div>
+                  </div>
+
+                  <button onClick={handleStudentRegister} disabled={loading} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
+                    {loading ? "Registering…" : "Create Account"}
+                  </button>
+                  <p style={{ textAlign:"center", fontSize:13, color:"#64748b", margin:0 }}>
+                    Already registered?{" "}
+                    <span onClick={()=>{setError("");setMode("student");}} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>Sign In</span>
+                  </p>
+                </div>
+              )}
+
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
