@@ -2544,6 +2544,51 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   // FIX 12: re-runs when refreshKey increments (manual refresh button)
   useEffect(() => { loadStudent(); }, [sb, auth.id, refreshKey]);
 
+  // ENROLLMENT GUARD: poll Supabase every 10 s to detect trainer removal.
+  // If the student's active course disappears from their enrolled list, log them
+  // out immediately so they can't keep viewing content after being removed.
+  useEffect(() => {
+    if (!sb || !auth?.id) return;
+    const interval = setInterval(async () => {
+      try {
+        const rows = await sb.select("lms_students", `id=eq.${encodeURIComponent(auth.id)}&limit=1`);
+        const student = rows?.[0] ? dbRowToStudent(rows[0]) : null;
+        if (!student) {
+          // Student record deleted entirely — log out immediately
+          handleLogout();
+          return;
+        }
+        const freshEnrolled = getStudentEnrolledCourses(student);
+        // If they had at least one course before and now have none, log out
+        if (freshEnrolled.length === 0) {
+          handleLogout();
+          return;
+        }
+        // If the currently active course was specifically removed, either
+        // switch to another enrolled course or log out if none remain
+        setActiveCourseId(prev => {
+          if (!prev) return freshEnrolled[0]?.courseId || null;
+          const stillEnrolled = freshEnrolled.some(e => e.courseId === prev);
+          if (!stillEnrolled) {
+            // Active course removed — switch to first remaining or log out
+            const next = freshEnrolled[0]?.courseId || null;
+            if (!next) {
+              // Schedule logout outside the state setter
+              setTimeout(() => handleLogout(), 0);
+            }
+            return next;
+          }
+          return prev;
+        });
+        // Keep enrolledCourses in sync with the fresh data
+        setEnrolledCourses(freshEnrolled);
+      } catch {
+        // Network blip — skip this poll, try again next interval
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [sb, auth?.id]);
+
   // Load all available courses whenever enrollment panel opens
   useEffect(() => {
     if (!showEnrollPanel || !sb) return;
