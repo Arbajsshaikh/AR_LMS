@@ -938,9 +938,25 @@ function getStudentEnrolledCourses(student) {
 }
 
 // ── DAY FILES ─────────────────────────────────────────────────────
+// FIX: Never trust a stored data_url for storage-backed files — signed URLs expire in 1h.
+// Always regenerate a fresh signed URL from storage_path on every load.
+// This fixes the "InvalidJWT exp claim check failed" error students see on download.
 async function sbGetFilesForDay(sb, courseId, dayKey) {
+  const creds = getSbCreds();
   const rows = await sb.select("lms_day_files", `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}&order=created_at.asc`);
-  return (rows || []).map(r => ({ id: r.id, name: r.name, type: r.type, size: r.size, dataUrl: r.data_url, storagePath: r.storage_path, uploadedAt: r.created_at }));
+  return Promise.all((rows || []).map(async r => {
+    let dataUrl = r.data_url; // fallback: base64 or null
+    // If file lives in Storage, always get a fresh signed URL (1h TTL) — never use the stored one
+    if (r.storage_path && creds.url && creds.key) {
+      try {
+        const fresh = await sbGetStorageFileUrl(creds.url, creds.key, r.storage_path);
+        if (fresh) dataUrl = fresh;
+      } catch {
+        // Storage fetch failed — fall through to whatever data_url we have
+      }
+    }
+    return { id: r.id, name: r.name, type: r.type, size: r.size, dataUrl, storagePath: r.storage_path, uploadedAt: r.created_at };
+  }));
 }
 
 // FIX #9: Upload file to Supabase Storage bucket 'lms-files' instead of storing base64 in DB.
@@ -3975,9 +3991,10 @@ Hard rules:
             const blob = new Blob([e.target.result], { type: file.type });
             await sbUploadFileToStorage(creds.url, creds.key, storagePath, blob);
             fileObj.storagePath = storagePath;
-            // Fetch a signed URL so we can display/download immediately
+            // Fetch a signed URL for the trainer's current session only (in-memory state)
+            // DO NOT persist this to DB — signed URLs expire in 1h and would break student downloads
             const signedUrl = await sbGetStorageFileUrl(creds.url, creds.key, storagePath);
-            if (signedUrl) fileObj.dataUrl = signedUrl;
+            if (signedUrl) fileObj.dataUrl = signedUrl; // in-memory only; cleared from dbFileObj below
           } catch (storageErr) {
             // FIX 10: Storage not configured or bucket missing — fall back to base64 in DB
             // Show a visible warning so the trainer knows to set up the storage bucket
@@ -3994,7 +4011,13 @@ Hard rules:
             }
             fileObj.dataUrl = e.target.result;
           }
-          try { await sbSaveFile(sb, courseId, key, fileObj, trainerId); }
+          try {
+            // FIX: Don't persist signed URLs to DB — they expire in 1h and break student downloads.
+            // storage_path is stored; fresh signed URLs are generated on every load in sbGetFilesForDay.
+            const dbFileObj = { ...fileObj };
+            if (dbFileObj.storagePath) dbFileObj.dataUrl = null;
+            await sbSaveFile(sb, courseId, key, dbFileObj, trainerId);
+          }
           catch(err) { notify(`"${file.name}" DB save failed: ${err.message}`, "warn"); }
         } else {
           // No Supabase — store in memory only (session-only)
