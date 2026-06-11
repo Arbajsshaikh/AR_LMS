@@ -1991,8 +1991,8 @@ function LoginScreen({ onLogin, sb }) {
           <div style={{ position:"absolute", bottom:40, left:28, width:18, height:18, borderRadius:"50%", border:"2px solid rgba(255,255,255,.3)" }} />
 
           <div style={{ position:"relative", zIndex:1 }}>
-            <div style={{ fontSize:38, marginBottom:8 }}>📚</div>
-            <h2 style={{ color:"white", fontSize:13, fontWeight:600, letterSpacing:".08em", textTransform:"uppercase", margin:"0 0 24px 0", opacity:.8 }}>LMS Portal</h2>
+            <div style={{ fontSize:38, marginBottom:8 }}></div>
+            <h2 style={{ color:"white", fontSize:33, fontWeight:600, letterSpacing:".08em", textTransform:"uppercase", margin:"0 0 24px 0", opacity:.8 }}>LMS Portal</h2>
           </div>
           <div style={{ position:"relative", zIndex:1 }}>
             <h1 style={{ color:"white", fontSize:26, fontWeight:800, margin:"0 0 12px 0", lineHeight:1.25 }}>
