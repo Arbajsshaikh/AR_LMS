@@ -809,28 +809,79 @@ async function sbDeleteStudent(sb, studentId) {
 }
 
 // ── LEADERBOARD — fetch all approved students for a course + their day content ──
+// ── STUDENT ACTIVITY TRACKING ──────────────────────────────────────
+// Table: lms_student_activity
+// SQL (run once in Supabase SQL editor):
+//
+//   create table if not exists lms_student_activity (
+//     id           text primary key,   -- "{studentId}__{courseId}"
+//     student_id   text not null,
+//     course_id    text not null,
+//     activity     jsonb not null default '{}',
+//     updated_at   timestamptz not null default now()
+//   );
+//
+// activity JSON shape:
+// {
+//   quizScores:    { [dayKey]: { pct, score, total, date } },
+//   codeRuns:      { [dayKey]: count },
+//   notesChars:    { [dayKey]: charCount },
+//   notebookViews: { [dayKey]: true },
+//   exampleViews:  { [dayKey]: true },
+//   assignSubmits: { [dayKey]: { submittedAt, wordCount } },
+//   dataGenUses:   { [dayKey]: true },
+//   practicals:    { [dayKey]: count },
+//   resourceViews: { [dayKey]: true },
+//   lastSeen:      ISO string,
+//   joinedAt:      ISO string,
+// }
+async function sbSaveStudentActivity(sb, studentId, courseId, activity) {
+  if (!sb || !studentId || !courseId) return;
+  const id = `${studentId}__${courseId}`;
+  await sb.upsert("lms_student_activity", {
+    id,
+    student_id: studentId,
+    course_id:  courseId,
+    activity:   activity,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+async function sbLoadMyActivity(sb, studentId, courseId) {
+  if (!sb || !studentId || !courseId) return {};
+  try {
+    const rows = await sb.select(
+      "lms_student_activity",
+      `id=eq.${encodeURIComponent(`${studentId}__${courseId}`)}&limit=1`
+    );
+    return rows?.[0]?.activity || {};
+  } catch { return {}; }
+}
+
+async function sbLoadAllStudentActivity(sb, courseId) {
+  if (!sb || !courseId) return {};
+  try {
+    const rows = await sb.select(
+      "lms_student_activity",
+      `course_id=eq.${encodeURIComponent(courseId)}`
+    );
+    const map = {};
+    for (const r of (rows || [])) {
+      map[r.student_id] = r.activity || {};
+    }
+    return map;
+  } catch { return {}; }
+}
+
 async function sbGetLeaderboardData(sb, courseId, planDays) {
-  // 1. Fetch all students
   const rows = await sb.select("lms_students", "order=created_at.asc");
   const allStudents = (rows || []).map(dbRowToStudent);
-  // Keep only those enrolled in this course
   const enrolled = allStudents.filter(s => {
     const courses = getStudentEnrolledCourses(s);
     return courses.some(e => e.courseId === courseId);
   });
-
-  // 2. Fetch day content for each enrolled student (stored under their own student_id scoped keys)
-  // Since dayData is shared per-course (not per-student), we compute scores from
-  // the shared course content + the per-student fields saved in lms_students rows
-  // (quizScore, notes, dayStatus are global to the course, so we use a presence-based scoring model)
-  // We derive scores from:
-  //  • dayStatus (Completed/In Progress per day)
-  //  • quizScores stored on day content
-  //  • notes presence
-  //  • assignment submission markers
-  //  We use the course-level dayData (already loaded in the caller) for content presence.
-
-  return enrolled;
+  const activityMap = await sbLoadAllStudentActivity(sb, courseId);
+  return { enrolled, activityMap };
 }
 
 function studentToDbRow(s) {
@@ -946,6 +997,36 @@ async function sbSaveFile(sb, courseId, dayKey, fileObj, trainerId) {
 
 async function sbDeleteFile(sb, fileId) {
   await sb.delete("lms_day_files", `id=eq.${encodeURIComponent(fileId)}`);
+}
+
+// ── PER-STUDENT DAY STATUS — lms_student_day_status table ────────────────
+// One row per (student_id, course_id) stores the full { dayKey: status } map.
+// Trainers use lms_courses.day_status (unchanged). Students use this table.
+// SQL to run once in Supabase SQL editor:
+//   create table if not exists lms_student_day_status (
+//     id          text primary key,   -- "{studentId}__{courseId}"
+//     student_id  text not null,
+//     course_id   text not null,
+//     day_status  jsonb not null default '{}',
+//     updated_at  timestamptz not null default now()
+//   );
+async function sbSaveStudentDayStatus(sb, studentId, courseId, dayStatus) {
+  const id = `${studentId}__${courseId}`;
+  await sb.upsert("lms_student_day_status", {
+    id,
+    student_id: studentId,
+    course_id:  courseId,
+    day_status: dayStatus,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+async function sbLoadStudentDayStatus(sb, studentId, courseId) {
+  const rows = await sb.select(
+    "lms_student_day_status",
+    `id=eq.${encodeURIComponent(`${studentId}__${courseId}`)}&limit=1`
+  );
+  return rows?.[0]?.day_status || {};
 }
 
 // ── FIX #4: DAY CONTENT — separate table, one row per (course, day, type) ──
@@ -2473,362 +2554,389 @@ function StudentCourseView({ sb, auth, handleLogout }) {
    Scores are computed from shared course data (dayStatus, dayData).
    No schema changes needed — all derived from existing Supabase tables.
 ═══════════════════════════════════════════════════════════════════ */
-function LeaderboardPage({ sb, courseId, planDays, dayData, dayStatus, studentMode, currentStudentId }) {
-  const [students, setStudents] = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [sortKey, setSortKey]   = useState("score");
-  const [filter, setFilter]     = useState("");
+function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId }) {
+  const [students,    setStudents]    = useState([]);
+  const [activityMap, setActivityMap] = useState({});   // { studentId: activityObj }
+  const [dayStatusMap,setDayStatusMap]= useState({});   // { studentId: { dayKey: status } }
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState(null);
+  const [sortKey,     setSortKey]     = useState("score");
+  const [filter,      setFilter]      = useState("");
+  const [expanded,    setExpanded]    = useState(null);  // studentId of expanded row
 
+  /* ── Fetch all enrolled students + their activity + their day statuses ── */
   useEffect(() => {
     if (!sb || !courseId) { setLoading(false); return; }
-    sbGetLeaderboardData(sb, courseId, planDays)
-      .then(s => { setStudents(s); setLoading(false); })
-      .catch(() => setLoading(false));
+    const load = async () => {
+      try {
+        // 1. Students
+        const { enrolled } = await sbGetLeaderboardData(sb, courseId, planDays);
+        setStudents(enrolled);
+
+        // 2. Activity map
+        const aMap = await sbLoadAllStudentActivity(sb, courseId);
+        setActivityMap(aMap);
+
+        // 3. Per-student day status map
+        const statusMap = {};
+        await Promise.allSettled(enrolled.map(async s => {
+          const st = await sbLoadStudentDayStatus(sb, s.id, courseId);
+          statusMap[s.id] = st || {};
+        }));
+        setDayStatusMap(statusMap);
+      } catch(e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
   }, [sb, courseId]);
 
-  // ── Score engine ────────────────────────────────────────────────
-  // All weights tuned so no single metric dominates.
-  function computeScore(student, allDayData, allDayStatus, planDays) {
+  /* ── Score engine — per student, per real activity ── */
+  const MAX_TOTAL = 1200;
+
+  function computeScore(student) {
+    const act   = activityMap[student.id] || {};
+    const dsMap = dayStatusMap[student.id] || {};
+    const total = planDays?.length || 1;
     let score = 0;
-    const breakdown = {};
+    const bd = {};
 
-    const totalDays = planDays?.length || 1;
-
-    // Pull per-student fields saved on the student record (future extensibility)
-    const meta = student.leaderboardMeta || {};
-
-    // ── 1. Days Watched / Completed  (max 300 pts) ──
-    const completedDays = Object.values(allDayStatus || {}).filter(s => s === "Completed").length;
-    const inProgressDays = Object.values(allDayStatus || {}).filter(s => s === "In Progress").length;
-    const daysScore = Math.round((completedDays / Math.max(totalDays, 1)) * 280 + inProgressDays * 5);
-    breakdown.daysWatched  = { label:"Days Completed", icon:"📅", pts: daysScore, max:300, raw:`${completedDays}/${totalDays}` };
+    // 1. Days Completed (max 300)
+    const completed   = Object.values(dsMap).filter(s => s === "Completed").length;
+    const inProgress  = Object.values(dsMap).filter(s => s === "In Progress").length;
+    const daysScore   = Math.min(300, Math.round((completed / Math.max(total,1)) * 280 + inProgress * 5));
+    bd.days = { label:"Days Completed", icon:"📅", color:"#22c55e", pts:daysScore, max:300, raw:`${completed}/${total} days` };
     score += daysScore;
 
-    // ── 2. Streak  (max 100 pts) ──
-    // Compute from sorted completed-day keys
-    const completedKeys = Object.entries(allDayStatus || {})
-      .filter(([,v]) => v === "Completed")
-      .map(([k]) => k)
-      .sort();
-    let streak = 0, maxStreak = 0, cur = 0;
+    // 2. Streak — consecutive completed day keys (max 100)
+    const completedKeys = Object.entries(dsMap)
+      .filter(([,v]) => v === "Completed").map(([k]) => k).sort();
+    let maxStreak = 0, cur = 0;
     for (let i = 0; i < completedKeys.length; i++) {
       if (i === 0) { cur = 1; }
       else {
-        const prev = new Date(completedKeys[i-1]), next = new Date(completedKeys[i]);
-        const diff = (next - prev) / (1000 * 60 * 60 * 24);
-        cur = diff <= 2 ? cur + 1 : 1; // allow 1-day gap for weekends
+        const diff = (new Date(completedKeys[i]) - new Date(completedKeys[i-1])) / 86400000;
+        cur = diff <= 2 ? cur + 1 : 1;
       }
       maxStreak = Math.max(maxStreak, cur);
     }
-    streak = maxStreak;
-    const streakScore = Math.min(100, streak * 8);
-    breakdown.streak = { label:"Best Streak", icon:"🔥", pts: streakScore, max:100, raw:`${streak} days` };
+    const streakScore = Math.min(100, maxStreak * 8);
+    bd.streak = { label:"Best Streak", icon:"🔥", color:"#f59e0b", pts:streakScore, max:100, raw:`${maxStreak} day streak` };
     score += streakScore;
 
-    // ── 3. Notebook Study  (max 120 pts — presence + code blocks) ──
-    let notebookCount = 0;
-    let codeBlocksTotal = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.notebook) { notebookCount++; codeBlocksTotal += (dd?.codeBlocks?.length || 0); }
-    }
-    const notebookScore = Math.min(120, notebookCount * 12 + Math.min(30, codeBlocksTotal * 2));
-    breakdown.notebooks = { label:"Notebooks Studied", icon:"📓", pts: notebookScore, max:120, raw:`${notebookCount} notebooks` };
-    score += notebookScore;
+    // 3. Quiz Performance (max 200)
+    const quizScores = act.quizScores || {};
+    const quizVals   = Object.values(quizScores);
+    const avgQuiz    = quizVals.length > 0 ? quizVals.reduce((a,q) => a + (q.pct||0), 0) / quizVals.length : 0;
+    const quizScore  = Math.min(200, Math.round((avgQuiz / 100) * 160 + quizVals.length * 8));
+    bd.quiz = { label:"Quiz Performance", icon:"🎯", color:"#6366f1", pts:quizScore, max:200,
+      raw: quizVals.length > 0 ? `${Math.round(avgQuiz)}% avg · ${quizVals.length} taken` : "None yet" };
+    score += quizScore;
 
-    // ── 4. Quiz Performance  (max 200 pts) ──
-    let quizTotal = 0, quizSum = 0, quizCount = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.quizScore) { quizSum += dd.quizScore.pct || 0; quizCount++; quizTotal += 100; }
-    }
-    const avgQuiz = quizCount > 0 ? quizSum / quizCount : 0;
-    const quizScore = Math.round((avgQuiz / 100) * 160 + quizCount * 5);
-    breakdown.quizPerf = { label:"Quiz Performance", icon:"🎯", pts: Math.min(200, quizScore), max:200, raw: quizCount > 0 ? `${Math.round(avgQuiz)}% avg (${quizCount} taken)` : "None yet" };
-    score += Math.min(200, quizScore);
+    // 4. Notebook Study (max 120)
+    const nbViews    = Object.keys(act.notebookViews || {}).length;
+    const codeRuns   = Object.values(act.codeRuns || {}).reduce((a,v) => a+v, 0);
+    const nbScore    = Math.min(120, nbViews * 14 + Math.min(36, codeRuns * 3));
+    bd.notebooks = { label:"Notebooks Studied", icon:"📓", color:"#8b5cf6", pts:nbScore, max:120, raw:`${nbViews} notebooks · ${codeRuns} code runs` };
+    score += nbScore;
 
-    // ── 5. Assignments Submitted  (max 150 pts) ──
-    let assignCount = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.assignment && dd.assignment.trim().length > 50) assignCount++;
-    }
-    const assignScore = Math.min(150, assignCount * 20);
-    breakdown.assignments = { label:"Assignments Available", icon:"📝", pts: assignScore, max:150, raw:`${assignCount} available` };
+    // 5. Assignments Downloaded/Submitted (max 150)
+    const assignCount = Object.keys(act.assignSubmits || {}).length;
+    const assignScore = Math.min(150, assignCount * 25);
+    bd.assignments = { label:"Assignments Submitted", icon:"📝", color:"#ec4899", pts:assignScore, max:150, raw:`${assignCount} submitted` };
     score += assignScore;
 
-    // ── 6. Notes Written  (max 80 pts) ──
-    let notesDays = 0, notesChars = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.notes?.trim()) { notesDays++; notesChars += dd.notes.trim().length; }
-    }
-    const notesScore = Math.min(80, notesDays * 10 + Math.min(30, Math.floor(notesChars / 200)));
-    breakdown.notes = { label:"Notes Written", icon:"🗒️", pts: notesScore, max:80, raw:`${notesDays} days with notes` };
+    // 6. Notes Written (max 80)
+    const notesDays  = Object.keys(act.notesChars || {}).length;
+    const notesTotal = Object.values(act.notesChars || {}).reduce((a,v) => a+v, 0);
+    const notesScore = Math.min(80, notesDays * 10 + Math.min(30, Math.floor(notesTotal / 150)));
+    bd.notes = { label:"Notes Written", icon:"🗒️", color:"#14b8a6", pts:notesScore, max:80, raw:`${notesDays} days · ${notesTotal} chars` };
     score += notesScore;
 
-    // ── 7. Practicals Performed  (max 100 pts) ──
-    let practicalCount = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.codeOutput || (dd?.dataGenerator?.dataset)) practicalCount++;
-    }
-    const practicalScore = Math.min(100, practicalCount * 15);
-    breakdown.practicals = { label:"Practicals Done", icon:"⚗️", pts: practicalScore, max:100, raw:`${practicalCount} sessions` };
+    // 7. Practicals Performed (max 100)
+    const practicalCount = Object.values(act.practicals || {}).reduce((a,v) => a+v, 0);
+    const practicalScore = Math.min(100, practicalCount * 12);
+    bd.practicals = { label:"Practicals Done", icon:"⚗️", color:"#f97316", pts:practicalScore, max:100, raw:`${practicalCount} sessions` };
     score += practicalScore;
 
-    // ── 8. Data Used (Data Generator)  (max 80 pts) ──
-    let dataGenCount = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.dataGenerator?.schema) dataGenCount++;
-    }
-    const dataScore = Math.min(80, dataGenCount * 20);
-    breakdown.dataUsed = { label:"Datasets Used", icon:"🗃️", pts: dataScore, max:80, raw:`${dataGenCount} datasets` };
+    // 8. Datasets Used (max 80)
+    const dataCount = Object.keys(act.dataGenUses || {}).length;
+    const dataScore = Math.min(80, dataCount * 20);
+    bd.dataUsed = { label:"Datasets Used", icon:"🗃️", color:"#0ea5e9", pts:dataScore, max:80, raw:`${dataCount} datasets` };
     score += dataScore;
 
-    // ── 9. Examples Explored  (max 70 pts) ──
-    let examplesCount = 0;
-    for (const dd of Object.values(allDayData || {})) {
-      if (dd?.examples) examplesCount++;
-    }
-    const examplesScore = Math.min(70, examplesCount * 10);
-    breakdown.examples = { label:"Examples Explored", icon:"⚡", pts: examplesScore, max:70, raw:`${examplesCount} days` };
-    score += examplesScore;
+    // 9. Examples Explored (max 70)
+    const exCount   = Object.keys(act.exampleViews || {}).length;
+    const exScore   = Math.min(70, exCount * 10);
+    bd.examples = { label:"Examples Explored", icon:"⚡", color:"#a855f7", pts:exScore, max:70, raw:`${exCount} days` };
+    score += exScore;
 
-    return { score: Math.round(score), breakdown, streak };
+    return { score: Math.min(MAX_TOTAL, Math.round(score)), breakdown:bd, streak:maxStreak, completed, inProgress };
   }
 
-  // Since students share course-level dayData/dayStatus (single-student-per-course model),
-  // we compute a unified score from the course. For multi-student courses this gives
-  // an activity-based rank; each student's individual contributions (notes, code runs)
-  // are already stored in the shared dayData per-course.
+  /* ── Build ranked list ── */
   const ranked = students
-    .filter(s => filter.trim() === "" || s.name.toLowerCase().includes(filter.toLowerCase()))
-    .map(s => {
-      const { score, breakdown, streak } = computeScore(s, dayData, dayStatus, planDays);
-      // Use name-based seed variation to differentiate students slightly when data is shared
-      // In a real multi-student deployment each student would have their own dayData
-      const nameSeed = s.name.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-      const variation = ((nameSeed % 40) - 20); // ±20 pts natural variation based on name
-      return {
-        ...s, score: Math.max(0, score + variation),
-        breakdown, streak,
-        completedDays: Object.values(dayStatus || {}).filter(v => v === "Completed").length,
-        totalDays: planDays?.length || 0,
-      };
+    .filter(s => !filter.trim() || s.name.toLowerCase().includes(filter.toLowerCase()) || (s.email||"").toLowerCase().includes(filter.toLowerCase()))
+    .map((s, i) => {
+      const { score, breakdown, streak, completed, inProgress } = computeScore(s);
+      return { ...s, score, breakdown, streak, completed, inProgress, totalDays: planDays?.length || 0 };
     })
     .sort((a, b) => {
-      if (sortKey === "score")    return b.score - a.score;
-      if (sortKey === "streak")   return b.streak - a.streak;
-      if (sortKey === "progress") return b.completedDays - a.completedDays;
+      if (sortKey === "score")    return b.score    - a.score;
+      if (sortKey === "streak")   return b.streak   - a.streak;
+      if (sortKey === "progress") return b.completed - a.completed;
       return a.name.localeCompare(b.name);
     });
 
-  const maxScore = ranked[0]?.score || 1;
+  const medals     = ["🥇","🥈","🥉"];
+  const podiumBg   = [
+    "linear-gradient(160deg,#fffbeb,#fef3c7)", 
+    "linear-gradient(160deg,#f8fafc,#f1f5f9)",
+    "linear-gradient(160deg,#fff7ed,#ffedd5)"
+  ];
+  const podiumBorder = ["#fcd34d","#cbd5e1","#fed7aa"];
+  const podiumScore  = ["#d97706","#64748b","#b45309"];
 
-  // Rank medals
-  const medals = ["🥇","🥈","🥉"];
-  const rankColors = ["#f59e0b","#94a3b8","#cd7f32"];
+  /* ── Tier labels ── */
+  function getTier(score) {
+    const pct = (score / MAX_TOTAL) * 100;
+    if (pct >= 80) return { label:"🏆 Elite",      color:"#f59e0b", bg:"#fffbeb" };
+    if (pct >= 60) return { label:"🥇 Advanced",   color:"#6366f1", bg:"#eef2ff" };
+    if (pct >= 40) return { label:"⚡ Rising",     color:"#22c55e", bg:"#f0fdf4" };
+    if (pct >= 20) return { label:"📚 Learning",   color:"#0ea5e9", bg:"#eff6ff" };
+    return               { label:"🌱 Starter",     color:"#94a3b8", bg:"#f8fafc" };
+  }
 
+  /* ── Loading / error / empty ── */
   if (loading) return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:300, flexDirection:"column", gap:14 }}>
-      <div style={{ width:40, height:40, border:"3px solid #e2e8f0", borderTopColor:"#6366f1", borderRadius:"50%", animation:"lms-spin .7s linear infinite" }}/>
-      <p style={{ color:"#94a3b8", fontSize:14 }}>Loading leaderboard…</p>
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:340, flexDirection:"column", gap:14 }}>
+      <div style={{ width:44, height:44, border:"3px solid #e2e8f0", borderTopColor:"#6366f1", borderRadius:"50%", animation:"lms-spin .7s linear infinite" }}/>
+      <p style={{ color:"#94a3b8", fontSize:14, fontWeight:600 }}>Fetching leaderboard…</p>
+    </div>
+  );
+
+  if (error) return (
+    <div style={{ textAlign:"center", padding:"48px 20px", color:"#ef4444" }}>
+      <div style={{ fontSize:40, marginBottom:12 }}>⚠️</div>
+      <p style={{ fontWeight:700, fontSize:15 }}>Failed to load leaderboard</p>
+      <p style={{ fontSize:13, color:"#94a3b8", marginTop:6 }}>{error}</p>
     </div>
   );
 
   if (students.length === 0) return (
-    <div style={{ textAlign:"center", padding:"60px 20px" }}>
-      <div style={{ fontSize:48, marginBottom:16 }}>🏆</div>
+    <div style={{ textAlign:"center", padding:"64px 20px" }}>
+      <div style={{ fontSize:52, marginBottom:16 }}>🏆</div>
       <h2 style={{ color:"#0f172a", fontSize:20, fontWeight:800, marginBottom:8 }}>No students enrolled yet</h2>
-      <p style={{ color:"#94a3b8", fontSize:14 }}>Once students are approved and enrolled, their performance will appear here.</p>
+      <p style={{ color:"#94a3b8", fontSize:14, maxWidth:340, margin:"0 auto" }}>Once students join and start working, their real-time performance scores will appear here.</p>
     </div>
   );
 
-  // Total possible score
-  const MAX_TOTAL = 300 + 100 + 120 + 200 + 150 + 80 + 100 + 80 + 70; // 1200
+  /* ── Inline styles (injected once) ── */
+  const css = `
+    .lb2-podium-card { border-radius:18px; padding:20px 14px; text-align:center; position:relative; transition:transform .18s; }
+    .lb2-podium-card:hover { transform:translateY(-3px); }
+    .lb2-row { display:flex; align-items:center; gap:12px; padding:14px 18px; border-radius:14px; border:1.5px solid #f1f5f9; background:#fff; transition:all .16s; margin-bottom:8px; }
+    .lb2-row:hover { border-color:#e0e7ff; box-shadow:0 2px 14px rgba(99,102,241,.09); }
+    .lb2-row.me { border-color:#6366f1 !important; background:linear-gradient(135deg,#eef2ff,#f5f3ff) !important; box-shadow:0 0 0 3px rgba(99,102,241,.13) !important; }
+    .lb2-bar-track { flex:1; height:7px; background:#f1f5f9; border-radius:99px; overflow:hidden; min-width:60px; }
+    .lb2-bar-fill  { height:100%; border-radius:99px; transition:width .7s cubic-bezier(.34,1.56,.64,1); }
+    .lb2-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:99px; font-size:11px; font-weight:700; }
+    .lb2-sort { padding:6px 12px; border-radius:8px; border:1.5px solid #e2e8f0; background:#fff; color:#64748b; font-size:12px; font-weight:700; cursor:pointer; transition:all .14s; font-family:inherit; white-space:nowrap; }
+    .lb2-sort.on { background:#0f172a; color:#fff; border-color:#0f172a; }
+    .lb2-detail { background:#f8fafc; border-radius:12px; padding:16px; margin-top:10px; display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:8px; }
+    .lb2-metric-card { background:#fff; border:1px solid #e8edf3; border-radius:10px; padding:10px 12px; display:flex; align-items:center; gap:10px; }
+    @keyframes lb2-in { 0%{opacity:0;transform:translateY(6px)} 100%{opacity:1;transform:translateY(0)} }
+    .lb2-entry { animation:lb2-in .22s ease both; }
+  `;
+
+  const myRank = currentStudentId ? ranked.findIndex(s => s.id === currentStudentId) + 1 : null;
 
   return (
-    <div style={{ animation:"lms-in .22s ease", maxWidth:900, margin:"0 auto" }}>
-      <style>{`
-        .lb-card { background:#fff; border:1.5px solid #e8edf3; border-radius:16px; box-shadow:0 1px 4px rgba(0,0,0,.04); }
-        .lb-sort-btn { padding:6px 14px; border-radius:8px; border:1.5px solid #e2e8f0; background:#fff; color:#64748b; font-size:12.5px; font-weight:600; cursor:pointer; transition:all .14s; font-family:inherit; }
-        .lb-sort-btn.on { background:#0f172a; color:#fff; border-color:#0f172a; }
-        .lb-row { display:flex; align-items:center; gap:14px; padding:14px 18px; border-radius:14px; border:1.5px solid #f1f5f9; background:#fff; transition:all .15s; margin-bottom:8px; cursor:default; }
-        .lb-row:hover { border-color:#e0e7ff; box-shadow:0 2px 12px rgba(99,102,241,.08); transform:translateY(-1px); }
-        .lb-row.me { border-color:#6366f1; background:linear-gradient(135deg,#eef2ff 0%,#f5f3ff 100%); box-shadow:0 0 0 3px rgba(99,102,241,.12); }
-        .lb-bar-track { flex:1; height:6px; background:#f1f5f9; border-radius:99px; overflow:hidden; }
-        .lb-bar-fill { height:100%; border-radius:99px; transition:width .6s cubic-bezier(.34,1.56,.64,1); }
-        .lb-metric { display:flex; flex-direction:column; align-items:center; gap:2px; padding:8px 12px; border-radius:10px; background:#f8fafc; border:1px solid #f1f5f9; min-width:64px; }
-        @keyframes lb-pop { 0%{opacity:0;transform:scale(.92) translateY(4px)} 100%{opacity:1;transform:scale(1) translateY(0)} }
-        .lb-entry { animation:lb-pop .22s ease both; }
-      `}</style>
+    <div style={{ maxWidth:920, margin:"0 auto", animation:"lms-in .22s ease" }}>
+      <style>{css}</style>
 
       {/* ── Header ── */}
-      <div style={{ marginBottom:24 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:6 }}>
-          <div style={{ width:40, height:40, background:"linear-gradient(135deg,#f59e0b,#f97316)", borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>🏆</div>
-          <div>
-            <h1 style={{ fontSize:22, fontWeight:900, color:"#0f172a", margin:0, letterSpacing:"-.5px" }}>Leaderboard</h1>
-            <p style={{ fontSize:13, color:"#94a3b8", margin:0 }}>
-              {studentMode ? "Your rank among course peers" : `${ranked.length} student${ranked.length !== 1 ? "s" : ""} · ranked by performance`}
-            </p>
-          </div>
+      <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:20 }}>
+        <div style={{ width:46, height:46, background:"linear-gradient(135deg,#f59e0b,#f97316)", borderRadius:14, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0, boxShadow:"0 4px 14px rgba(245,158,11,.3)" }}>🏆</div>
+        <div style={{ flex:1 }}>
+          <h1 style={{ fontSize:24, fontWeight:900, color:"#0f172a", margin:0, letterSpacing:"-.5px" }}>Leaderboard</h1>
+          <p style={{ fontSize:13, color:"#94a3b8", margin:0 }}>
+            {studentMode
+              ? myRank ? `You're ranked #${myRank} of ${ranked.length} students` : "Your performance vs peers"
+              : `${ranked.length} student${ranked.length !== 1 ? "s" : ""} · real activity scores`}
+          </p>
         </div>
-
-        {/* Top podium — first 3 */}
-        {ranked.length >= 2 && (
-          <div style={{ display:"flex", gap:10, marginBottom:20, marginTop:16, alignItems:"flex-end", justifyContent:"center" }}>
-            {/* 2nd place */}
-            {ranked[1] && (
-              <div style={{ flex:1, maxWidth:180, background:"linear-gradient(160deg,#f8fafc,#f1f5f9)", border:"1.5px solid #e2e8f0", borderRadius:16, padding:"18px 14px", textAlign:"center", position:"relative", order:0 }}>
-                <div style={{ fontSize:28, marginBottom:6 }}>🥈</div>
-                <div style={{ width:44, height:44, borderRadius:"50%", background:"linear-gradient(135deg,#94a3b8,#64748b)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, fontWeight:800, color:"#fff", margin:"0 auto 8px" }}>
-                  {ranked[1].name.charAt(0).toUpperCase()}
-                </div>
-                <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ranked[1].name}</div>
-                <div style={{ fontSize:16, fontWeight:900, color:"#94a3b8" }}>{ranked[1].score.toLocaleString()}</div>
-                <div style={{ fontSize:10.5, color:"#94a3b8", fontWeight:600 }}>pts</div>
-                {currentStudentId === ranked[1].id && (
-                  <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:700, padding:"2px 6px", borderRadius:99 }}>YOU</div>
-                )}
-              </div>
-            )}
-            {/* 1st place */}
-            {ranked[0] && (
-              <div style={{ flex:1, maxWidth:200, background:"linear-gradient(160deg,#fffbeb,#fef3c7)", border:"2px solid #fcd34d", borderRadius:18, padding:"22px 14px", textAlign:"center", position:"relative", order:1 }}>
-                <div style={{ fontSize:32, marginBottom:6 }}>🥇</div>
-                <div style={{ width:52, height:52, borderRadius:"50%", background:"linear-gradient(135deg,#f59e0b,#d97706)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, fontWeight:800, color:"#fff", margin:"0 auto 10px", boxShadow:"0 4px 16px rgba(245,158,11,.35)" }}>
-                  {ranked[0].name.charAt(0).toUpperCase()}
-                </div>
-                <div style={{ fontSize:14, fontWeight:900, color:"#0f172a", marginBottom:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ranked[0].name}</div>
-                <div style={{ fontSize:20, fontWeight:900, color:"#d97706" }}>{ranked[0].score.toLocaleString()}</div>
-                <div style={{ fontSize:11, color:"#92400e", fontWeight:600 }}>pts</div>
-                {currentStudentId === ranked[0].id && (
-                  <div style={{ position:"absolute", top:10, right:10, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:700, padding:"2px 6px", borderRadius:99 }}>YOU</div>
-                )}
-              </div>
-            )}
-            {/* 3rd place */}
-            {ranked[2] && (
-              <div style={{ flex:1, maxWidth:180, background:"linear-gradient(160deg,#fff7ed,#ffedd5)", border:"1.5px solid #fed7aa", borderRadius:16, padding:"18px 14px", textAlign:"center", position:"relative", order:2 }}>
-                <div style={{ fontSize:28, marginBottom:6 }}>🥉</div>
-                <div style={{ width:44, height:44, borderRadius:"50%", background:"linear-gradient(135deg,#f97316,#ea580c)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, fontWeight:800, color:"#fff", margin:"0 auto 8px" }}>
-                  {ranked[2].name.charAt(0).toUpperCase()}
-                </div>
-                <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ranked[2].name}</div>
-                <div style={{ fontSize:16, fontWeight:900, color:"#cd7f32" }}>{ranked[2].score.toLocaleString()}</div>
-                <div style={{ fontSize:10.5, color:"#92400e", fontWeight:600 }}>pts</div>
-                {currentStudentId === ranked[2].id && (
-                  <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:700, padding:"2px 6px", borderRadius:99 }}>YOU</div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+        <div style={{ textAlign:"right", fontSize:11.5, color:"#94a3b8", lineHeight:1.6 }}>
+          <div style={{ fontWeight:700, color:"#0f172a", fontSize:13 }}>{MAX_TOTAL.toLocaleString()} pts</div>
+          <div>max possible</div>
+        </div>
       </div>
+
+      {/* ── Podium (top 3) ── */}
+      {ranked.length >= 2 && (
+        <div style={{ display:"flex", gap:10, marginBottom:24, alignItems:"flex-end", justifyContent:"center" }}>
+          {/* 2nd */}
+          {ranked[1] && (
+            <div className="lb2-podium-card" style={{ flex:1, maxWidth:182, background:podiumBg[1], border:`1.5px solid ${podiumBorder[1]}` }}>
+              <div style={{ fontSize:30, marginBottom:6 }}>🥈</div>
+              <div style={{ width:48, height:48, borderRadius:"50%", background:"linear-gradient(135deg,#94a3b8,#475569)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:19, fontWeight:900, color:"#fff", margin:"0 auto 8px", boxShadow:"0 3px 10px rgba(148,163,184,.4)" }}>
+                {ranked[1].name.charAt(0).toUpperCase()}
+              </div>
+              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[1].name}</div>
+              <div style={{ fontSize:18, fontWeight:900, color:podiumScore[1], marginTop:3 }}>{ranked[1].score.toLocaleString()}</div>
+              <div style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>pts</div>
+              <div style={{ marginTop:6 }}><span className="lb2-chip" style={{ background:getTier(ranked[1].score).bg, color:getTier(ranked[1].score).color }}>{getTier(ranked[1].score).label}</span></div>
+              {currentStudentId === ranked[1].id && <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
+            </div>
+          )}
+          {/* 1st */}
+          {ranked[0] && (
+            <div className="lb2-podium-card" style={{ flex:1, maxWidth:210, background:podiumBg[0], border:`2px solid ${podiumBorder[0]}`, paddingTop:26, paddingBottom:26, boxShadow:"0 8px 32px rgba(245,158,11,.18)" }}>
+              <div style={{ fontSize:36, marginBottom:6 }}>🥇</div>
+              <div style={{ width:58, height:58, borderRadius:"50%", background:"linear-gradient(135deg,#f59e0b,#d97706)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:24, fontWeight:900, color:"#fff", margin:"0 auto 10px", boxShadow:"0 6px 20px rgba(245,158,11,.45)" }}>
+                {ranked[0].name.charAt(0).toUpperCase()}
+              </div>
+              <div style={{ fontSize:15, fontWeight:900, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[0].name}</div>
+              <div style={{ fontSize:24, fontWeight:900, color:podiumScore[0], marginTop:4 }}>{ranked[0].score.toLocaleString()}</div>
+              <div style={{ fontSize:11, color:"#92400e", fontWeight:700 }}>pts</div>
+              <div style={{ marginTop:8 }}><span className="lb2-chip" style={{ background:getTier(ranked[0].score).bg, color:getTier(ranked[0].score).color }}>{getTier(ranked[0].score).label}</span></div>
+              {currentStudentId === ranked[0].id && <div style={{ position:"absolute", top:10, right:10, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
+            </div>
+          )}
+          {/* 3rd */}
+          {ranked[2] && (
+            <div className="lb2-podium-card" style={{ flex:1, maxWidth:182, background:podiumBg[2], border:`1.5px solid ${podiumBorder[2]}` }}>
+              <div style={{ fontSize:30, marginBottom:6 }}>🥉</div>
+              <div style={{ width:48, height:48, borderRadius:"50%", background:"linear-gradient(135deg,#f97316,#ea580c)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:19, fontWeight:900, color:"#fff", margin:"0 auto 8px", boxShadow:"0 3px 10px rgba(249,115,22,.4)" }}>
+                {ranked[2].name.charAt(0).toUpperCase()}
+              </div>
+              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[2].name}</div>
+              <div style={{ fontSize:18, fontWeight:900, color:podiumScore[2], marginTop:3 }}>{ranked[2].score.toLocaleString()}</div>
+              <div style={{ fontSize:10, color:"#92400e", fontWeight:600 }}>pts</div>
+              <div style={{ marginTop:6 }}><span className="lb2-chip" style={{ background:getTier(ranked[2].score).bg, color:getTier(ranked[2].score).color }}>{getTier(ranked[2].score).label}</span></div>
+              {currentStudentId === ranked[2].id && <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Controls ── */}
       <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
-        <div style={{ display:"flex", gap:4 }}>
-          {[["score","⭐ Score"],["streak","🔥 Streak"],["progress","📅 Progress"],["name","🔤 Name"]].map(([k,label]) => (
-            <button key={k} className={`lb-sort-btn${sortKey===k?" on":""}`} onClick={() => setSortKey(k)}>{label}</button>
+        <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+          {[["score","⭐ Score"],["streak","🔥 Streak"],["progress","📅 Days"],["name","🔤 Name"]].map(([k,label]) => (
+            <button key={k} className={`lb2-sort${sortKey===k?" on":""}`} onClick={() => setSortKey(k)}>{label}</button>
           ))}
         </div>
-        <div style={{ flex:1, minWidth:160 }}>
-          <input
-            className="lms-input"
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            placeholder="🔍 Search student…"
-            style={{ fontSize:12.5, padding:"7px 12px" }}
-          />
-        </div>
-        <div style={{ fontSize:12, color:"#94a3b8", whiteSpace:"nowrap" }}>
-          Max {MAX_TOTAL.toLocaleString()} pts possible
-        </div>
+        <input className="lms-input" value={filter} onChange={e=>setFilter(e.target.value)}
+          placeholder="🔍 Search student…"
+          style={{ flex:1, minWidth:140, fontSize:12.5, padding:"7px 12px" }} />
       </div>
 
-      {/* ── Full ranking list ── */}
+      {/* ── Ranked list ── */}
       <div>
         {ranked.map((s, i) => {
-          const isMe = currentStudentId === s.id;
-          const realRank = students.findIndex(x => x.id === s.id) >= 0
-            ? ranked.indexOf(s) + 1
-            : i + 1;
-          const barPct = Math.round((s.score / MAX_TOTAL) * 100);
-          const barColor = i === 0 ? "#f59e0b" : i === 1 ? "#94a3b8" : i === 2 ? "#cd7f32" : isMe ? "#6366f1" : "#3b82f6";
+          const isMe     = currentStudentId === s.id;
+          const tier     = getTier(s.score);
+          const barPct   = Math.round((s.score / MAX_TOTAL) * 100);
+          const barColor = i===0 ? "#f59e0b" : i===1 ? "#94a3b8" : i===2 ? "#cd7f32" : isMe ? "#6366f1" : "#3b82f6";
+          const isOpen   = expanded === s.id;
+          const bd       = s.breakdown;
 
           return (
-            <div key={s.id} className={`lb-entry lb-row${isMe ? " me" : ""}`}
-              style={{ animationDelay:`${i * 0.04}s` }}>
+            <div key={s.id} className={`lb2-entry lb2-row${isMe?" me":""}`}
+              style={{ flexDirection:"column", alignItems:"stretch", cursor:"pointer", animationDelay:`${i * 0.035}s` }}
+              onClick={() => setExpanded(p => p === s.id ? null : s.id)}>
 
-              {/* Rank badge */}
-              <div style={{ width:36, height:36, borderRadius:10, background: i < 3 ? "transparent" : "#f8fafc", border: i < 3 ? "none" : "1.5px solid #e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize: i < 3 ? 22 : 14, fontWeight:800, color: i < 3 ? undefined : "#94a3b8" }}>
-                {i < 3 ? medals[i] : `#${realRank}`}
-              </div>
-
-              {/* Avatar */}
-              <div style={{ width:38, height:38, borderRadius:"50%", background:`linear-gradient(135deg,${isMe?"#6366f1,#8b5cf6":"#3b82f6,#8b5cf6"})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15, fontWeight:800, color:"#fff", flexShrink:0 }}>
-                {s.name.charAt(0).toUpperCase()}
-              </div>
-
-              {/* Name + bar */}
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
-                  <span style={{ fontSize:14, fontWeight:800, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</span>
-                  {isMe && <span style={{ fontSize:10, fontWeight:700, background:"#6366f1", color:"#fff", padding:"1px 7px", borderRadius:99, flexShrink:0 }}>YOU</span>}
-                  <span style={{ fontSize:11.5, color:"#94a3b8", flexShrink:0 }}>{s.email}</span>
+              {/* Main row */}
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                {/* Rank */}
+                <div style={{ width:36, height:36, borderRadius:10, background:i<3?"transparent":"#f8fafc", border:i<3?"none":"1.5px solid #e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:i<3?22:13, fontWeight:800, color:"#94a3b8" }}>
+                  {i<3 ? medals[i] : `#${i+1}`}
                 </div>
-                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                  <div className="lb-bar-track">
-                    <div className="lb-bar-fill" style={{ width:`${barPct}%`, background:`linear-gradient(90deg,${barColor},${barColor}cc)` }}/>
+
+                {/* Avatar */}
+                <div style={{ width:40, height:40, borderRadius:"50%", background:`linear-gradient(135deg,${isMe?"#6366f1,#8b5cf6":"#3b82f6,#60a5fa"})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, fontWeight:900, color:"#fff", flexShrink:0, boxShadow:`0 2px 8px ${isMe?"rgba(99,102,241,.3)":"rgba(59,130,246,.25)"}` }}>
+                  {s.name.charAt(0).toUpperCase()}
+                </div>
+
+                {/* Name + bar */}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5, flexWrap:"wrap" }}>
+                    <span style={{ fontSize:14, fontWeight:800, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</span>
+                    {isMe && <span className="lb2-chip" style={{ background:"#eef2ff", color:"#6366f1" }}>YOU</span>}
+                    <span className="lb2-chip" style={{ background:tier.bg, color:tier.color }}>{tier.label}</span>
+                    {s.streak > 0 && <span className="lb2-chip" style={{ background:"#fff7ed", color:"#f59e0b" }}>🔥 {s.streak}d</span>}
                   </div>
-                  <span style={{ fontSize:11, color:"#94a3b8", whiteSpace:"nowrap", fontWeight:600 }}>{barPct}%</span>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <div className="lb2-bar-track">
+                      <div className="lb2-bar-fill" style={{ width:`${barPct}%`, background:`linear-gradient(90deg,${barColor},${barColor}99)` }}/>
+                    </div>
+                    <span style={{ fontSize:11, color:"#94a3b8", fontWeight:700, flexShrink:0 }}>{barPct}%</span>
+                  </div>
                 </div>
+
+                {/* Score + progress chips */}
+                <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4, flexShrink:0 }}>
+                  <span style={{ fontSize:18, fontWeight:900, color:i===0?"#f59e0b":i===1?"#64748b":i===2?"#b45309":isMe?"#6366f1":"#0f172a", letterSpacing:"-.5px" }}>
+                    {s.score.toLocaleString()}
+                  </span>
+                  <span style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>pts</span>
+                  <span style={{ fontSize:10.5, color:"#22c55e", fontWeight:700 }}>{s.completed}/{s.totalDays} days</span>
+                </div>
+
+                {/* Expand arrow */}
+                <div style={{ fontSize:12, color:"#94a3b8", flexShrink:0, transform:isOpen?"rotate(180deg)":"none", transition:"transform .2s" }}>▼</div>
               </div>
 
-              {/* Quick stats */}
-              <div style={{ display:"flex", gap:6, flexShrink:0, flexWrap:"wrap" }}>
-                <div className="lb-metric">
-                  <span style={{ fontSize:16 }}>🔥</span>
-                  <span style={{ fontSize:12, fontWeight:800, color:"#f59e0b" }}>{s.streak}</span>
-                  <span style={{ fontSize:9.5, color:"#94a3b8", fontWeight:600 }}>streak</span>
+              {/* ── Expanded breakdown ── */}
+              {isOpen && (
+                <div className="lb2-detail" onClick={e => e.stopPropagation()}>
+                  {Object.values(bd).map(m => (
+                    <div key={m.label} className="lb2-metric-card">
+                      <div style={{ width:32, height:32, borderRadius:8, background:m.color+"18", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>{m.icon}</div>
+                      <div style={{ minWidth:0 }}>
+                        <div style={{ fontSize:11, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{m.label}</div>
+                        <div style={{ display:"flex", alignItems:"baseline", gap:4, marginTop:1 }}>
+                          <span style={{ fontSize:15, fontWeight:900, color:m.color }}>{m.pts}</span>
+                          <span style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>/ {m.max}</span>
+                        </div>
+                        <div style={{ fontSize:10.5, color:"#64748b", marginTop:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{m.raw}</div>
+                        <div style={{ height:3, background:"#f1f5f9", borderRadius:99, marginTop:4, overflow:"hidden" }}>
+                          <div style={{ height:"100%", borderRadius:99, background:m.color, width:`${Math.round((m.pts/m.max)*100)}%`, transition:"width .5s" }}/>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="lb-metric">
-                  <span style={{ fontSize:16 }}>📅</span>
-                  <span style={{ fontSize:12, fontWeight:800, color:"#22c55e" }}>{s.completedDays}/{s.totalDays}</span>
-                  <span style={{ fontSize:9.5, color:"#94a3b8", fontWeight:600 }}>days</span>
-                </div>
-                <div className="lb-metric">
-                  <span style={{ fontSize:16 }}>⭐</span>
-                  <span style={{ fontSize:14, fontWeight:900, color: i===0?"#f59e0b":i===1?"#94a3b8":i===2?"#cd7f32":isMe?"#6366f1":"#0f172a" }}>{s.score.toLocaleString()}</span>
-                  <span style={{ fontSize:9.5, color:"#94a3b8", fontWeight:600 }}>pts</span>
-                </div>
-              </div>
+              )}
             </div>
           );
         })}
       </div>
 
-      {/* ── Score breakdown legend (shown once, below list) ── */}
-      <div style={{ marginTop:28, padding:"20px 22px", background:"#f8fafc", borderRadius:16, border:"1.5px solid #e8edf3" }}>
-        <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".08em", marginBottom:14 }}>
-          How Scores Are Calculated
-        </p>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:8 }}>
+      {/* ── Scoring guide ── */}
+      <div style={{ marginTop:28, padding:"18px 20px", background:"#f8fafc", borderRadius:16, border:"1.5px solid #e8edf3" }}>
+        <p style={{ fontSize:11, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".08em", marginBottom:12 }}>Score Breakdown (max {MAX_TOTAL.toLocaleString()} pts)</p>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))", gap:8 }}>
           {[
-            { icon:"📅", label:"Days Completed",     max:300, note:"% of course done × 280 + in-progress × 5" },
-            { icon:"🔥", label:"Best Streak",          max:100, note:"Consecutive days × 8 (weekends forgiven)" },
-            { icon:"📓", label:"Notebooks Studied",    max:120, note:"12 pts/notebook + code blocks bonus" },
-            { icon:"🎯", label:"Quiz Performance",     max:200, note:"Avg quiz score + 5 pts per quiz taken" },
-            { icon:"📝", label:"Assignments Available",max:150, note:"20 pts per assignment unlocked" },
-            { icon:"🗒️", label:"Notes Written",        max:80,  note:"10 pts/day with notes + length bonus" },
-            { icon:"⚗️", label:"Practicals Done",      max:100, note:"15 pts per code execution / dataset run" },
+            { icon:"📅", label:"Days Completed",      max:300, note:"280 × completion rate + in-progress bonus" },
+            { icon:"🔥", label:"Best Streak",          max:100, note:"8 pts/consecutive day (weekends forgiven)" },
+            { icon:"🎯", label:"Quiz Performance",     max:200, note:"Avg score + 8 pts per quiz taken" },
+            { icon:"📓", label:"Notebooks Studied",    max:120, note:"14 pts/notebook + 3 pts/code run" },
+            { icon:"📝", label:"Assignments Submitted",max:150, note:"25 pts per downloaded assignment" },
+            { icon:"🗒️", label:"Notes Written",        max:80,  note:"10 pts/day + length bonus" },
+            { icon:"⚗️", label:"Practicals Done",      max:100, note:"12 pts per code run or dataset use" },
             { icon:"🗃️", label:"Datasets Used",        max:80,  note:"20 pts per Data Generator dataset" },
             { icon:"⚡", label:"Examples Explored",    max:70,  note:"10 pts per day's examples viewed" },
           ].map(m => (
             <div key={m.label} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", background:"#fff", borderRadius:10, border:"1px solid #f1f5f9" }}>
               <span style={{ fontSize:18, flexShrink:0 }}>{m.icon}</span>
               <div>
-                <div style={{ display:"flex", gap:6, alignItems:"baseline" }}>
+                <div style={{ display:"flex", gap:6, alignItems:"baseline", flexWrap:"wrap" }}>
                   <span style={{ fontSize:12, fontWeight:700, color:"#0f172a" }}>{m.label}</span>
-                  <span style={{ fontSize:10.5, color:"#94a3b8", fontWeight:600 }}>max {m.max}</span>
+                  <span style={{ fontSize:10, color:"#94a3b8", fontWeight:700 }}>max {m.max}</span>
                 </div>
                 <div style={{ fontSize:11, color:"#64748b", lineHeight:1.45, marginTop:2 }}>{m.note}</div>
               </div>
@@ -2870,6 +2978,9 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const [dayStatus, setDayStatus] = useState({});
   const [selDay,    setSelDay]    = useState(null);
+  // Per-student activity tracking (students only) — saved to lms_student_activity
+  const [studentActivity, setStudentActivity] = useState({});
+  const studentActivityRef = useRef({});
   const [dayData,   setDayData]   = useState({});
   const [pendingGen, setPendingGen] = useState({});
 
@@ -2916,7 +3027,18 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       }
       if (course.startDate) setStartDate(course.startDate);
       if (course.monfri !== undefined) setMonfri(course.monfri);
-      if (course.dayStatus) setDayStatus(course.dayStatus);
+      // Trainer: load course-level day status. Student: load their own personal status.
+      if (studentMode && studentId) {
+        const studentStatus = await sbLoadStudentDayStatus(sb, studentId, courseId).catch(() => ({}));
+        setDayStatus(Object.keys(studentStatus).length > 0 ? studentStatus : {});
+        // Load student's own activity record
+        const act = await sbLoadMyActivity(sb, studentId, courseId).catch(() => ({}));
+        const withJoin = { ...act, joinedAt: act.joinedAt || new Date().toISOString(), lastSeen: new Date().toISOString() };
+        setStudentActivity(withJoin);
+        studentActivityRef.current = withJoin;
+      } else if (course.dayStatus) {
+        setDayStatus(course.dayStatus);
+      }
       if (course.dayOverrides) setDayOverrides(course.dayOverrides);
       if (course.calYear)   setCalYear(course.calYear);
       if (course.calMonth !== undefined) setCalMonth(course.calMonth);
@@ -2975,7 +3097,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           if (course.planDays?.length)      setPlanDays(course.planDays);
           if (course.startDate)             setStartDate(course.startDate);
           if (course.monfri !== undefined)  setMonfri(course.monfri);
-          if (course.dayStatus)             setDayStatus(course.dayStatus);
+          // Students: re-fetch their own personal status (not the trainer course status)
+          if (studentId) {
+            sbLoadStudentDayStatus(sb, studentId, courseId)
+              .then(s => setDayStatus(s || {}))
+              .catch(() => {});
+          }
           if (course.dayOverrides)          setDayOverrides(course.dayOverrides);
         }
         const contentByDay = await sbGetAllDayContent(sb, courseId);
@@ -3113,25 +3240,89 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           last load, skip the write and warn the trainer. Prevents two-tab overwrites. */
   const lastSavedAtRef = useRef(null);
 
+  /* ════ Student activity tracker ════
+     trackActivity(type, dayKey, payload) — merges into studentActivity state
+     and schedules a debounced upsert to lms_student_activity.
+     Only runs for students; no-op for trainers. */
+  const trackActivity = useCallback((type, dayKey, payload) => {
+    if (!studentMode || !studentId || !courseId) return;
+    setStudentActivity(prev => {
+      const next = { ...prev, lastSeen: new Date().toISOString() };
+      switch (type) {
+        case "quizScore":
+          next.quizScores = { ...(prev.quizScores||{}), [dayKey]: payload };
+          break;
+        case "codeRun":
+          next.codeRuns = { ...(prev.codeRuns||{}), [dayKey]: ((prev.codeRuns||{})[dayKey]||0) + 1 };
+          break;
+        case "notes":
+          next.notesChars = { ...(prev.notesChars||{}), [dayKey]: payload.chars };
+          break;
+        case "notebookView":
+          next.notebookViews = { ...(prev.notebookViews||{}), [dayKey]: true };
+          break;
+        case "exampleView":
+          next.exampleViews = { ...(prev.exampleViews||{}), [dayKey]: true };
+          break;
+        case "assignSubmit":
+          next.assignSubmits = { ...(prev.assignSubmits||{}), [dayKey]: { submittedAt: new Date().toISOString(), wordCount: payload.wordCount } };
+          break;
+        case "dataGenUse":
+          next.dataGenUses = { ...(prev.dataGenUses||{}), [dayKey]: true };
+          break;
+        case "practical":
+          next.practicals = { ...(prev.practicals||{}), [dayKey]: ((prev.practicals||{})[dayKey]||0) + 1 };
+          break;
+        case "resourceView":
+          next.resourceViews = { ...(prev.resourceViews||{}), [dayKey]: true };
+          break;
+        default: break;
+      }
+      studentActivityRef.current = next;
+      return next;
+    });
+  }, [studentMode, studentId, courseId]);
+
+  /* ════ Debounced save (STUDENT) — own day status → lms_student_day_status ════
+     Separate effect so it only fires when dayStatus actually changes,
+     not on every Realtime sync that updates dayData/planDays/etc. */
+  useEffect(() => {
+    if (!studentMode || !sb || !courseId || !studentId) return;
+    const timer = setTimeout(() => {
+      sbSaveStudentDayStatus(sb, studentId, courseId, dayStatus)
+        .catch(e => console.warn("Student status save error:", e.message));
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [dayStatus, courseId, sb, studentMode, studentId]);
+
+  /* ════ Debounced save (STUDENT ACTIVITY) → lms_student_activity ════
+     Fires whenever studentActivity changes; 1200ms debounce. */
+  useEffect(() => {
+    if (!studentMode || !sb || !courseId || !studentId) return;
+    const timer = setTimeout(() => {
+      sbSaveStudentActivity(sb, studentId, courseId, studentActivityRef.current)
+        .catch(e => console.warn("Activity save error:", e.message));
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [studentActivity, courseId, sb, studentMode, studentId]);
+
+  /* ════ Debounced save (TRAINER) — full course data → lms_courses ════ */
   useEffect(() => {
     if (studentMode || !sb || !courseId) return;
     const timer = setTimeout(async () => {
       try {
-        // Lightweight fields only go into the courses row (day_data)
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
           const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, ...light } = v;
           lightDayData[k] = light;
         }
-        // FIX: conflict guard — check updated_at before writing
         if (lastSavedAtRef.current) {
           const rows = await sb.select("lms_courses", `id=eq.${encodeURIComponent(courseId)}&select=updated_at&limit=1`);
           const dbUpdatedAt = rows?.[0]?.updated_at;
-          // FIX 6: compare as Date objects — lexicographic string comparison is unreliable across TZs
           if (dbUpdatedAt && new Date(dbUpdatedAt) > new Date(lastSavedAtRef.current)) {
             console.warn("LMS: skipping save — remote updated_at is newer (possible concurrent edit)");
-            return; // don't overwrite — remote is newer
+            return;
           }
         }
         const now = new Date().toISOString();
@@ -3738,6 +3929,7 @@ Hard rules:
     const k = day.key;
     setBusyKey(`run-${k}`, true);
     setCodeOutputs(p=>({...p,[k]:""}));
+    if (studentMode) { trackActivity("codeRun", k, true); trackActivity("practical", k, true); }
     try {
       if (pyodideReady) {
         const out = await runPythonReal(code);
@@ -4091,6 +4283,8 @@ Hard rules:
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
                   groqKey={groqKey} groqModel={groqModel}
+                  sb={sb} courseId={courseId} trainerId={trainerId}
+                  trackActivity={studentMode ? trackActivity : null}
                   onEditTopic={(newTopic) => {
                     // Find the planDays index for this day key and update only its topic
                     const pidx = dayMap[selDay.key];
@@ -4124,8 +4318,6 @@ Hard rules:
                   sb={sb}
                   courseId={courseId}
                   planDays={planDays}
-                  dayData={dayData}
-                  dayStatus={dayStatus}
                   studentMode={studentMode}
                   currentStudentId={studentMode ? studentId : null}
                 />
@@ -5213,6 +5405,246 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   NOTEBOOK SUBTOPICS PANEL
+   Trainer uploads a .ipynb file → AI reads it and extracts sub-topics →
+   auto-fills the sub-topics field. The notebook is also saved to Supabase
+   resources (lms_day_files) so students can access it.
+═══════════════════════════════════════════════════════════════════ */
+function NotebookSubtopicsPanel({ dayKey, dayData, updateDay, notify, groqKey, groqModel, sb, courseId, trainerId, onFileUpload }) {
+  const [extracting, setExtracting] = useState(false);
+  const [dragOver,   setDragOver]   = useState(false);
+  const [lastFile,   setLastFile]   = useState(null); // { name, size, saved } for display
+
+  /* ── Extract subtopics from notebook JSON via Groq ── */
+  const extractSubtopicsFromNotebook = async (notebookJson, filename) => {
+    // groqKey guard: if missing, warn but don't block — file was already saved
+    if (!groqKey) {
+      notify("Notebook saved to Resources. Add a Groq API key in Settings to auto-extract sub-topics.", "warn");
+      return;
+    }
+    setExtracting(true);
+    try {
+      // Collect all markdown + code cell sources into a single readable text blob
+      const cells = notebookJson?.cells || [];
+      if (cells.length === 0) throw new Error("Notebook has no cells — cannot extract sub-topics");
+
+      const textParts = [];
+      for (const cell of cells) {
+        // ipynb source can be a string (v3) or array of strings (v4)
+        const src = Array.isArray(cell.source) ? cell.source.join("") : (cell.source || "");
+        if (!src.trim()) continue;
+        if (cell.cell_type === "markdown") textParts.push(`[MARKDOWN]\n${src}`);
+        else if (cell.cell_type === "code") textParts.push(`[CODE]\n${src}`);
+      }
+      if (textParts.length === 0) throw new Error("No readable cells found in notebook");
+
+      // Cap at 6000 chars to stay within token limits comfortably
+      const combined = textParts.join("\n\n---\n\n").slice(0, 6000);
+
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+        body: JSON.stringify({
+          model: groqModel || "llama-3.1-8b-instant",
+          temperature: 0.2,
+          max_tokens: 300,
+          messages: [
+            {
+              role: "system",
+              content: `You are a curriculum assistant. Analyse a Jupyter notebook and output ONLY a comma-separated list of the specific sub-topics or techniques taught in it.
+Rules:
+- Return 4 to 10 sub-topics
+- Each sub-topic is 1 to 6 words
+- Output ONLY the comma-separated list — no numbering, no bullet points, no preamble, no explanation
+- Focus on concrete ML / data-science / programming concepts demonstrated, not on generic words like "introduction", "overview", or "summary"
+Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression, cross_validation, GridSearchCV`
+            },
+            {
+              role: "user",
+              content: `Notebook filename: ${filename}\n\nContent:\n${combined}`
+            }
+          ]
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(`Groq API error ${res.status}: ${errText.slice(0, 200)}`);
+      }
+
+      const json = await res.json();
+      const raw = (json.choices?.[0]?.message?.content || "").trim();
+      if (!raw) throw new Error("AI returned an empty response");
+
+      // Normalise: collapse any newlines into ", ", strip leading list markers like "1.", "-", "•"
+      const normalised = raw
+        .split(/\n+/)
+        .map(line => line.replace(/^[\s*\-•\d.]+/, "").trim())
+        .filter(Boolean)
+        .join(", ");
+
+      if (!normalised) throw new Error("Could not parse sub-topics from AI response");
+
+      updateDay(dayKey, { subTopics: normalised });
+      notify("✅ Sub-topics extracted and saved");
+    } catch (e) {
+      notify(`Sub-topic extraction failed: ${e.message}`, "err");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  /* ── Handle .ipynb file — validate, save to resources, then extract sub-topics ── */
+  const handleNotebookFile = async (file) => {
+    if (!file) return;
+
+    // Validate extension
+    if (!file.name.endsWith(".ipynb")) {
+      notify("Please upload a .ipynb (Jupyter Notebook) file", "err");
+      return;
+    }
+
+    // Validate size
+    if (file.size > 5 * 1024 * 1024) {
+      notify("Notebook too large — max 5MB supported", "err");
+      return;
+    }
+
+    // Show the file name immediately so the trainer has visual feedback
+    setLastFile({ name: file.name, size: file.size, saved: false });
+
+    // Step 1: Read as text to parse JSON (needed for AI extraction)
+    let text;
+    try {
+      text = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = e => resolve(e.target.result);
+        reader.onerror = () => reject(new Error("Could not read file"));
+        reader.readAsText(file);
+      });
+    } catch (e) {
+      notify(`Failed to read file: ${e.message}`, "err");
+      setLastFile(null);
+      return;
+    }
+
+    // Step 2: Parse JSON — bail early if malformed
+    let nbJson;
+    try {
+      nbJson = JSON.parse(text);
+    } catch {
+      notify("Invalid .ipynb file — JSON could not be parsed", "err");
+      setLastFile(null);
+      return;
+    }
+
+    // Step 3: Save the notebook as a resource file via the existing upload pipeline.
+    // This runs in parallel with the AI call below — it uses ArrayBuffer internally,
+    // so it is a completely independent FileReader operation from step 1.
+    onFileUpload([file]);
+    setLastFile(prev => prev ? { ...prev, saved: true } : { name: file.name, size: file.size, saved: true });
+
+    // Step 4: Extract sub-topics via AI (async — does not block the save above)
+    extractSubtopicsFromNotebook(nbJson, file.name);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer.files[0];
+    if (f) handleNotebookFile(f);
+  };
+
+  const handleInputChange = (e) => {
+    const f = e.target.files[0];
+    if (f) handleNotebookFile(f);
+    // Reset input value so the same file can be re-uploaded if needed
+    e.target.value = "";
+  };
+
+  return (
+    <div style={{ marginBottom:18, background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:12, padding:"12px 16px" }}>
+      {/* Header row */}
+      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:10, flexWrap:"wrap" }}>
+        <span style={{ fontSize:16 }}>📌</span>
+        <span style={{ fontSize:11.5, fontWeight:700, color:"#92400e", textTransform:"uppercase", letterSpacing:".07em" }}>Sub-topics / Focus areas</span>
+        <span style={{ fontSize:12, fontWeight:500, color:"#b45309", textTransform:"none", letterSpacing:"normal" }}>— applied to every generator for this day</span>
+      </div>
+
+      {/* Sub-topics text input */}
+      <input
+        type="text"
+        className="lms-input"
+        value={dayData.subTopics || ""}
+        onChange={e => updateDay(dayKey, { subTopics: e.target.value })}
+        placeholder="e.g. list comprehension, lambda functions, map/filter — or upload notebook below to auto-fill"
+        style={{ fontSize:12.5, background:"#fff", marginBottom:10 }}
+      />
+
+      {/* Notebook drop zone */}
+      <div
+        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        style={{
+          border: `2px dashed ${dragOver ? "#f59e0b" : "#fcd34d"}`,
+          borderRadius:9,
+          background: dragOver ? "#fef3c7" : "#fffdf0",
+          padding:"11px 14px",
+          display:"flex",
+          alignItems:"center",
+          gap:10,
+          flexWrap:"wrap",
+          transition:"all .18s",
+          cursor:"pointer",
+        }}
+        onClick={() => document.getElementById(`nb-upload-${dayKey}`)?.click()}
+      >
+        <input
+          id={`nb-upload-${dayKey}`}
+          type="file"
+          accept=".ipynb"
+          style={{ display:"none" }}
+          onChange={handleInputChange}
+        />
+        <div style={{ width:32, height:32, background:"#f59e0b22", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+          {extracting ? <Spin s={14}/> : <span style={{ fontSize:16 }}>📓</span>}
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          {extracting ? (
+            <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Analysing notebook… extracting sub-topics</p>
+          ) : lastFile ? (
+            <>
+              <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>
+                ✅ {lastFile.name}
+                <span style={{ fontSize:11, fontWeight:500, color:"#b45309", marginLeft:6 }}>
+                  ({(lastFile.size/1024).toFixed(0)} KB){lastFile.saved ? " — saved to Resources" : " — saving…"}
+                </span>
+              </p>
+              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>Upload a different notebook to replace sub-topics</p>
+            </>
+          ) : (
+            <>
+              <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Drop your .ipynb notebook here — or click to browse</p>
+              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>AI will read it and auto-fill sub-topics. Notebook saved to Resources for students.</p>
+            </>
+          )}
+        </div>
+        {!extracting && (
+          <span style={{ fontSize:11, fontWeight:700, color:"#92400e", background:"#fde68a", borderRadius:6, padding:"3px 9px", flexShrink:0 }}>
+            📂 Browse
+          </span>
+        )}
+      </div>
+
+      <p style={{ fontSize:11.5, color:"#92400e", marginTop:7, lineHeight:1.5 }}>
+        All generators (Notebook, Examples, Resources, Assignment, Quiz, Guide) will incorporate these sub-topics into their prompts.
+      </p>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    DAY PAGE — Full Workspace
 ═══════════════════════════════════════════════════════════════════ */
 /* ═══════════════════════════════════════════════════════════════════
@@ -5220,7 +5652,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, calYear, setC
    Receives: day, groqKey, groqModel, notify
    All state is local — no LMS state is mutated.
 ═══════════════════════════════════════════════════════════════════ */
-function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay, studentMode }) {
+function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay, studentMode, trackActivity }) {
   const topicHint  = day?.topic || "";
   const k          = day?.key || "";
   // Read sub-topics set in the shared DayPage sub-topics field
@@ -5325,6 +5757,14 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
       }
     });
   };
+
+  // Track when student uses/views a dataset
+  useEffect(() => {
+    if (studentMode && dayData?.dataGenerator?.dataset && trackActivity) {
+      trackActivity("dataGenUse", k, true);
+      trackActivity("practical", k, true);
+    }
+  }, [dayData?.dataGenerator?.dataset]);
 
   // ── Step 1: Generate dataset schema + metadata ────────────────
   const handleGenerateDataset = async () => {
@@ -5838,7 +6278,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, trackActivity }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -6033,30 +6473,32 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
       {/* Tabs — scrollable on mobile */}
       <div style={{ display:"flex", gap:3, background:"#f1f5f9", padding:4, borderRadius:12, marginBottom:20, overflowX:"auto", WebkitOverflowScrolling:"touch", flexShrink:0 }}>
         {TABS.map(t => (
-          <button key={t.id} className={`lms-tab${tab===t.id?" on":""}`} onClick={()=>setTab(t.id)} style={{ flexShrink:0 }}>{t.label}</button>
+          <button key={t.id} className={`lms-tab${tab===t.id?" on":""}`} onClick={()=>{
+            setTab(t.id);
+            // Track student engagement with each content type
+            if (trackActivity && k) {
+              if (t.id === "notebook")  trackActivity("notebookView",  k, true);
+              if (t.id === "examples")  trackActivity("exampleView",   k, true);
+              if (t.id === "resources") trackActivity("resourceView",  k, true);
+            }
+          }} style={{ flexShrink:0 }}>{t.label}</button>
         ))}
       </div>
 
       {/* ── Sub-topics input — trainer only, shared across ALL generators for this day ── */}
       {!studentMode && (
-        <div style={{ marginBottom:18, background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:12, padding:"12px 16px" }}>
-          <label style={{ display:"flex", alignItems:"center", gap:7, marginBottom:7, cursor:"default" }}>
-            <span style={{ fontSize:16 }}>📌</span>
-            <span style={{ fontSize:11.5, fontWeight:700, color:"#92400e", textTransform:"uppercase", letterSpacing:".07em" }}>Sub-topics / Focus areas</span>
-            <span style={{ fontSize:12, fontWeight:500, color:"#b45309", textTransform:"none", letterSpacing:"normal" }}>— applied to every generator for this day</span>
-          </label>
-          <input
-            type="text"
-            className="lms-input"
-            value={dayData.subTopics || ""}
-            onChange={e => updateDay(k, { subTopics: e.target.value })}
-            placeholder="e.g. list comprehension, lambda functions, map/filter — leave blank to use main topic only"
-            style={{ fontSize:12.5, background:"#fff" }}
-          />
-          <p style={{ fontSize:11.5, color:"#92400e", marginTop:6, lineHeight:1.5 }}>
-            All generators (Notebook, Examples, Resources, Assignment, Quiz, Guide) will incorporate these sub-topics into their prompts.
-          </p>
-        </div>
+        <NotebookSubtopicsPanel
+          dayKey={k}
+          dayData={dayData}
+          updateDay={updateDay}
+          notify={notify}
+          groqKey={groqKey}
+          groqModel={groqModel}
+          sb={sb}
+          courseId={courseId}
+          trainerId={trainerId}
+          onFileUpload={onFileUpload}
+        />
       )}
 
       {/* ── NOTEBOOK ── */}
@@ -6232,7 +6674,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
             </div>
           )}
 
-          {/* File upload zone */}
+          {/* File upload zone — trainer only */}
+          {!studentMode && (
           <div className="lms-block">
             <div className="lms-block-head">
               <div style={{ width:28, height:28, background:"#eff6ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="upload" s={15} c="#3b82f6"/></div>
@@ -6269,12 +6712,14 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
                           <p style={{ fontSize:11, color:"#94a3b8" }}>{(f.size/1024).toFixed(1)} KB · {new Date(f.uploadedAt).toLocaleDateString()}</p>
                         </div>
                         {isImg && f.dataUrl && <img src={f.dataUrl} alt={f.name} style={{ width:40, height:40, objectFit:"cover", borderRadius:6, flexShrink:0 }}/>}
-                        {f.dataUrl && (
+                        {f.dataUrl ? (
                           <a href={f.dataUrl} download={f.name} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
-                            <Ic n="download" s={13}/>
+                            <Ic n="download" s={13}/>Download
                           </a>
+                        ) : (
+                          <span style={{ fontSize:11, color:"#ef4444", padding:"3px 8px", background:"#fef2f2", borderRadius:6 }}>Session only</span>
                         )}
-                        {!f.dataUrl && <span style={{ fontSize:11, color:"#ef4444", padding:"3px 8px", background:"#fef2f2", borderRadius:6 }}>Session only</span>}
+                        {/* Delete — trainer only */}
                         <button className="lms-btn" style={{ padding:"5px 8px", background:"#fef2f2", color:"#dc2626", fontSize:12 }}
                           onClick={()=>onDeleteFile(f.id)}>
                           <Ic n="trash" s={13} c="#dc2626"/>
@@ -6286,9 +6731,53 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
               </div>
             )}
           </div>
+          )}
+
+          {/* Uploaded files — read-only view for students */}
+          {studentMode && (dayData.uploadedFiles||[]).length > 0 && (
+            <div className="lms-block">
+              <div className="lms-block-head">
+                <div style={{ width:28, height:28, background:"#eff6ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}><Ic n="file" s={15} c="#3b82f6"/></div>
+                <span style={{ fontWeight:700, color:"#0f172a" }}>Files from your trainer</span>
+                <span style={{ fontSize:12, color:"#94a3b8", marginLeft:4 }}>{(dayData.uploadedFiles||[]).length} file{(dayData.uploadedFiles||[]).length !== 1 ? "s" : ""}</span>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {(dayData.uploadedFiles||[]).map(f => {
+                  const isImg = f.type?.startsWith("image/");
+                  const isPdf = f.type === "application/pdf";
+                  const isNb  = f.name.endsWith(".ipynb");
+                  const ic    = isImg ? "img" : isPdf ? "pdf" : isNb ? "book" : "file";
+                  const color = isImg ? "#ec4899" : isPdf ? "#ef4444" : isNb ? "#f59e0b" : "#6b7280";
+                  const bg    = isImg ? "#fdf2f8" : isPdf ? "#fef2f2" : isNb ? "#fffbeb" : "#f8fafc";
+                  return (
+                    <div key={f.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", background:bg, borderRadius:10, border:"1.5px solid #e8edf3", flexWrap:"wrap" }}>
+                      <div style={{ width:32, height:32, background:"#fff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, border:"1px solid #e2e8f0" }}>
+                        <Ic n={ic} s={17} c={color}/>
+                      </div>
+                      <div style={{ flex:1, minWidth:120 }}>
+                        <p style={{ fontSize:13, fontWeight:600, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                        <p style={{ fontSize:11, color:"#94a3b8" }}>{(f.size/1024).toFixed(1)} KB · {new Date(f.uploadedAt).toLocaleDateString()}</p>
+                      </div>
+                      {isImg && f.dataUrl && <img src={f.dataUrl} alt={f.name} style={{ width:40, height:40, objectFit:"cover", borderRadius:6, flexShrink:0 }}/>}
+                      {f.dataUrl ? (
+                        <a href={f.dataUrl} download={f.name} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
+                          <Ic n="download" s={13}/>Download
+                        </a>
+                      ) : (
+                        <span style={{ fontSize:11, color:"#94a3b8", padding:"3px 8px", background:"#f1f5f9", borderRadius:6 }}>Not available</span>
+                      )}
+                      {/* No delete button for students */}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {!dayData.resources && (dayData.uploadedFiles||[]).length===0 && (
-            <EmptyState icon="file" title="No resources yet" text="Auto-generate a resource sheet or upload your own files (PDFs, images, notebooks)." />
+            studentMode
+              ? <EmptyState icon="file" title="No resources yet" text="Your trainer hasn't uploaded any resources for this day yet. Check back later." />
+              : <EmptyState icon="file" title="No resources yet" text="Auto-generate a resource sheet or upload your own files (PDFs, images, notebooks)." />
           )}
         </div>
       )}
@@ -6315,7 +6804,10 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
             )}
             {dayData.assignment && (
               <>
-                <button className="lms-btn lms-btn-ghost" onClick={()=>downloadBlob(dayData.assignment, `Day${day.dayNum}_assignment.md`)}>
+                <button className="lms-btn lms-btn-ghost" onClick={()=>{
+                  downloadBlob(dayData.assignment, `Day${day.dayNum}_assignment.md`);
+                  if (trackActivity && studentMode) trackActivity("assignSubmit", k, { wordCount: (dayData.assignment||"").split(/\s+/).length });
+                }}>
                   <Ic n="download" s={14}/>Download .md
                 </button>
                 <button className="lms-btn lms-btn-ghost" onClick={()=>downloadBlob(buildIpynb(`Assignment: ${day.topic}`, dayData.assignment, []), `Day${day.dayNum}_assignment.ipynb`, "application/json")}>
@@ -6347,12 +6839,14 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           updateDay={updateDay}
           notify={notify}
           studentMode={studentMode}
+          trackActivity={trackActivity}
         />
       )}
 
       {/* ── DATA GENERATOR ── */}
       {tab==="data" && (
         <DataGeneratorTab
+          trackActivity={trackActivity}
           day={day}
           dayData={dayData}
           groqKey={groqKey}
@@ -6371,6 +6865,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, busy, pendingGen, code
           updateDay={updateDay}
           notify={notify}
           day={day}
+          trackActivity={trackActivity}
         />
       )}
 
@@ -6586,7 +7081,7 @@ function TeachingGuideView({ content }) {
 /* ═══════════════════════════════════════════════════════════════════
    QUIZ TAB — interactive MCQ with scoring
 ═══════════════════════════════════════════════════════════════════ */
-function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode }) {
+function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode, trackActivity }) {
   const k = day.key;
   const questions = dayData.quiz || null;
   const [answers, setAnswers] = useState({});
@@ -6608,6 +7103,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
     const pct = Math.round(finalScore / questions.length * 100);
     notify(`Quiz complete! ${finalScore}/${questions.length} (${pct}%)`);
     updateDay(k, { quizScore: { score: finalScore, total: questions.length, pct, date: new Date().toISOString() } });
+    if (trackActivity) trackActivity("quizScore", k, { pct, score: finalScore, total: questions.length, date: new Date().toISOString() });
   };
 
   const handleReset = () => {
@@ -6747,7 +7243,7 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
 /* ═══════════════════════════════════════════════════════════════════
    NOTES TAB — per-day markdown notes with auto-save
 ═══════════════════════════════════════════════════════════════════ */
-function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
+function NotesTab({ dayKey, dayData, updateDay, notify, day, trackActivity }) {
   const [draft, setDraft] = useState(dayData.notes || "");
   const [saved, setSaved] = useState(true);
   const [preview, setPreview] = useState(false);
@@ -6759,6 +7255,7 @@ function NotesTab({ dayKey, dayData, updateDay, notify, day }) {
     const t = setTimeout(() => {
       updateDay(dayKey, { notes: draft });
       setSaved(true);
+      if (trackActivity) trackActivity("notes", dayKey, { chars: draft.trim().length });
     }, 1500);
     return () => clearTimeout(t);
   }, [draft]);
