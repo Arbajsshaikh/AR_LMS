@@ -2597,7 +2597,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   if (loading) return <div style={{ textAlign:"center", padding:"60px 20px", color:"#94a3b8", fontSize:14 }}>Loading…</div>;
 
   return (
-    <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
+    <div style={{ minHeight:"100vh", background:"transparent" }}>
       <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
         <div>
           <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
@@ -4237,11 +4237,11 @@ Hard rules:
   ════════════════════════════════════════════════ */
   return (
     <ErrorBoundary>
-      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
+      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"transparent", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
           *{box-sizing:border-box;margin:0;padding:0}
-          html,body,#root{width:100%;height:100%;overflow:hidden}
+          html,body,#root{width:100%;min-height:100%}
           ::-webkit-scrollbar{width:5px;height:5px}
           ::-webkit-scrollbar-track{background:transparent}
           ::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:99px}
@@ -7837,7 +7837,7 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
   };
 
   return (
-    <div style={{ minHeight:"100vh", background:"#f9fafb", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif" }}>
+    <div style={{ minHeight:"100vh", background:"transparent", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
         .cp-card{background:#fff;border-radius:16px;border:1px solid #e8edf3;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:box-shadow .18s,transform .18s}
@@ -8335,7 +8335,7 @@ export default function LMSApp() {
   // ── Trainer view ──────────────────────────────────────────────
   if (isTrainer) {
     return (
-      <div style={{ minHeight:"100vh", background:"#f8fafc" }}>
+      <div style={{ minHeight:"100vh", background:"transparent" }}>
         <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
           <div>
             <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
