@@ -1101,6 +1101,22 @@ async function sbGetAllDayContent(sb, courseId) {
   return byDay;
 }
 
+// ── Delete ALL lms_day_content rows for a given dayKey (used when deleting a day) ──
+async function sbDeleteDayContent(sb, courseId, dayKey) {
+  await sb.delete(
+    "lms_day_content",
+    `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}`
+  );
+}
+
+// ── Delete ALL lms_day_files rows for a given dayKey ──
+async function sbDeleteDayFiles(sb, courseId, dayKey) {
+  await sb.delete(
+    "lms_day_files",
+    `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}`
+  );
+}
+
 function getCourseStats(course) {
   const total = course.planDays?.length || 0;
   const completed = Object.values(course.dayStatus || {}).filter(s => s === "Completed").length;
@@ -4293,6 +4309,86 @@ Hard rules:
     notify(`${days.length} days loaded!`);
   };
 
+  /* ════ DELETE DAY + SHIFT PLAN ════
+     Removes planDays[pidx], rebuilds dayMap, migrates all per-day data
+     (dayStatus, dayData) from old date-keys to new shifted date-keys,
+     then persists everything to Supabase atomically:
+       1. Delete lms_day_content + lms_day_files for the removed day
+       2. For each shifted day: move its lms_day_content rows to the new key
+       3. Save updated planDays + dayStatus + dayMap to lms_courses
+  */
+  const deleteDayAndShift = async (dateKeyToDelete) => {
+    const pidx = dayMap[dateKeyToDelete];
+    if (pidx === undefined) return;
+
+    // ── 1. Build new planDays (remove the target day) ──
+    const newPlanDays = planDays.filter((_, i) => i !== pidx);
+
+    // ── 2. Migrate dayStatus — drop only the deleted day's entry ──
+    // Remaining days keep their date-keys: buildDayMap assigns dates from startDate
+    // regardless of planDays content, so removing one day only re-indexes planDays[].
+    // No date-key migration is ever needed for the surviving days.
+    const newDayStatus = {};
+    for (const [k, v] of Object.entries(dayStatus)) {
+      if (k === dateKeyToDelete) continue;
+      newDayStatus[k] = v;
+    }
+
+    // ── 4. Migrate dayData — drop only the deleted day's entry ──
+    const newDayData = {};
+    for (const [k, v] of Object.entries(dayData)) {
+      if (k === dateKeyToDelete) continue;
+      newDayData[k] = v;
+    }
+
+    // ── 6. Apply state immediately so UI updates at once ──
+    // CRITICAL: also update dayMap synchronously here so the calendar never
+    // renders with the old dayMap (which still references stale pidx values)
+    // while planDays has already been trimmed.  Waiting for the useEffect to
+    // rebuild dayMap causes a one-render gap where planDays[pidx] === undefined
+    // and throws "Cannot read properties of undefined (reading 'dayNum')".
+    const newDayMap = buildDayMap(newPlanDays, new Date(startDate + "T12:00:00"), monfri, dayOverrides);
+    setPlanDays(newPlanDays);
+    setDayMap(newDayMap);
+    setDayData(newDayData);
+    setDayStatus(newDayStatus);
+
+    // ── 7. Supabase persistence ──
+    // Note: remaining days keep their existing calendar date-keys unchanged.
+    // buildDayMap assigns dates from startDate regardless of planDays content,
+    // so removing one day only re-indexes planDays[] — no date-key migration needed.
+    // We only need to: (a) delete the removed day's rows, (b) save updated planDays.
+    if (!sb || !courseId) {
+      notify(`Day ${planDays[pidx].dayNum} deleted`);
+      return;
+    }
+    try {
+      // 7a. Delete the removed day's content + files from Supabase
+      await Promise.allSettled([
+        sbDeleteDayContent(sb, courseId, dateKeyToDelete),
+        sbDeleteDayFiles(sb, courseId, dateKeyToDelete),
+      ]);
+
+      // 7b. Save updated planDays + dayStatus to lms_courses
+      const lightDayData = {};
+      for (const [k, v] of Object.entries(newDayData)) {
+        if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
+        const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, ...light } = v;
+        lightDayData[k] = light;
+      }
+      await sbSaveCourseData(sb, courseId, {
+        planDays: newPlanDays,
+        dayStatus: newDayStatus,
+        dayData: lightDayData,
+      });
+
+      notify(`Day ${planDays[pidx].dayNum} deleted ✓`);
+    } catch (e) {
+      notify(`Supabase sync error: ${e.message}`, "err");
+      console.error("deleteDayAndShift Supabase error:", e);
+    }
+  };
+
 
   /* ════════════════════════════════════════════════
      RENDER
@@ -4502,7 +4598,7 @@ Hard rules:
                   </div>
                 </div>
               )}
-              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onGenWeek={async(days,onProgress)=>{
+              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} onGenWeek={async(days,onProgress)=>{
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
                 let done=0; const total=days.length*gens.length; const failed=[];
                 for(const d of days){ for(const{fn,label}of gens){ try{await fn(d,{silent:true});}catch(e){failed.push(`Day ${d.dayNum} ${label}: ${e.message}`);} done++; onProgress&&onProgress(done,total); } }
@@ -5073,7 +5169,7 @@ Day 2: [Topic]
 /* ═══════════════════════════════════════════════════════════════════
    CALENDAR PAGE — FIX 10: responsive layout
 ═══════════════════════════════════════════════════════════════════ */
-function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides }) {
+function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides, onDeleteDay }) {
   const todayK = todayKey();
   const dim = daysInMonth(calYear, calMonth);
   const fw  = firstWeekday(calYear, calMonth);
@@ -5083,6 +5179,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
   const [genWeekKey, setGenWeekKey] = useState(null);
   const [weekProgress, setWeekProgress] = useState(null);
   const [confirmWeek, setConfirmWeek] = useState(null);
+
+  // Delete-day confirm dialog state
+  const [confirmDeleteDay, setConfirmDeleteDay] = useState(null); // { dateKey, dayNum, topic }
 
   // Day-override modal state (holiday / extra topic)
   const [overrideModal, setOverrideModal] = useState(null); // { dateKey, mode: "new"|"edit" }
@@ -5243,6 +5342,34 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
               <button className="lms-btn lms-btn-ghost" onClick={()=>setConfirmWeek(null)}>Cancel</button>
               <button className="lms-btn lms-btn-blue" onClick={()=>doGenWeek(confirmWeek)}>
                 <Ic n="play" s={13}/>Start Generating
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Day Confirm Dialog ── */}
+      {confirmDeleteDay && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:9200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ background:"#fff", borderRadius:18, padding:28, maxWidth:440, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.3)" }}>
+            <div style={{ width:42, height:42, background:"#fef2f2", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
+              <Ic n="trash" s={20} c="#ef4444"/>
+            </div>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:8 }}>Delete Day {confirmDeleteDay.dayNum}?</p>
+            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.65, marginBottom:8 }}>
+              <strong>{confirmDeleteDay.topic}</strong>
+            </p>
+            <div style={{ background:"#fef2f2", border:"1px solid #fecaca", borderRadius:9, padding:"10px 14px", fontSize:13, color:"#dc2626", marginBottom:18, lineHeight:1.6 }}>
+              ⚠ This will <strong>permanently delete</strong> this day's content (notebook, quiz, assignment, files) from Supabase and shift all subsequent days <strong>1 day earlier</strong> on the calendar.
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button className="lms-btn lms-btn-ghost" style={{ flex:1, justifyContent:"center" }} onClick={()=>setConfirmDeleteDay(null)}>Cancel</button>
+              <button
+                className="lms-btn lms-btn-rose"
+                style={{ flex:1, justifyContent:"center" }}
+                onClick={()=>{ onDeleteDay(confirmDeleteDay.dateKey); setConfirmDeleteDay(null); }}
+              >
+                <Ic n="trash" s={14}/>Delete &amp; Shift Plan
               </button>
             </div>
           </div>
@@ -5532,6 +5659,17 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                       className="day-override-btn"
                     >
                       {override ? "✎" : "+"}
+                    </button>
+                  )}
+                  {/* Trainer-only: delete plan day button (only on plan days, not holiday/extra/special) */}
+                  {!studentMode && hasPlan && !isHoliday && !isSpecial && !isExtra && onDeleteDay && (
+                    <button
+                      title={`Delete Day ${planDays[pidx]?.dayNum} and shift plan`}
+                      onClick={e=>{ e.stopPropagation(); setConfirmDeleteDay({ dateKey:k, dayNum:planDays[pidx].dayNum, topic:planDays[pidx].topic }); }}
+                      style={{ position:"absolute", bottom:4, left:4, width:16, height:16, borderRadius:4, background:"#fee2e2", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, color:"#ef4444", opacity:0, transition:"opacity .15s", fontFamily:"inherit", lineHeight:1 }}
+                      className="day-override-btn"
+                    >
+                      ✕
                     </button>
                   )}
                 </div>
