@@ -1803,8 +1803,8 @@ const Spin = ({ s=14 }) => (
 /* ═══════════════════════════════════════════════════════════════════
    LOGIN SCREEN — uses Supabase for all auth
 ═══════════════════════════════════════════════════════════════════ */
-function LoginScreen({ onLogin, sb }) {
-  const [mode, setMode] = useState("select");
+function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
+  const [mode, setMode] = useState(initialMode);
   const [trainerUsername, setTrainerUsername] = useState("");
   const [trainerPass, setTrainerPass]         = useState("");
   const [newTrainerName, setNewTrainerName]   = useState("");
@@ -2231,6 +2231,15 @@ function LoginScreen({ onLogin, sb }) {
                     <span onClick={()=>{setError("");setMode("student");}} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>Sign In</span>
                   </p>
                 </div>
+              )}
+
+              {/* ── Back to Landing link ── */}
+              {onBackToLanding && (
+                <p style={{ textAlign:"center", fontSize:12.5, color:"#94a3b8", marginTop:18, marginBottom:0 }}>
+                  <span onClick={onBackToLanding} style={{ color:"#7c3aed", fontWeight:600, cursor:"pointer" }}>
+                    ← Back to Home
+                  </span>
+                </p>
               )}
 
             </>
@@ -2660,11 +2669,14 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   return (
     <div style={{ minHeight:"100vh", background:"transparent" }}>
       <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
-        <div>
-          <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
-          <p style={{ fontSize:12, color:"#718096", margin:"4px 0 0 0" }}>👨‍🎓 {auth.name}{hasAnyCourse ? ` · ${activeCourseName}` : ""}
-            <span style={{ marginLeft:8, background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:99, fontSize:10, fontWeight:700, padding:"1px 7px" }}>🔄 Live</span>
-          </p>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <AppLogo
+            size="md"
+            theme="light"
+            onClick={handleLogout}
+            subtitle={`👨‍🎓 ${auth.name}${hasAnyCourse ? ` · ${activeCourseName}` : ""}`}
+          />
+          <span style={{ background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:99, fontSize:10, fontWeight:700, padding:"2px 8px", whiteSpace:"nowrap" }}>🔄 Live</span>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
           {enrolledCourses.length > 1 && (
@@ -8363,13 +8375,7 @@ function AdminDashboard({ sb, onLogout }) {
       {/* Top nav */}
       <div style={{ background:"#0f172a", borderBottom:"1px solid #1e293b", padding:"14px 28px", display:"flex", alignItems:"center", justifyContent:"space-between", position:"sticky", top:0, zIndex:100 }}>
         <div style={{ display:"flex", alignItems:"center", gap:14 }}>
-          <div style={{ width:38, height:38, background:"linear-gradient(135deg,#3b82f6,#6366f1)", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center" }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          </div>
-          <div>
-            <p style={{ fontWeight:800, fontSize:16, color:"#f1f5f9", margin:0, letterSpacing:"-0.3px" }}>LMS Admin</p>
-            <p style={{ fontSize:11.5, color:"#475569", margin:0 }}>Trainer Approval Control Panel</p>
-          </div>
+          <AppLogo size="md" theme="dark" subtitle="Trainer Approval Control Panel" />
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <button onClick={fetchTrainers} className="adm-btn adm-btn-ghost" style={{ padding:"7px 12px" }} title="Refresh">
@@ -8513,6 +8519,773 @@ function AdminDashboard({ sb, onLogout }) {
 /* ═══════════════════════════════════════════════════════════════════
    MAIN APP — Supabase credentials entered here, then passed down
 ═══════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════
+   LANDING PAGE (integrated from LandingPage.jsx)
+═══════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════
+   AI WITH ARBAJ LMS — LANDING PAGE
+   Style: Soft Neumorphism × Liquid Glass × Light App Shell
+   Inspired by: extruded neumorphic surfaces, frosted glass
+   overlays, and a clean soft-grey base (#EDF1F7)
+═══════════════════════════════════════════════════════════ */
+
+const C = {
+  shell:    "#EDF1F7",
+  shellDp:  "#E4E9F2",
+  shadowD:  "#C4CDD9",
+  shadowL:  "#FFFFFF",
+  text:     "#1E2A3B",
+  textMid:  "#64748B",
+  textLt:   "#94A3B8",
+  violet:   "#8B5CF6",
+  violetLt: "#A78BFA",
+  teal:     "#14B8A6",
+  tealLt:   "#5EEAD4",
+  pink:     "#E879F9",
+  blue:     "#6366F1",
+  blueLt:   "#818CF8",
+  white:    "#FFFFFF",
+};
+
+const raisedSm = `6px 6px 14px ${C.shadowD}, -4px -4px 10px ${C.shadowL}`;
+const raisedMd = `12px 12px 28px ${C.shadowD}, -8px -8px 20px ${C.shadowL}`;
+const raisedLg = `20px 20px 48px ${C.shadowD}, -12px -12px 32px ${C.shadowL}`;
+const insetSm  = `inset 4px 4px 10px ${C.shadowD}, inset -3px -3px 8px ${C.shadowL}`;
+
+const glassStyle = (tint = "violet") => {
+  const map = {
+    violet: ["rgba(139,92,246,0.13)","rgba(167,139,250,0.07)","rgba(139,92,246,0.4)"],
+    teal:   ["rgba(20,184,166,0.13)", "rgba(94,234,212,0.07)", "rgba(20,184,166,0.45)"],
+    pink:   ["rgba(232,121,249,0.13)","rgba(248,113,113,0.07)","rgba(232,121,249,0.45)"],
+    blue:   ["rgba(99,102,241,0.13)", "rgba(129,140,248,0.07)","rgba(99,102,241,0.45)"],
+  };
+  const [a, b, bd] = map[tint] ?? map.violet;
+  return {
+    background: `linear-gradient(140deg, ${a}, ${b})`,
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    border: `1.5px solid ${bd}`,
+    borderRadius: 20,
+    boxShadow: `0 8px 32px rgba(0,0,0,0.07), inset 0 1px 0 rgba(255,255,255,0.7)`,
+  };
+};
+
+const neuCard = {
+  background: `linear-gradient(145deg, ${C.shell}, ${C.shellDp})`,
+  boxShadow: raisedMd,
+  borderRadius: 24,
+  border: `1px solid ${C.shadowL}`,
+};
+
+/* ── CSS ──────────────────────────────────────────────────── */
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{background:${C.shell};font-family:'Plus Jakarta Sans',system-ui,sans-serif;color:${C.text};-webkit-font-smoothing:antialiased;overflow-x:hidden;}
+::-webkit-scrollbar{width:5px;}
+::-webkit-scrollbar-track{background:${C.shell};}
+::-webkit-scrollbar-thumb{background:${C.violetLt};border-radius:99px;}
+.nav2{position:fixed;top:0;left:0;right:0;z-index:300;display:flex;align-items:center;justify-content:space-between;padding:16px 52px;transition:all .3s;}
+.nav2.stuck{background:rgba(237,241,247,0.84);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);border-bottom:1px solid rgba(255,255,255,0.7);box-shadow:0 4px 24px rgba(0,0,0,0.05);}
+.nav2-logo{text-decoration:none;display:flex;align-items:center;}
+.nav2-links{display:flex;gap:28px;list-style:none;}
+.nav2-links a{font-size:14px;font-weight:500;color:${C.textMid};text-decoration:none;transition:color .2s;}
+.nav2-links a:hover{color:${C.text};}
+.btn-p{padding:13px 30px;font-size:15px;font-weight:700;border-radius:99px;color:${C.white};font-family:inherit;cursor:pointer;border:none;background:linear-gradient(135deg,${C.violet},${C.blue});box-shadow:8px 8px 20px ${C.shadowD},-4px -4px 12px ${C.shadowL},0 4px 24px rgba(99,102,241,0.3);position:relative;overflow:hidden;transition:all .2s;}
+.btn-p::after{content:'';position:absolute;inset:0;border-radius:99px;background:linear-gradient(135deg,rgba(255,255,255,0.18),transparent);pointer-events:none;}
+.btn-p:hover{transform:translateY(-2px);box-shadow:8px 8px 22px ${C.shadowD},-4px -4px 12px ${C.shadowL},0 8px 32px rgba(99,102,241,0.4);}
+.btn-g{padding:12px 28px;font-size:15px;font-weight:600;border-radius:99px;color:${C.textMid};font-family:inherit;cursor:pointer;border:none;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedSm};transition:all .2s;}
+.btn-g:hover{transform:translateY(-1px);color:${C.text};}
+.sec{padding:96px 52px;max-width:1200px;margin:0 auto;}
+.ey{font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:${C.violet};margin-bottom:10px;text-align:center;}
+.h2t{font-size:clamp(26px,3.5vw,44px);font-weight:800;line-height:1.1;letter-spacing:-.025em;color:${C.text};margin-bottom:14px;text-align:center;}
+.h2s{font-size:16px;color:${C.textMid};line-height:1.7;max-width:500px;text-align:center;margin-left:auto;margin-right:auto;}
+.hero{min-height:100vh;padding:120px 52px 80px;display:flex;flex-direction:column;align-items:center;text-align:center;position:relative;overflow:hidden;}
+.hbadge{display:inline-flex;align-items:center;gap:8px;padding:6px 18px;border-radius:99px;background:rgba(139,92,246,0.1);border:1.5px solid rgba(139,92,246,0.25);font-size:12px;font-weight:700;color:${C.violet};letter-spacing:.07em;text-transform:uppercase;margin-bottom:28px;}
+.bdot{width:7px;height:7px;border-radius:50%;background:${C.violet};animation:pls 2.2s ease-in-out infinite;}
+@keyframes pls{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.6)}}
+.hh1{font-size:clamp(40px,6.5vw,80px);font-weight:800;line-height:1.05;letter-spacing:-.035em;color:${C.text};margin-bottom:22px;}
+.hh1 .gr{background:linear-gradient(135deg,${C.violet} 0%,${C.blue} 45%,${C.teal} 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.hsub{font-size:clamp(15px,1.8vw,18px);color:${C.textMid};line-height:1.75;max-width:520px;margin-bottom:40px;}
+.hbtns{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;margin-bottom:72px;}
+.srow{display:flex;flex-wrap:wrap;justify-content:center;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedMd};border-radius:24px;padding:28px 44px;border:1px solid ${C.shadowL};gap:0;}
+.si{text-align:center;padding:0 36px;}
+.si+.si{border-left:1px solid ${C.shadowD};}
+.sn{font-size:32px;font-weight:800;line-height:1;background:linear-gradient(135deg,${C.violet},${C.blue});-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.sl{font-size:12px;color:${C.textLt};margin-top:4px;font-weight:500;}
+.rgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:52px;max-width:1100px;margin-left:auto;margin-right:auto;}
+@media(max-width:900px){.rgrid{grid-template-columns:1fr;}}
+.rcard{padding:36px 32px;border-radius:28px;position:relative;overflow:hidden;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedMd};border:1px solid ${C.shadowL};transition:transform .25s,box-shadow .25s;cursor:default;}
+.rcard:hover{transform:translateY(-5px);box-shadow:${raisedLg};}
+.rico{width:56px;height:56px;border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:20px;box-shadow:4px 4px 12px rgba(0,0,0,0.08),inset 0 1px 0 rgba(255,255,255,.65);}
+.rtitle{font-size:20px;font-weight:800;color:${C.text};margin-bottom:10px;}
+.rdesc{font-size:14px;color:${C.textMid};line-height:1.7;margin-bottom:22px;}
+.pills{display:flex;flex-wrap:wrap;gap:8px;}
+.pill{padding:5px 13px;border-radius:99px;font-size:11.5px;font-weight:600;color:${C.textMid};background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedSm};border:1px solid ${C.shadowL};}
+.bento{display:grid;grid-template-columns:repeat(12,1fr);gap:20px;margin-top:52px;}
+.bc{padding:32px;position:relative;overflow:hidden;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedMd};border-radius:24px;border:1px solid ${C.shadowL};transition:transform .25s,box-shadow .25s;}
+.bc:hover{transform:translateY(-4px);box-shadow:${raisedLg};}
+.bc.s8{grid-column:span 8;}.bc.s4{grid-column:span 4;}.bc.s6{grid-column:span 6;}
+.fi{font-size:28px;margin-bottom:16px;}.ft{font-size:17px;font-weight:800;color:${C.text};margin-bottom:10px;}.fd{font-size:13.5px;color:${C.textMid};line-height:1.7;}
+.sgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:22px;margin-top:52px;}
+@media(max-width:900px){.sgrid{grid-template-columns:repeat(2,1fr);}}
+@media(max-width:560px){.sgrid{grid-template-columns:1fr;}}
+.sc{padding:36px 26px;border-radius:24px;text-align:center;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedMd};border:1px solid ${C.shadowL};transition:transform .25s;}
+.sc:hover{transform:translateY(-4px);}
+.sn2{width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,${C.violet},${C.blue});display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;color:${C.white};margin:0 auto 18px;box-shadow:0 4px 16px rgba(99,102,241,0.35),inset 0 1px 0 rgba(255,255,255,.3);}
+.stitle{font-size:15px;font-weight:800;color:${C.text};margin-bottom:8px;}
+.sdesc{font-size:13px;color:${C.textMid};line-height:1.65;}
+.ttags{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:20px;}
+.ttag{padding:9px 20px;border-radius:14px;font-size:13px;font-weight:600;color:${C.textMid};background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedSm};border:1px solid ${C.shadowL};transition:all .2s;cursor:default;}
+.ttag:hover{color:${C.violet};transform:translateY(-2px);}
+.pgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:52px;max-width:980px;margin-left:auto;margin-right:auto;}
+@media(max-width:900px){.pgrid{grid-template-columns:1fr;max-width:480px;}}
+.pcard{padding:40px 36px;border-radius:28px;position:relative;background:linear-gradient(145deg,${C.shell},${C.shellDp});box-shadow:${raisedMd};border:1px solid ${C.shadowL};}
+.pcard.feat{background:linear-gradient(140deg,rgba(139,92,246,0.13),rgba(167,139,250,0.07));backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1.5px solid rgba(139,92,246,0.4);box-shadow:${raisedLg},0 0 60px rgba(139,92,246,0.1);}
+.pbadge{position:absolute;top:-13px;right:28px;padding:5px 16px;border-radius:99px;background:linear-gradient(135deg,${C.violet},${C.blue});font-size:11px;font-weight:800;color:${C.white};letter-spacing:.07em;text-transform:uppercase;box-shadow:0 4px 14px rgba(99,102,241,0.35);}
+.ptier{font-size:12px;font-weight:700;color:${C.textLt};letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;}
+.pamount{font-size:44px;font-weight:800;color:${C.text};line-height:1;margin-bottom:4px;}
+.pperiod{font-size:13px;color:${C.textLt};margin-bottom:28px;}
+.plist{list-style:none;display:flex;flex-direction:column;gap:12px;margin-bottom:32px;}
+.pitem{display:flex;align-items:flex-start;gap:10px;font-size:13.5px;color:${C.textMid};}
+.pcheck{color:${C.violet};font-size:14px;margin-top:1px;}
+.cta2{padding:120px 52px;text-align:center;position:relative;overflow:hidden;}
+.ctah{font-size:clamp(30px,4.5vw,58px);font-weight:800;color:${C.text};line-height:1.1;letter-spacing:-.03em;margin-bottom:18px;}
+.ctas{font-size:16px;color:${C.textMid};max-width:460px;margin:0 auto 40px;line-height:1.7;}
+.foot{padding:40px 52px;border-top:1px solid ${C.shadowD};display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;}
+.fcopy{font-size:13px;color:${C.textLt};}
+.flinks{display:flex;gap:24px;}
+.flinks a{font-size:13px;color:${C.textLt};text-decoration:none;transition:color .2s;}
+.flinks a:hover{color:${C.violet};}
+.browser{border-radius:20px;overflow:hidden;width:100%;max-width:800px;background:linear-gradient(145deg,#F8FAFD,#EEF3F9);box-shadow:${raisedLg};border:1px solid ${C.shadowL};}
+.bbar{padding:13px 20px;background:linear-gradient(145deg,${C.shell},${C.shellDp});border-bottom:1px solid ${C.shadowD};display:flex;align-items:center;gap:12px;}
+.bdots{display:flex;gap:6px;}
+.bdot{width:11px;height:11px;border-radius:50%;}
+.burl{flex:1;background:rgba(255,255,255,.72);border-radius:8px;padding:5px 14px;font-size:12px;color:${C.textMid};border:1px solid ${C.shadowD};display:flex;align-items:center;gap:6px;}
+.marquee-wrap{width:100%;overflow:hidden;margin-top:44px;position:relative;}
+.marquee-wrap::before,.marquee-wrap::after{content:'';position:absolute;top:0;bottom:0;width:80px;z-index:2;pointer-events:none;}
+.marquee-wrap::before{left:0;background:linear-gradient(to right,${C.shellDp},transparent);}
+.marquee-wrap::after{right:0;background:linear-gradient(to left,${C.shellDp},transparent);}
+.marquee-track{display:flex;gap:16px;width:max-content;animation:marqueeSlide 28s linear infinite;}
+.marquee-track:hover{animation-play-state:paused;}
+@keyframes marqueeSlide{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.ctile{width:200px;min-width:200px;max-width:200px;flex-shrink:0;padding:24px 20px;border-radius:20px;cursor:default;}
+.rv{transition:opacity .6s ease,transform .6s ease;}.rv.h{opacity:0;transform:translateY(22px);}.rv.v{opacity:1;transform:translateY(0);}
+.blob{position:absolute;border-radius:50%;filter:blur(72px);pointer-events:none;}
+@keyframes blink2{0%,100%{opacity:1}50%{opacity:0}}
+@media(max-width:768px){
+  .nav2{padding:14px 20px;}.nav2-links{display:none;}
+  .hero{padding:100px 20px 60px;}.sec{padding:72px 20px;}
+  .bc.s8,.bc.s4,.bc.s6{grid-column:span 12;}
+  .si+.si{border-left:none;border-top:1px solid ${C.shadowD};}
+  .srow{padding:24px 20px;flex-direction:column;gap:16px;}
+  .foot{flex-direction:column;padding:32px 20px;text-align:center;}
+  .cta2{padding:80px 20px;}
+  .rgrid{grid-template-columns:1fr;}
+  .pgrid{grid-template-columns:1fr;max-width:100%;}
+  .marquee-wrap::before,.marquee-wrap::after{width:40px;}
+}
+@media(prefers-reduced-motion:reduce){.bdot{animation:none;}.rv{transition:none;}}
+`;
+
+/* ── Reveal ─────────────────────────────────────────────── */
+function Reveal({ children, delay = 0 }) {
+  const ref = useRef(null);
+  const [vis, setVis] = useState(false);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setVis(true); obs.disconnect(); } }, { threshold: 0.1 });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return <div ref={ref} className={`rv ${vis ? "v" : "h"}`} style={{ transitionDelay: `${delay}ms` }}>{children}</div>;
+}
+
+/* ── Count-up ───────────────────────────────────────────── */
+function CountUp({ to, suffix = "" }) {
+  const [v, setV] = useState(0);
+  const ref = useRef(null);
+  useEffect(() => {
+    const obs = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return; obs.disconnect();
+      let n = 0; const step = to / 52;
+      const tick = () => { n = Math.min(n + step, to); setV(Math.floor(n)); if (n < to) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    }, { threshold: 0.5 });
+    if (ref.current) obs.observe(ref.current);
+    return () => obs.disconnect();
+  }, [to]);
+  return <span ref={ref}>{v}{suffix}</span>;
+}
+
+/* ── Blobs ──────────────────────────────────────────────── */
+function Blobs() {
+  return (
+    <div style={{ position:"absolute", inset:0, overflow:"hidden", pointerEvents:"none", zIndex:0 }}>
+      <div className="blob" style={{ top:"-10%", right:"-8%",  width:480, height:480, background:"radial-gradient(circle,rgba(139,92,246,.14) 0%,transparent 70%)" }} />
+      <div className="blob" style={{ top:"25%",  left:"-10%", width:400, height:400, background:"radial-gradient(circle,rgba(20,184,166,.1) 0%,transparent 70%)" }} />
+      <div className="blob" style={{ bottom:"10%",right:"18%",width:320, height:320, background:"radial-gradient(circle,rgba(232,121,249,.1) 0%,transparent 70%)" }} />
+    </div>
+  );
+}
+
+/* ── Terminal ───────────────────────────────────────────── */
+function Terminal() {
+  const lines = [
+    { k:"cm", v:"# AI With ARBAJ — generate day content" },
+    { k:"bl" }, { k:"co", v:'topic = "Linear Regression"' }, { k:"co", v:"genNotebook(topic, count=3)" },
+    { k:"bl" },
+    { k:"ok", v:"✓ Notebook ready — 3 sub-topics" }, { k:"ok", v:"✓ Quiz generated — 10 MCQs" },
+    { k:"ok", v:"✓ Dataset built — house_price.csv" }, { k:"ok", v:"✓ Assignment exported — .ipynb" },
+  ];
+  const [n, setN] = useState(0);
+  useEffect(() => { if (n >= lines.length) return; const t = setTimeout(() => setN(x => x+1), 270); return () => clearTimeout(t); }, [n]);
+  const col = { cm:C.textLt, co:"#82AAFF", ok:"#4ADE80" };
+  return (
+    <div style={{ borderRadius:14, background:"#111827", border:"1px solid rgba(255,255,255,0.06)", padding:"18px 22px", marginTop:22, boxShadow:"inset 4px 4px 14px rgba(0,0,0,.45)", minHeight:195 }}>
+      <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+        {["#FF5F57","#FFBD2E","#28C840"].map(c => <div key={c} style={{ width:10, height:10, borderRadius:"50%", background:c }} />)}
+      </div>
+      {lines.slice(0,n).map((l,i) => (
+        <div key={i} style={{ fontFamily:"'Courier New',monospace", fontSize:12.5, lineHeight:1.9, color:l.k==="bl"?"transparent":(col[l.k]??C.textMid), minHeight:l.k==="bl"?6:undefined }}>{l.v??" "}</div>
+      ))}
+      {n < lines.length && <span style={{ display:"inline-block", width:7, height:13, background:C.violet, animation:"blink2 1s step-end infinite" }} />}
+    </div>
+  );
+}
+
+/* ── Live Quiz ──────────────────────────────────────────── */
+function LiveQuiz() {
+  const [sel, setSel] = useState(null);
+  const opts = ["Clips all values to [0,1]","Subtracts mean, divides by std deviation","Converts strings to integers","Drops rows with outlier values"];
+  return (
+    <div style={{ ...glassStyle("violet"), padding:"20px 22px", marginTop:18 }}>
+      <div style={{ fontSize:11, fontWeight:800, color:C.violet, letterSpacing:".1em", marginBottom:12 }}>🎯 LIVE QUIZ PREVIEW</div>
+      <p style={{ fontSize:13.5, fontWeight:700, color:C.text, marginBottom:14, lineHeight:1.55 }}>What does StandardScaler do?</p>
+      {opts.map((o,i) => {
+        const correct = i===1, picked = sel===i;
+        return (
+          <div key={i} onClick={()=>setSel(i)} style={{
+            padding:"9px 14px", borderRadius:12, cursor:"pointer", marginBottom:8, fontSize:12.5, fontWeight:500, lineHeight:1.4,
+            background: picked ? (correct?"rgba(20,184,166,.15)":"rgba(239,68,68,.1)") : `linear-gradient(145deg,${C.shell},${C.shellDp})`,
+            boxShadow: picked ? "none" : raisedSm,
+            border: picked ? `1.5px solid ${correct?C.teal:"#F87171"}` : `1px solid ${C.shadowL}`,
+            color: picked ? (correct?C.teal:"#EF4444") : C.textMid, transition:"all .15s",
+          }}>
+            {["A","B","C","D"][i]}. {o}{picked&&(correct?" ✓":" ✗")}
+          </div>
+        );
+      })}
+      {sel!==null && <p style={{ marginTop:8, fontSize:12, fontWeight:600, color:sel===1?C.teal:"#EF4444" }}>{sel===1?"✓ Correct — StandardScaler → N(0,1)":"✗ Try option B"}</p>}
+    </div>
+  );
+}
+
+/* ── Dataset Card ───────────────────────────────────────── */
+function DatasetCard() {
+  const cols = [
+    { name:"house_size_sqft", type:"Float",      color:"#F59E0B" },
+    { name:"num_bedrooms",    type:"Int",         color:"#F87171" },
+    { name:"location_tier",   type:"Categorical", color:"#A78BFA" },
+    { name:"has_garage",      type:"Boolean",     color:"#60A5FA" },
+    { name:"price_usd",       type:"Float",       color:"#F59E0B" },
+  ];
+  return (
+    <div style={{ ...glassStyle("teal"), padding:"20px 22px", marginTop:18 }}>
+      <div style={{ fontSize:11, fontWeight:800, color:C.teal, letterSpacing:".1em", marginBottom:10 }}>🗃️ SYNTHETIC DATASET</div>
+      <div style={{ fontWeight:700, fontSize:13.5, color:C.text, marginBottom:3 }}>house_price.csv</div>
+      <div style={{ fontSize:11.5, color:C.textMid, marginBottom:14 }}>200 rows · 10 columns</div>
+      {cols.map(({ name, type, color }) => (
+        <div key={name} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid rgba(0,0,0,.04)" }}>
+          <span style={{ fontSize:12, color:C.text, fontFamily:"'Courier New',monospace" }}>{name}</span>
+          <span style={{ padding:"2px 10px", borderRadius:99, fontSize:10.5, fontWeight:700, background:`${color}1a`, color }}>{type}</span>
+        </div>
+      ))}
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:14 }}>
+        {["3% missing","4% outliers","+ .py","+ .ipynb"].map(t => (
+          <span key={t} style={{ padding:"3px 10px", borderRadius:99, fontSize:11, fontWeight:600, color:C.textMid, background:`linear-gradient(145deg,${C.shell},${C.shellDp})`, boxShadow:raisedSm, border:`1px solid ${C.shadowL}` }}>{t}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Browser Mockup ─────────────────────────────────────── */
+function BrowserMockup() {
+  return (
+    <div className="browser" style={{ position:"relative", zIndex:2 }}>
+      <div className="bbar">
+        <div className="bdots">{["#FF5F57","#FFBD2E","#28C840"].map(c=><div key={c} className="bdot" style={{ background:c }} />)}</div>
+        <div className="burl"><span style={{ color:C.teal }}>🔒</span><span>lms.aiwitharbaj.app</span></div>
+      </div>
+      <div style={{ display:"flex", height:360, overflow:"hidden" }}>
+        {/* Sidebar */}
+        <div style={{ width:198, flexShrink:0, padding:"18px 14px", background:`linear-gradient(180deg,${C.shell} 0%,${C.shellDp} 100%)`, borderRight:`1px solid ${C.shadowD}`, display:"flex", flexDirection:"column", gap:6 }}>
+          <div style={{ fontWeight:800, fontSize:13.5, color:C.text, marginBottom:14, paddingLeft:8 }}>📚 LMS Dashboard</div>
+          {[
+            { icon:"🏠", label:"Overview",    active:true  }, { icon:"📖", label:"My Courses",  active:false },
+            { icon:"🗓️", label:"Calendar",    active:false }, { icon:"🤖", label:"AI Generate", active:false },
+            { icon:"👥", label:"Students",    active:false }, { icon:"⚙️", label:"Settings",    active:false },
+          ].map(({ icon, label, active }) => (
+            <div key={label} style={{ display:"flex", alignItems:"center", gap:9, padding:"8px 12px", borderRadius:12, cursor:"default", background:active?"rgba(139,92,246,.12)":"transparent", boxShadow:active?insetSm:"none", color:active?C.violet:C.textMid, fontWeight:active?700:500, fontSize:13 }}>
+              <span>{icon}</span>{label}
+            </div>
+          ))}
+        </div>
+        {/* Main content */}
+        <div style={{ flex:1, padding:"18px 18px", background:C.shell, overflowY:"hidden" }}>
+          <div style={{ fontSize:13.5, fontWeight:800, color:C.text, marginBottom:14 }}>Good morning, Arbaj 👋</div>
+          <div style={{ display:"flex", gap:10, marginBottom:16 }}>
+            {[
+              { l:"Active Courses", v:"4",   tint:"violet", icon:"📖" },
+              { l:"Students",       v:"38",  tint:"teal",   icon:"🎓" },
+              { l:"Days Generated", v:"120", tint:"pink",   icon:"✨" },
+            ].map(({ l, v, tint, icon }) => (
+              <div key={l} style={{ ...glassStyle(tint), flex:1, padding:"12px 12px", borderRadius:14, minWidth:0 }}>
+                <div style={{ fontSize:16, marginBottom:4 }}>{icon}</div>
+                <div style={{ fontSize:20, fontWeight:800, color:C.text, lineHeight:1 }}>{v}</div>
+                <div style={{ fontSize:10.5, color:C.textMid, marginTop:2 }}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize:11, fontWeight:700, color:C.textLt, letterSpacing:".08em", marginBottom:8, textTransform:"uppercase" }}>Recent courses</div>
+          {[
+            { name:"Machine Learning A–Z",    days:20, done:12, color:C.violet },
+            { name:"Python for Data Science", days:15, done:15, color:C.teal   },
+            { name:"Deep Learning Bootcamp",  days:25, done:3,  color:C.pink   },
+          ].map(({ name, days, done, color }) => (
+            <div key={name} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 12px", borderRadius:12, marginBottom:7, background:`linear-gradient(145deg,${C.shell},${C.shellDp})`, boxShadow:raisedSm, border:`1px solid ${C.shadowL}` }}>
+              <div style={{ width:8, height:8, borderRadius:"50%", background:color, flexShrink:0 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{name}</div>
+                <div style={{ fontSize:10.5, color:C.textLt, marginTop:1 }}>{done}/{days} days</div>
+              </div>
+              <div style={{ padding:"3px 10px", borderRadius:99, fontSize:10.5, fontWeight:700, background:done===days?"rgba(20,184,166,.12)":"rgba(139,92,246,.1)", color:done===days?C.teal:C.violet }}>
+                {done===days?"Done":"Active"}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   APP LOGO COMPONENT
+   Usage: <AppLogo size="md" theme="light|dark|gradient" />
+══════════════════════════════════════════════════════════ */
+function AppLogo({ size = "md", theme = "gradient", onClick, subtitle = null }) {
+  const sizes = {
+    sm:  { iconW: 28, iconH: 28, iconR: 8,  fontSize: 14, subSize: 10, gap: 8  },
+    md:  { iconW: 36, iconH: 36, iconR: 10, fontSize: 17, subSize: 11, gap: 10 },
+    lg:  { iconW: 44, iconH: 44, iconR: 13, fontSize: 21, subSize: 12, gap: 12 },
+  };
+  const s = sizes[size] || sizes.md;
+
+  const themes = {
+    gradient: {
+      iconBg:    "linear-gradient(135deg,#8B5CF6 0%,#6366F1 55%,#14B8A6 100%)",
+      iconShadow:"0 4px 14px rgba(99,102,241,0.35),inset 0 1px 0 rgba(255,255,255,0.25)",
+      textStyle: { background:"linear-gradient(135deg,#8B5CF6,#6366F1)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" },
+      subColor:  "#64748B",
+    },
+    light: {
+      iconBg:    "linear-gradient(135deg,#8B5CF6 0%,#6366F1 55%,#14B8A6 100%)",
+      iconShadow:"0 4px 14px rgba(99,102,241,0.28),inset 0 1px 0 rgba(255,255,255,0.25)",
+      textStyle: { color:"#1E2A3B" },
+      subColor:  "#64748B",
+    },
+    dark: {
+      iconBg:    "linear-gradient(135deg,#8B5CF6 0%,#6366F1 55%,#14B8A6 100%)",
+      iconShadow:"0 4px 14px rgba(99,102,241,0.45),inset 0 1px 0 rgba(255,255,255,0.2)",
+      textStyle: { color:"#F1F5F9" },
+      subColor:  "#94A3B8",
+    },
+  };
+  const t = themes[theme] || themes.gradient;
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display:"flex", alignItems:"center", gap:s.gap,
+        cursor: onClick ? "pointer" : "default",
+        userSelect:"none",
+      }}
+      title={onClick ? "Back to Home" : undefined}
+    >
+      {/* Icon mark */}
+      <div style={{
+        width:s.iconW, height:s.iconH, borderRadius:s.iconR,
+        background:t.iconBg, boxShadow:t.iconShadow,
+        display:"flex", alignItems:"center", justifyContent:"center",
+        flexShrink:0,
+      }}>
+        {/* Open book with a spark — represents AI-powered learning */}
+        <svg width={s.iconW * 0.6} height={s.iconH * 0.6} viewBox="0 0 20 20" fill="none">
+          {/* Book pages */}
+          <path d="M3 4.5C3 4.5 6 4 10 5.5C14 4 17 4.5 17 4.5V14.5C17 14.5 14 14 10 15.5C6 14 3 14.5 3 14.5V4.5Z"
+            stroke="rgba(255,255,255,0.9)" strokeWidth="1.3" strokeLinejoin="round" fill="rgba(255,255,255,0.12)"/>
+          {/* Spine line */}
+          <line x1="10" y1="5.5" x2="10" y2="15.5" stroke="rgba(255,255,255,0.7)" strokeWidth="1.1"/>
+          {/* AI spark / star */}
+          <circle cx="14.5" cy="3.5" r="1" fill="rgba(255,255,255,0.0)"/>
+          <path d="M14.5 1.5 L14.9 3.1 L16.5 3.5 L14.9 3.9 L14.5 5.5 L14.1 3.9 L12.5 3.5 L14.1 3.1 Z"
+            fill="rgba(255,255,255,0.95)" />
+        </svg>
+      </div>
+
+      {/* Wordmark */}
+      <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+        <span style={{
+          fontFamily:"'Plus Jakarta Sans',system-ui,sans-serif",
+          fontWeight:800,
+          fontSize:s.fontSize,
+          lineHeight:1.1,
+          letterSpacing:"-0.025em",
+          ...t.textStyle,
+        }}>
+          AI With ARBAJ
+        </span>
+        {subtitle && (
+          <span style={{
+            fontFamily:"'Plus Jakarta Sans',system-ui,sans-serif",
+            fontWeight:500,
+            fontSize:s.subSize,
+            color:t.subColor,
+            letterSpacing:"0.01em",
+            marginTop:1,
+          }}>
+            {subtitle}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   MAIN
+══════════════════════════════════════════════════════════ */
+function LandingPage({ onGetStarted }) {
+  const [stuck, setStuck] = useState(false);
+  useEffect(() => {
+    const fn = () => setStuck(window.scrollY > 50);
+    window.addEventListener("scroll", fn);
+    return () => window.removeEventListener("scroll", fn);
+  }, []);
+
+  return (
+    <>
+      <style>{CSS}</style>
+
+      {/* NAV */}
+      <nav className={`nav2${stuck?" stuck":""}`}>
+        <a href="#" className="nav2-logo" style={{ textDecoration:"none" }}><AppLogo size="sm" theme="gradient" /></a>
+        <ul className="nav2-links">
+          <li><a href="#roles">Roles</a></li>
+          <li><a href="#features">Features</a></li>
+          <li><a href="#how">How it Works</a></li>
+          <li><a href="#tech">Tech</a></li>
+        </ul>
+        <button className="btn-p" style={{ fontSize:13, padding:"9px 22px" }} onClick={onGetStarted}>Get Started →</button>
+      </nav>
+
+      {/* HERO */}
+      <section className="hero">
+        <Blobs />
+        <div style={{ position:"relative", zIndex:2, display:"flex", flexDirection:"column", alignItems:"center" }}>
+          <div className="hbadge"><span className="bdot" />AI-Powered Learning Management</div>
+          <h1 className="hh1">Build Rich ML Courses<br /><span className="gr">With One Click</span></h1>
+          <p className="hsub">AI With ARBAJ LMS turns any topic into a full course day — notebooks, quizzes, datasets, assignments, and teaching guides, generated by Groq AI in seconds.</p>
+          <div className="hbtns">
+            <button className="btn-p" onClick={onGetStarted}>Start Teaching Free →</button>
+            <button className="btn-g">Watch Demo</button>
+          </div>
+          <Reveal>
+            <div className="srow">
+              {[{n:6,s:"+",l:"AI Content Types"},{n:3,s:"",l:"User Roles"},{n:4,s:"+",l:"LLM Providers"},{n:100,s:"%",l:"Open Source"}].map(({n,s,l})=>(
+                <div key={l} className="si">
+                  <div className="sn"><CountUp to={n} suffix={s} /></div>
+                  <div className="sl">{l}</div>
+                </div>
+              ))}
+            </div>
+          </Reveal>
+        </div>
+        <div style={{ position:"relative", zIndex:2, marginTop:72, width:"100%", display:"flex", justifyContent:"center" }}>
+          <Reveal delay={180}><BrowserMockup /></Reveal>
+        </div>
+      </section>
+
+      {/* TECH STRIP */}
+      <div style={{ padding:"52px", textAlign:"center", borderTop:`1px solid ${C.shadowD}`, borderBottom:`1px solid ${C.shadowD}`, background:`linear-gradient(145deg,${C.shellDp},${C.shell})` }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:".12em", textTransform:"uppercase", color:C.textLt }}>Powered by</div>
+        <div className="ttags">
+          {["Groq API","Llama 3.3 70B","GPT-OSS 120B","Ollama","Supabase","Pyodide WASM","React 18","JSZip","PBKDF2 Auth"].map(t=>(
+            <div key={t} className="ttag">{t}</div>
+          ))}
+        </div>
+        
+      </div>
+
+      {/* ROLES */}
+      <section id="roles" className="sec">
+        <Reveal>
+          <div className="ey">Three Roles, One Platform</div>
+          <h2 className="h2t">Built for Every Corner<br />of the Classroom</h2>
+          <p className="h2s">Admin controls the platform, trainers build content, students learn — all in one place.</p>
+        </Reveal>
+        <div className="rgrid">
+          {[
+            { emoji:"🛡️", title:"Admin",   topColor:C.blue,   iconBg:"rgba(99,102,241,.12)", desc:"Full platform control — approve trainers and students, manage enrollments, monitor all courses, and view analytics.", pills:["Trainer Approval","Student Management","Course Overview","Enrollment Control"] },
+            { emoji:"👨‍🏫", title:"Trainer", topColor:C.violet, iconBg:"rgba(139,92,246,.12)", desc:"Create courses, generate AI content for every day, track student progress, and export full course packages as ZIP.", pills:["AI Content Gen","Course Calendar","Day Planner","ZIP Export","Student Tracking"] },
+            { emoji:"🎓", title:"Student", topColor:C.teal,   iconBg:"rgba(20,184,166,.12)",  desc:"Follow your enrolled course day by day, take interactive quizzes, access notebooks, and track your own progress.", pills:["Course Access","Interactive Quiz","Day Status","Notes Editor","File Downloads"] },
+          ].map(({ emoji, title, topColor, iconBg, desc, pills }, i) => (
+            <Reveal key={title} delay={i*100}>
+              <div className="rcard">
+                <div style={{ position:"absolute", top:0, left:0, right:0, height:4, borderRadius:"28px 28px 0 0", background:`linear-gradient(90deg,${topColor},transparent)` }} />
+                <div className="rico" style={{ background:iconBg }}>{emoji}</div>
+                <div className="rtitle">{title}</div>
+                <p className="rdesc">{desc}</p>
+                <div className="pills">{pills.map(p=><span key={p} className="pill">{p}</span>)}</div>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* FEATURES BENTO */}
+      <section id="features" style={{ background:`linear-gradient(180deg,${C.shellDp} 0%,${C.shell} 100%)`, borderTop:`1px solid ${C.shadowD}`, borderBottom:`1px solid ${C.shadowD}` }}>
+        <div className="sec">
+          <Reveal>
+            <div className="ey">Feature-Rich by Design</div>
+            <h2 className="h2t">Everything a Trainer<br />Could Need</h2>
+          </Reveal>
+          <div className="bento">
+            <Reveal><div className="bc s8" style={{ minHeight:380 ,}}>
+              <div className="fi">🤖</div><div className="ft">6 AI Content Generators</div>
+              <p className="fd">One tap generates a structured Jupyter notebook, worked examples, curated resources, a graded assignment, a quiz, or a teaching guide — all via Groq LLM.</p>
+              <Terminal />
+            </div></Reveal>
+            
+            <Reveal delay={80}><div className="bc s4" style={{ minHeight:380, display:"flex", flexDirection:"column" }}>
+              <div className="fi">🗓️</div><div className="ft">Smart Calendar</div>
+              <p className="fd">Visual calendar with Mon–Fri mode, holidays, make-up days, and colour-coded day status.</p>
+              <div style={{ marginTop:"auto", paddingTop:20, display:"flex", flexDirection:"column", gap:10 }}>
+                {[
+                  { l:"Linear Regression", d:"Mon 9 Jun",  s:"Completed",   dot:C.teal    },
+                  { l:"Gradient Descent",  d:"Tue 10 Jun", s:"In Progress", dot:"#F59E0B"  },
+                  { l:"Decision Trees",    d:"Wed 11 Jun", s:"Not Started", dot:C.textLt   },
+                ].map(({ l, d, s, dot }) => (
+                  <div key={l} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:14, boxShadow:insetSm, background:`linear-gradient(145deg,${C.shellDp},${C.shell})`, border:`1px solid ${C.shadowL}` }}>
+                    <div style={{ width:8, height:8, borderRadius:"50%", background:dot, flexShrink:0 }} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:12.5, fontWeight:700, color:C.text }}>{l}</div>
+                      <div style={{ fontSize:10.5, color:C.textLt, marginTop:1 }}>{d}</div>
+                    </div>
+                    <span style={{ fontSize:10.5, fontWeight:700, color:dot }}>{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div></Reveal>
+            
+            <Reveal delay={150}><div className="bc s6">
+              <div className="fi">🗃️</div><div className="ft">Synthetic Dataset Engine</div>
+              <p className="fd">DataForge ML v2.0 builds realistic CSVs with deliberate noise and auto-generates a matching preprocessing script.</p>
+              <DatasetCard />
+            </div></Reveal>
+            <Reveal delay={110}><div className="bc s6">
+              <div className="fi">🎯</div><div className="ft">Interactive Quiz Engine</div>
+              <p className="fd">AI-generated MCQs with instant feedback. Try one below:</p>
+              <LiveQuiz />
+            </div></Reveal>
+          </div>
+        </div>
+      </section>
+
+      {/* HOW IT WORKS */}
+      <section id="how" className="sec">
+        <Reveal>
+          <div style={{ textAlign:"center" }}>
+            <div className="ey">How It Works</div>
+            <h2 className="h2t">From Topic to Full Course<br />in Four Steps</h2>
+          </div>
+        </Reveal>
+        <div className="sgrid">
+          {[
+            { n:"1", icon:"✍️", title:"Write Your Plan",  desc:"Paste your course plan — one topic per line. The LMS parses it into individual day cards." },
+            { n:"2", icon:"🗓️", title:"Set the Schedule", desc:"Pick a start date, Mon–Fri or all-week mode, and mark holidays on the visual calendar." },
+            { n:"3", icon:"🤖", title:"Generate Content",  desc:"Open any day and tap generate. AI writes the notebook, quiz, dataset, and assignment in seconds." },
+            { n:"4", icon:"🚀", title:"Publish & Share",   desc:"Students enroll, follow content day by day, take quizzes, and track their own progress." },
+          ].map(({ n, icon, title, desc }, i) => (
+            <Reveal key={n} delay={i*90}>
+              <div className="sc">
+                <div className="sn2">{n}</div>
+                <div style={{ fontSize:30, marginBottom:14 }}>{icon}</div>
+                <div className="stitle">{title}</div>
+                <p className="sdesc">{desc}</p>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* CONTENT UNIVERSE */}
+      <section id="tech" style={{ background:`linear-gradient(180deg,${C.shell} 0%,${C.shellDp} 100%)`, borderTop:`1px solid ${C.shadowD}` }}>
+        <div className="sec">
+          <Reveal>
+            <div className="ey">Content Universe</div>
+            <h2 className="h2t">7 Types of AI-Generated<br />Content Per Day</h2>
+          </Reveal>
+          {(() => {
+            const tiles = [
+              { e:"📓", t:"Notebook",       s:".md + .ipynb",          tint:"violet" },
+              { e:"🎯", t:"Quiz",            s:"MCQs + answer key",      tint:"pink"   },
+              { e:"📝", t:"Assignment",      s:".md + .ipynb skeleton",  tint:"blue"   },
+              { e:"⚡", t:"Examples",        s:"Worked exercises (.md)", tint:"teal"   },
+              { e:"🗃️", t:"Dataset",         s:".csv + .py + .ipynb",    tint:"violet" },
+              { e:"🧑\u200d🏫",t:"Teaching Guide",  s:"Trainer-only (.md)",     tint:"blue"   },
+              { e:"📂", t:"Resources",       s:"Curated links (.md)",    tint:"teal"   },
+              { e:"🗒️", t:"Notes",           s:"Per-student (.md)",      tint:"pink"   },
+            ];
+            const allTiles = [...tiles, ...tiles];
+            return (
+              <div className="marquee-wrap">
+                <div className="marquee-track">
+                  {allTiles.map(({ e, t, s, tint }, idx) => (
+                    <div key={idx} className="ctile" style={{ ...glassStyle(tint), transition:"transform .2s,box-shadow .2s" }}
+                      onMouseEnter={ev=>{ ev.currentTarget.style.transform="translateY(-5px)"; ev.currentTarget.style.boxShadow=raisedLg; }}
+                      onMouseLeave={ev=>{ ev.currentTarget.style.transform="translateY(0)"; ev.currentTarget.style.boxShadow=""; }}>
+                      <div style={{ fontSize:30, marginBottom:14 }}>{e}</div>
+                      <div style={{ fontWeight:800, fontSize:15, color:C.text, marginBottom:6 }}>{t}</div>
+                      <div style={{ fontSize:12, color:C.textMid, lineHeight:1.5 }}>{s}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Tech cards */}
+          <div style={{ marginTop:72 }}>
+            <Reveal>
+              <div className="ey">Under the Hood</div>
+              <h2 className="h2t">A Solid Technical<br />Foundation</h2>
+            </Reveal>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(255px,1fr))", gap:20, marginTop:40 }}>
+              {[
+                { icon:"🧠", title:"Multi-Model AI",  items:["llama-3.3-70b-versatile","llama-3.1-8b-instant","openai/gpt-oss-120b","Ollama local models","Auto-retry (429/5xx)","30s timeout + AbortController"] },
+                { icon:"🗄️", title:"Supabase Backend",items:["Zero-dep REST client","Row-level security (RLS)","lms_courses + day_data JSONB","lms_day_content per-type rows","Storage or base64 file upload","PATCH-only (no race conditions)"] },
+                { icon:"🔐", title:"Security",         items:["PBKDF2 100k iterations SHA-256","Admin approval gating","Session-only credential storage","No plaintext passwords","Legacy SHA-256 silent migration","Error boundary crash recovery"] },
+                { icon:"📤", title:"Export Engine",    items:["JSZip lazy-loaded from CDN","Per-day ZIP all content types","Notebook → .md + .ipynb","Assignment → .md + skeleton","Quiz → sheet + answer key","Dataset → .csv + .py + .ipynb"] },
+              ].map(({ icon, title, items }, i) => (
+                <Reveal key={title} delay={i*80}>
+                  <div style={{ ...neuCard, padding:"28px 26px", transition:"transform .25s,box-shadow .25s" }}
+                    onMouseEnter={ev=>{ ev.currentTarget.style.transform="translateY(-4px)"; ev.currentTarget.style.boxShadow=raisedLg; }}
+                    onMouseLeave={ev=>{ ev.currentTarget.style.transform="translateY(0)"; ev.currentTarget.style.boxShadow=raisedMd; }}>
+                    <div style={{ fontSize:26, marginBottom:14 }}>{icon}</div>
+                    <div style={{ fontWeight:800, fontSize:16, color:C.text, marginBottom:16 }}>{title}</div>
+                    <ul style={{ listStyle:"none", display:"flex", flexDirection:"column", gap:9 }}>
+                      {items.map(it => (
+                        <li key={it} style={{ display:"flex", alignItems:"flex-start", gap:10, fontSize:13, color:C.textMid }}>
+                          <span style={{ width:5, height:5, borderRadius:"50%", flexShrink:0, marginTop:5, background:`linear-gradient(135deg,${C.violet},${C.blue})` }} />
+                          {it}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </Reveal>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* PRICING */}
+      <section className="sec">
+        <Reveal>
+          <div style={{ textAlign:"center" }}>
+            <div className="ey">Open & Transparent</div>
+            <h2 className="h2t">Bring Your Own Key.<br />Pay Only What You Use.</h2>
+            <p className="h2s" style={{ margin:"0 auto" }}>AI With ARBAJ is open-source. Connect your Groq API key — the free tier covers most teaching use.</p>
+          </div>
+        </Reveal>
+        <div className="pgrid">
+          {[
+            { tier:"Self-Hosted", amount:"Free", period:"Forever, open source",    items:["Full LMS source code","All 6 AI generators","Unlimited courses","Supabase free tier compatible","Community support"], cta:"Search on GitHub", featured:false },
+            { tier:"Groq API",    amount:"~$0",  period:"Per full course day",      items:["Groq free tier covers most usage","llama-3.3-70b: 131k context","~10k tokens per full day","Well within daily free limits","Upgrade anytime"], cta: (
+  <a
+    href="https://console.groq.com"
+    target="_blank"
+    rel="noreferrer"
+    style={{ color: "white" }}
+  >
+    Get Groq Key Free
+  </a>
+), featured:true, badge:"Recommended" },
+            { tier:"Ollama Local",amount:"$0",   period:"Run offline, no API",      items:["Llama 3, Llama 3.1, Mistral","Fully private — data stays local","No internet after setup","Perfect for institutions","Same UI, all features"], cta:"Install Ollama", featured:false },
+          ].map(({ tier, amount, period, items, cta, featured, badge }, i) => (
+            <Reveal key={tier} delay={i*90}>
+              <div className={`pcard${featured?" feat":""}`}>
+                {badge && <div className="pbadge">{badge}</div>}
+                <div className="ptier">{tier}</div>
+                <div className="pamount">{amount}</div>
+                <div className="pperiod">{period}</div>
+                <ul className="plist">
+                  {items.map(f=><li key={f} className="pitem"><span className="pcheck">✦</span>{f}</li>)}
+                </ul>
+                <button className={featured?"btn-p":"btn-g"} style={{ width:"100%", padding:"12px 0", borderRadius:14, fontSize:14 }}>{cta} →</button>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="cta2" style={{ borderTop:`1px solid ${C.shadowD}`, background:`linear-gradient(180deg,${C.shellDp},${C.shell})` }}>
+        <Blobs />
+        <div style={{ position:"relative", zIndex:2, display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center" }}>
+          <Reveal>
+            <div style={{ display:"inline-flex", alignItems:"center", gap:8, padding:"6px 18px", borderRadius:99, background:"rgba(139,92,246,.1)", border:"1.5px solid rgba(139,92,246,.25)", fontSize:12, fontWeight:700, color:C.violet, letterSpacing:".07em", textTransform:"uppercase", marginBottom:28 }}>
+              <span className="bdot" /> Ready to Build?
+            </div>
+            <h2 className="ctah">
+              Stop Writing Lesson Plans.<br />
+              <span style={{ background:`linear-gradient(135deg,${C.violet},${C.blue})`, WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>Start Generating Them.</span>
+            </h2>
+            <p className="ctas">Deploy in minutes, add your Groq key, and generate your first full course day in under two minutes.</p>
+            <div style={{ display:"flex", gap:14, justifyContent:"center", flexWrap:"wrap" }}>
+              <button className="btn-p" style={{ fontSize:16, padding:"15px 36px" }} onClick={onGetStarted}>Deploy Free →</button>
+              <button className="btn-g" style={{ fontSize:16, padding:"15px 36px" }}>Explore Features</button>
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer className="foot">
+        <div>
+          <div style={{ fontWeight:800, fontSize:17, background:`linear-gradient(135deg,${C.violet},${C.blue})`, WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:5 }}>AI With ARBAJ</div>
+          <div className="fcopy">© {new Date().getFullYear()} AI With ARBAJ LMS · Open Source</div>
+        </div>
+        <div className="flinks">
+          <a href="#roles">Roles</a><a href="#features">Features</a><a href="#how">How it Works</a><a href="#tech">Technology</a>
+        </div>
+        <div style={{ fontSize:13, color:C.textLt }}>Built with ❤️ for ML educators</div>
+      </footer>
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════════════════════════════ */
+
 export default function LMSApp() {
   // Supabase client — created once from env vars, shared by all roles
   const [sb, setSb] = useState(() =>
@@ -8522,6 +9295,11 @@ export default function LMSApp() {
   const [auth, setAuth]                       = useState(getAuthState());
   const [currentCourseId, setCurrentCourseId] = useState(null);
   const [courseView, setCourseView]           = useState(false);
+
+  // ── Page routing: "landing" | "login" | "register" ───────────
+  // If user is already logged in we skip straight to the app.
+  // If not logged in we start on the landing page.
+  const [page, setPage] = useState(() => getAuthState() ? "app" : "landing");
 
   const isTrainer = auth?.role === "trainer";
   const isStudent = auth?.role === "student";
@@ -8537,13 +9315,12 @@ export default function LMSApp() {
     }
   }, [sb, auth?.id]);
 
-
-
   const handleLogout = () => {
     try { sessionStorage.removeItem(SB_AUTH_KEY); } catch {}
     setAuth(null);
     setCourseView(false);
     setCurrentCourseId(null);
+    setPage("landing");   // ← go back to landing on logout
   };
 
   const handleSelectCourse = async (courseId) => {
@@ -8555,10 +9332,34 @@ export default function LMSApp() {
     }
   };
 
+  // ── Landing page ──────────────────────────────────────────────
+  // Shown to unauthenticated visitors, and to logged-in users who
+  // click the "📚 LMS" logo to return to the home page.
+  if (page === "landing") {
+    return (
+      <LandingPage
+        onGetStarted={() => {
+          if (auth) {
+            // Already logged in — jump straight back to the app
+            setPage("app");
+          } else {
+            setPage("register");
+          }
+        }}
+      />
+    );
+  }
 
-  // ── Login screen ──────────────────────────────────────────────
+  // ── Login / Register screen ───────────────────────────────────
   if (!auth) {
-    return <LoginScreen onLogin={() => setAuth(getAuthState())} sb={sb} />;
+    return (
+      <LoginScreen
+        onLogin={() => { setAuth(getAuthState()); setPage("app"); }}
+        sb={sb}
+        initialMode={page === "register" ? "register" : "select"}
+        onBackToLanding={() => setPage("landing")}
+      />
+    );
   }
 
   // ── Admin view ────────────────────────────────────────────────
@@ -8571,17 +9372,18 @@ export default function LMSApp() {
     return (
       <div style={{ minHeight:"100vh", background:"transparent" }}>
         <div style={{ background:"white", padding:"14px 20px", borderBottom:"1px solid #e2e8f0", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100 }}>
-          <div>
-            <h1 style={{ fontSize:20, fontWeight:700, color:"#1a202c", margin:0 }}>📚 LMS</h1>
-            <p style={{ fontSize:12, color:"#718096", margin:"4px 0 0 0" }}>👨‍🏫 {auth.name}</p>
-          </div>
+          <AppLogo
+              size="md"
+              theme="light"
+              onClick={() => setPage("landing")}
+              subtitle={`👨‍🏫 ${auth.name}`}
+            />
           <div style={{ display:"flex", gap:10, alignItems:"center" }}>
             {courseView && currentCourseId && (
               <button onClick={()=>setCourseView(false)} style={{ padding:"8px 14px", background:"#f5f3ff", color:"#764ba2", border:"1px solid #ddd6fe", borderRadius:6, cursor:"pointer", fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}>
                 ← Switch Course
               </button>
             )}
-
             <button onClick={handleLogout} style={{ padding:"8px 14px", background:"#ef4444", color:"white", border:"none", borderRadius:6, cursor:"pointer" }}>Logout</button>
           </div>
         </div>
@@ -8602,3 +9404,6 @@ export default function LMSApp() {
 
   return null;
 }
+
+
+
