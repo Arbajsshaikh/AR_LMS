@@ -2590,7 +2590,7 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
   const selectedStudent = selected ? students.find(s => s.id === selected) : null;
 
   return (
-    <div style={{ maxWidth:960, margin:"0 auto", display:"flex", flexDirection:"column", gap:20 }}>
+    <div style={{ width:"100%", display:"flex", flexDirection:"column", gap:20 }}>
 
       {/* ── Page header ── */}
       <div style={{ background:"linear-gradient(135deg,#0f172a,#1e3a5f)", borderRadius:14, padding:"20px 24px", color:"#fff" }}>
@@ -3303,7 +3303,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
   const myRank = currentStudentId ? ranked.findIndex(s => s.id === currentStudentId) + 1 : null;
 
   return (
-    <div style={{ maxWidth:920, margin:"0 auto", animation:"lms-in .22s ease" }}>
+    <div style={{ width:"100%", animation:"lms-in .22s ease" }}>
       <style>{css}</style>
 
       {/* ── Header ── */}
@@ -3619,8 +3619,6 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
       {(enrolledCourses.length > 0 || pendingCourses.length > 0) && (
         <div style={card()}>
           <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:14 }}>📚 My Courses</div>
-
-          {/* Enrolled courses */}
           {enrolledCourses.length > 0 && (
             <>
               <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>✅ Enrolled</div>
@@ -3629,38 +3627,28 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
                   const isActive = e.courseId === courseId;
                   return (
                     <div key={e.courseId} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:10, background: isActive ? "#eff6ff" : "#f8fafc", border: `1.5px solid ${isActive ? "#bfdbfe" : "#e2e8f0"}` }}>
-                      <div style={{ width:36, height:36, borderRadius:10, background: isActive ? "#3b82f6" : "#e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
-                        📖
-                      </div>
+                      <div style={{ width:36, height:36, borderRadius:10, background: isActive ? "#3b82f6" : "#e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>📖</div>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontWeight:700, fontSize:13.5, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{e.courseName || "Unnamed Course"}</div>
                         <div style={{ fontSize:11, color:"#64748b", marginTop:1 }}>Course ID: {e.courseId?.slice(0, 12)}…</div>
                       </div>
-                      {isActive && (
-                        <span style={{ fontSize:10, fontWeight:700, color:"#2563eb", background:"#dbeafe", padding:"2px 8px", borderRadius:99, flexShrink:0 }}>ACTIVE</span>
-                      )}
+                      {isActive && <span style={{ fontSize:10, fontWeight:700, color:"#2563eb", background:"#dbeafe", padding:"2px 8px", borderRadius:99, flexShrink:0 }}>ACTIVE</span>}
                     </div>
                   );
                 })}
               </div>
             </>
           )}
-
-          {/* Pending courses */}
           {pendingCourses.length > 0 && (
             <>
               <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>⏳ Pending Approval</div>
               <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
                 {pendingCourses.map(p => (
                   <div key={p.courseId} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:10, background:"#fffbeb", border:"1.5px solid #fde68a" }}>
-                    <div style={{ width:36, height:36, borderRadius:10, background:"#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
-                      ⏳
-                    </div>
+                    <div style={{ width:36, height:36, borderRadius:10, background:"#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>⏳</div>
                     <div style={{ flex:1, minWidth:0 }}>
                       <div style={{ fontWeight:700, fontSize:13.5, color:"#92400e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.courseName || "Unnamed Course"}</div>
-                      <div style={{ fontSize:11, color:"#b45309", marginTop:1 }}>
-                        Requested {p.requestedAt ? new Date(p.requestedAt).toLocaleDateString() : "recently"} · Awaiting trainer approval
-                      </div>
+                      <div style={{ fontSize:11, color:"#b45309", marginTop:1 }}>Requested {p.requestedAt ? new Date(p.requestedAt).toLocaleDateString() : "recently"} · Awaiting trainer approval</div>
                     </div>
                     <span style={{ fontSize:10, fontWeight:700, color:"#d97706", background:"#fef3c7", padding:"2px 8px", borderRadius:99, flexShrink:0 }}>PENDING</span>
                   </div>
@@ -5883,7 +5871,7 @@ Day 2: [Topic]
   };
 
   return (
-    <div style={{ maxWidth:900, animation:"lms-in .3s ease", paddingBottom:60 }}>
+    <div style={{ width:"100%", animation:"lms-in .3s ease", paddingBottom:60 }}>
       <div style={{ marginBottom:28 }}>
         <h1 style={{ fontSize:26, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Setup Your Course Plan</h1>
         <p style={{ color:"#64748b", fontSize:14, marginTop:5 }}>Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
@@ -9034,7 +9022,7 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
   };
 
   return (
-    <div style={{ maxWidth:640, animation:"lms-in .3s ease" }}>
+    <div style={{ width:"100%", animation:"lms-in .3s ease" }}>
       {confirmClear && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
           <div style={{ background:"#fff", borderRadius:16, padding:28, maxWidth:400, width:"100%", boxShadow:"0 20px 60px rgba(0,0,0,.25)" }}>
