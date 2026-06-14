@@ -874,14 +874,16 @@ async function sbLoadAllStudentActivity(sb, courseId) {
 }
 
 async function sbGetLeaderboardData(sb, courseId, planDays) {
+  // Fetch all students and filter to those enrolled in this course.
+  // We can't do a server-side JSONB array filter easily with the REST client,
+  // so we fetch all and filter client-side. For large deployments, add a DB view.
   const rows = await sb.select("lms_students", "order=created_at.asc");
   const allStudents = (rows || []).map(dbRowToStudent);
   const enrolled = allStudents.filter(s => {
     const courses = getStudentEnrolledCourses(s);
     return courses.some(e => e.courseId === courseId);
   });
-  const activityMap = await sbLoadAllStudentActivity(sb, courseId);
-  return { enrolled, activityMap };
+  return { enrolled };
 }
 
 function studentToDbRow(s) {
@@ -2401,6 +2403,208 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
 }
 
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   TRAINER STUDENT PERFORMANCE PAGE
+   Lists all enrolled students; clicking a name loads and shows their
+   full StudentDashboard (read-only) with data from Supabase.
+═══════════════════════════════════════════════════════════════════ */
+function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
+  const [students,    setStudents]    = useState([]);
+  const [activityMap, setActivityMap] = useState({});   // { studentId: activityObj }
+  const [statusMap,   setStatusMap]   = useState({});   // { studentId: { dayKey: status } }
+  const [loading,     setLoading]     = useState(true);
+  const [selected,    setSelected]    = useState(null); // studentId currently viewed
+  const [loadingId,   setLoadingId]   = useState(null); // studentId being fetched
+
+  /* ── Load all enrolled students + their activity on mount ── */
+  useEffect(() => {
+    if (!sb || !courseId) { setLoading(false); return; }
+    const load = async () => {
+      try {
+        const { enrolled } = await sbGetLeaderboardData(sb, courseId, planDays);
+        setStudents(enrolled);
+
+        const aMap = await sbLoadAllStudentActivity(sb, courseId);
+        setActivityMap(aMap);
+
+        // Load day statuses for all students in parallel
+        const sMap = {};
+        await Promise.allSettled(enrolled.map(async s => {
+          sMap[s.id] = await sbLoadStudentDayStatus(sb, s.id, courseId).catch(() => ({}));
+        }));
+        setStatusMap(sMap);
+      } catch (e) {
+        console.error("TrainerStudentPerformance load error:", e.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [sb, courseId]);
+
+  /* ── When trainer clicks a student name — ensure their data is loaded ── */
+  const handleSelect = async (studentId) => {
+    if (selected === studentId) { setSelected(null); return; }
+    // If activity/status already loaded, just open
+    if (activityMap[studentId] !== undefined && statusMap[studentId] !== undefined) {
+      setSelected(studentId);
+      return;
+    }
+    // Otherwise fetch on demand (edge case: new student joined after mount)
+    setLoadingId(studentId);
+    try {
+      const [act, st] = await Promise.all([
+        sbLoadMyActivity(sb, studentId, courseId).catch(() => ({})),
+        sbLoadStudentDayStatus(sb, studentId, courseId).catch(() => ({})),
+      ]);
+      setActivityMap(prev => ({ ...prev, [studentId]: act }));
+      setStatusMap(prev => ({ ...prev, [studentId]: st }));
+    } finally {
+      setLoadingId(null);
+      setSelected(studentId);
+    }
+  };
+
+  /* ── Quick summary row stats ── */
+  const summaryFor = (s) => {
+    const act  = activityMap[s.id] || {};
+    const ds   = statusMap[s.id]   || {};
+    const total     = planDays.length;
+    const completed = Object.values(ds).filter(v => v === "Completed").length;
+    const inProg    = Object.values(ds).filter(v => v === "In Progress").length;
+    const pct       = total ? Math.round((completed / total) * 100) : 0;
+    const quizVals  = Object.values(act.quizScores || {});
+    const avgQuiz   = quizVals.length
+      ? Math.round(quizVals.reduce((a, q) => a + (q.pct || 0), 0) / quizVals.length)
+      : null;
+    const codeRuns  = Object.values(act.codeRuns || {}).reduce((a, v) => a + v, 0);
+    const lastSeen  = act.lastSeen ? new Date(act.lastSeen).toLocaleDateString() : "—";
+    return { total, completed, inProg, pct, avgQuiz, quizCount: quizVals.length, codeRuns, lastSeen };
+  };
+
+  const initials = (name) => name ? name.split(" ").map(w => w[0]).join("").slice(0,2).toUpperCase() : "?";
+  const avatarColors = ["#3b82f6","#8b5cf6","#10b981","#f59e0b","#ec4899","#06b6d4","#f97316","#6366f1"];
+  const avatarColor  = (id) => avatarColors[id.charCodeAt(0) % avatarColors.length];
+
+  if (loading) {
+    return (
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:200, color:"#94a3b8", fontSize:14 }}>
+        Loading student data…
+      </div>
+    );
+  }
+
+  if (students.length === 0) {
+    return (
+      <div style={{ maxWidth:600, margin:"60px auto", textAlign:"center" }}>
+        <div style={{ fontSize:48, marginBottom:16 }}>👥</div>
+        <div style={{ fontSize:18, fontWeight:700, color:"#0f172a", marginBottom:8 }}>No enrolled students yet</div>
+        <div style={{ fontSize:13, color:"#94a3b8" }}>Approve students from the Students panel in the sidebar.</div>
+      </div>
+    );
+  }
+
+  const selectedStudent = selected ? students.find(s => s.id === selected) : null;
+
+  return (
+    <div style={{ maxWidth:960, margin:"0 auto", display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* ── Page header ── */}
+      <div style={{ background:"linear-gradient(135deg,#0f172a,#1e3a5f)", borderRadius:14, padding:"20px 24px", color:"#fff" }}>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Student Performance</div>
+        <div style={{ fontSize:13, opacity:.7 }}>{students.length} enrolled student{students.length !== 1 ? "s" : ""} · {planDays.length} day course · Click any student to view their full dashboard</div>
+      </div>
+
+      {/* ── Student list ── */}
+      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+        {students.map(s => {
+          const sum      = summaryFor(s);
+          const isOpen   = selected === s.id;
+          const isLoading = loadingId === s.id;
+          const pctColor = sum.pct >= 75 ? "#16a34a" : sum.pct >= 40 ? "#d97706" : "#dc2626";
+
+          return (
+            <div key={s.id} style={{ background:"#fff", borderRadius:14, border:`2px solid ${isOpen?"#3b82f6":"#f1f5f9"}`, boxShadow: isOpen ? "0 4px 20px rgba(59,130,246,.12)" : "0 1px 4px rgba(0,0,0,.05)", transition:"border-color .15s, box-shadow .15s", overflow:"hidden" }}>
+
+              {/* ── Clickable summary row ── */}
+              <div
+                onClick={() => handleSelect(s.id)}
+                style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 18px", cursor:"pointer" }}
+                onMouseEnter={e => { if (!isOpen) e.currentTarget.style.background = "#f8fafc"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
+              >
+                {/* Avatar */}
+                <div style={{ width:40, height:40, borderRadius:"50%", background:avatarColor(s.id), display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:14, flexShrink:0 }}>
+                  {initials(s.name)}
+                </div>
+
+                {/* Name + email */}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                  <div style={{ fontSize:11.5, color:"#94a3b8", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
+                </div>
+
+                {/* Quick stats — hidden on very small screens via minWidth trick */}
+                <div style={{ display:"flex", gap:16, alignItems:"center", flexShrink:0 }}>
+                  {/* Progress */}
+                  <div style={{ textAlign:"center", minWidth:60 }}>
+                    <div style={{ fontSize:18, fontWeight:800, color:pctColor, lineHeight:1 }}>{sum.pct}%</div>
+                    <div style={{ fontSize:10.5, color:"#94a3b8", marginTop:2 }}>{sum.completed}/{sum.total} days</div>
+                  </div>
+                  {/* Quiz */}
+                  <div style={{ textAlign:"center", minWidth:52 }}>
+                    <div style={{ fontSize:18, fontWeight:800, color:"#6366f1", lineHeight:1 }}>{sum.avgQuiz !== null ? `${sum.avgQuiz}%` : "—"}</div>
+                    <div style={{ fontSize:10.5, color:"#94a3b8", marginTop:2 }}>{sum.quizCount} quiz{sum.quizCount !== 1 ? "zes" : ""}</div>
+                  </div>
+                  {/* Code runs */}
+                  <div style={{ textAlign:"center", minWidth:44 }}>
+                    <div style={{ fontSize:18, fontWeight:800, color:"#3b82f6", lineHeight:1 }}>{sum.codeRuns}</div>
+                    <div style={{ fontSize:10.5, color:"#94a3b8", marginTop:2 }}>code runs</div>
+                  </div>
+                  {/* Last seen */}
+                  <div style={{ textAlign:"right", minWidth:72 }}>
+                    <div style={{ fontSize:11, color:"#64748b" }}>Last active</div>
+                    <div style={{ fontSize:11.5, fontWeight:600, color:"#334155" }}>{sum.lastSeen}</div>
+                  </div>
+                  {/* Chevron */}
+                  <div style={{ color:"#94a3b8", fontSize:18, transition:"transform .2s", transform: isOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+                    {isLoading ? "⟳" : "⌄"}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Progress bar strip ── */}
+              <div style={{ height:4, background:"#f1f5f9", marginTop:-2 }}>
+                <div style={{ height:"100%", width:`${sum.pct}%`, background:`linear-gradient(90deg,${pctColor},${pctColor}88)`, transition:"width .5s" }} />
+              </div>
+
+              {/* ── Expanded student dashboard ── */}
+              {isOpen && selectedStudent && (
+                <div style={{ borderTop:"1px solid #e8edf3", padding:"20px 18px", background:"#fafbfc" }}>
+                  <StudentDashboard
+                    planDays={planDays}
+                    dayMap={dayMap}
+                    dayStatus={statusMap[s.id] || {}}
+                    trainerDayStatus={{}}
+                    studentActivity={activityMap[s.id] || {}}
+                    dayData={{}}
+                    startDate={""}
+                    courseId={courseId}
+                    onSelectDay={() => {}}
+                    readOnly={true}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+    </div>
+  );
+}
+
 /* ─── StudentsNavBtn (top-level to avoid remount on each render) ─── */
 function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen, collapsed }) {
   const [pendingCount, setPendingCount] = useState(0);
@@ -2819,15 +3023,15 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
     if (!sb || !courseId) { setLoading(false); return; }
     const load = async () => {
       try {
-        // 1. Students
+        // 1. Students enrolled in this course
         const { enrolled } = await sbGetLeaderboardData(sb, courseId, planDays);
         setStudents(enrolled);
 
-        // 2. Activity map
+        // 2. Activity map for all students in this course (single query)
         const aMap = await sbLoadAllStudentActivity(sb, courseId);
         setActivityMap(aMap);
 
-        // 3. Per-student day status map
+        // 3. Per-student day status map (parallel fetch)
         const statusMap = {};
         await Promise.allSettled(enrolled.map(async s => {
           const st = await sbLoadStudentDayStatus(sb, s.id, courseId);
@@ -3200,6 +3404,247 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
 
 
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   STUDENT DASHBOARD — personal progress overview for enrolled students
+   Shows stats, activity breakdown, recent days, and a quick-actions strip.
+═══════════════════════════════════════════════════════════════════ */
+function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, studentActivity, dayData, startDate, courseId, onSelectDay, readOnly = false }) {
+  const act = studentActivity || {};
+  const goToDay = readOnly ? null : onSelectDay;
+
+  /* ── Build a reverse map: planDayIndex → dateKey (for status lookups) ── */
+  // dayMap = { "YYYY-MM-DD": planDayIndex }  (built by buildDayMap)
+  // planDays items only have { dayNum, topic } — no .key — so we build it here
+  const indexToKey = {};   // { planDayIndex: "YYYY-MM-DD" }
+  for (const [dateKey, idx] of Object.entries(dayMap)) {
+    indexToKey[idx] = dateKey;
+  }
+
+  // Enrich planDays with their resolved date key
+  const enrichedDays = planDays.map((d, i) => ({ ...d, key: indexToKey[i] || null }));
+
+  /* ── Derived stats ── */
+  const totalDays   = planDays.length;
+  const completed   = enrichedDays.filter(d => d.key && dayStatus[d.key] === "Completed").length;
+  const inProgress  = enrichedDays.filter(d => d.key && dayStatus[d.key] === "In Progress").length;
+  const pct         = totalDays ? Math.round((completed / totalDays) * 100) : 0;
+
+  const codeRuns    = Object.values(act.codeRuns    || {}).reduce((a, v) => a + v, 0);
+  const practicals  = Object.values(act.practicals  || {}).reduce((a, v) => a + v, 0);
+  const exViews     = Object.keys(act.exampleViews  || {}).length;
+  const resViews    = Object.keys(act.resourceViews || {}).length;
+  const assigns     = Object.keys(act.assignSubmits || {}).length;
+  const dataGens    = Object.keys(act.dataGenUses   || {}).length;
+
+  // Quiz stats — sourced from lms_student_activity.quizScores (persisted immediately on submit)
+  const quizVals    = Object.values(act.quizScores || {});
+  const quizTaken   = quizVals.length;
+  const avgQuizPct  = quizTaken > 0
+    ? Math.round(quizVals.reduce((a, q) => a + (q.pct || 0), 0) / quizTaken)
+    : null;
+
+  const joinedAt    = act.joinedAt ? new Date(act.joinedAt).toLocaleDateString() : "—";
+  const lastSeen    = act.lastSeen ? new Date(act.lastSeen).toLocaleString()     : "—";
+
+  /* ── Recent 5 days with any activity ── */
+  const recentDays = enrichedDays
+    .filter(d => d.key && dayStatus[d.key] && dayStatus[d.key] !== "Not Started")
+    .slice(-5)
+    .reverse();
+
+  /* ── Next up: first non-Completed day ── */
+  const nextDay = enrichedDays.find(d => !d.key || !dayStatus[d.key] || dayStatus[d.key] === "Not Started");
+
+  /* ── Trainer unlock status ── */
+  const unlockedByTrainer = enrichedDays.filter(d => d.key && trainerDayStatus[d.key] && trainerDayStatus[d.key] !== "Not Started").length;
+
+  /* ── Tiny helpers ── */
+  const card = (style) => ({
+    background: "#fff",
+    borderRadius: 14,
+    padding: "18px 20px",
+    boxShadow: "0 1px 6px rgba(0,0,0,.07)",
+    border: "1px solid #f1f5f9",
+    ...style,
+  });
+
+  const statBox = (icon, value, label, color) => (
+    <div style={{ ...card(), display:"flex", alignItems:"center", gap:14, minWidth:0 }}>
+      <div style={{ width:44, height:44, borderRadius:12, background:`${color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>{icon}</div>
+      <div style={{ minWidth:0 }}>
+        <div style={{ fontSize:24, fontWeight:800, color:"#0f172a", lineHeight:1 }}>{value}</div>
+        <div style={{ fontSize:12, color:"#64748b", marginTop:3, whiteSpace:"nowrap" }}>{label}</div>
+      </div>
+    </div>
+  );
+
+  const statusColor = { "Completed":"#22c55e", "In Progress":"#f59e0b", "Not Started":"#e2e8f0" };
+  const statusDot   = (s) => <span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:statusColor[s]||"#e2e8f0", marginRight:6 }} />;
+
+  return (
+    <div style={{ maxWidth:860, margin:"0 auto", display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* ── Header ── */}
+      <div style={{ ...card({ background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", border:"none", color:"#fff" }) }}>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>📊 My Dashboard</div>
+        <div style={{ fontSize:13, opacity:.85 }}>Joined {joinedAt} · Last active {lastSeen}</div>
+        {courseId && <div style={{ fontSize:11, opacity:.6, marginTop:4 }}>Course ID: {courseId}</div>}
+      </div>
+
+      {/* ── Progress bar card ── */}
+      <div style={card()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+          <span style={{ fontWeight:700, fontSize:15, color:"#0f172a" }}>Overall Progress</span>
+          <span style={{ fontWeight:800, fontSize:22, color:"#3b82f6" }}>{pct}%</span>
+        </div>
+        <div style={{ height:12, borderRadius:99, background:"#e2e8f0", overflow:"hidden" }}>
+          <div style={{ height:"100%", width:`${pct}%`, background:"linear-gradient(90deg,#3b82f6,#8b5cf6)", borderRadius:99, transition:"width .4s" }} />
+        </div>
+        <div style={{ display:"flex", gap:20, marginTop:12, fontSize:12.5, color:"#64748b" }}>
+          <span>✅ {completed} Completed</span>
+          <span>🔄 {inProgress} In Progress</span>
+          <span>📋 {totalDays - completed - inProgress} Not Started</span>
+          <span style={{ marginLeft:"auto" }}>🔓 {unlockedByTrainer} unlocked by trainer</span>
+        </div>
+      </div>
+
+      {/* ── Stat boxes grid ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 }}>
+        {statBox("💻", codeRuns,   "Code Runs",         "#3b82f6")}
+        {statBox("⚗️", practicals,  "Practicals",        "#f97316")}
+        {statBox("📖", exViews,    "Examples Viewed",   "#8b5cf6")}
+        {statBox("🔗", resViews,   "Resources Viewed",  "#06b6d4")}
+        {statBox("📝", assigns,    "Assignments Done",  "#10b981")}
+        {statBox("🤖", dataGens,   "Data Gen Uses",     "#f59e0b")}
+        {statBox("🎯", avgQuizPct !== null ? `${avgQuizPct}%` : "—", `Quiz Avg (${quizTaken} taken)`, "#6366f1")}
+      </div>
+
+      {/* ── Quiz breakdown (only if quizzes taken) ── */}
+      {quizTaken > 0 && (
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>🎯 Quiz Scores</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+            {Object.entries(act.quizScores || {}).map(([dayKey, qs]) => {
+              const day = enrichedDays.find(d => d.key === dayKey);
+              const pctColor = qs.pct >= 80 ? "#16a34a" : qs.pct >= 50 ? "#d97706" : "#dc2626";
+              return (
+                <div key={dayKey} style={{ padding:"8px 14px", borderRadius:10, background:"#f8fafc", border:"1px solid #e2e8f0", fontSize:12.5 }}>
+                  <div style={{ fontWeight:700, color:"#334155" }}>{day ? `Day ${day.dayNum}: ${day.topic}` : dayKey}</div>
+                  <div style={{ fontWeight:800, color:pctColor, fontSize:16, marginTop:2 }}>{qs.pct}%</div>
+                  <div style={{ fontSize:11, color:"#94a3b8" }}>{qs.score}/{qs.total} · {new Date(qs.date).toLocaleDateString()}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Next up + Recent days side-by-side ── */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+
+        {/* Next day to study */}
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>🚀 Up Next</div>
+          {nextDay ? (
+            <div
+              onClick={() => goToDay?.(nextDay)}
+              style={{ padding:"12px 14px", borderRadius:10, background:"#f0f9ff", border:"1.5px solid #bae6fd", cursor:goToDay?"pointer":"default", transition:"background .15s" }}
+              onMouseEnter={e => e.currentTarget.style.background="#e0f2fe"}
+              onMouseLeave={e => e.currentTarget.style.background="#f0f9ff"}
+            >
+              <div style={{ fontWeight:700, color:"#0369a1", fontSize:13 }}>Day {nextDay.dayNum}: {nextDay.topic}</div>
+              {nextDay.subtopics?.length > 0 && (
+                <div style={{ fontSize:11.5, color:"#64748b", marginTop:4 }}>{nextDay.subtopics.slice(0,2).join(" · ")}{nextDay.subtopics.length > 2 ? " …" : ""}</div>
+              )}
+              <div style={{ fontSize:11, color:"#94a3b8", marginTop:6 }}>Tap to open →</div>
+            </div>
+          ) : (
+            <div style={{ fontSize:13, color:"#10b981", fontWeight:600 }}>🎉 All days completed!</div>
+          )}
+        </div>
+
+        {/* Recent activity */}
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>🕒 Recent Days</div>
+          {recentDays.length === 0 ? (
+            <div style={{ fontSize:13, color:"#94a3b8" }}>No activity yet — open the Calendar to start!</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+              {recentDays.map(d => (
+                <div
+                  key={d.key}
+                  onClick={() => goToDay?.(d)}
+                  style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 12px", borderRadius:9, background:"#f8fafc", cursor:goToDay?"pointer":"default", fontSize:12.5 }}
+                  onMouseEnter={e => e.currentTarget.style.background="#f1f5f9"}
+                  onMouseLeave={e => e.currentTarget.style.background="#f8fafc"}
+                >
+                  <span style={{ fontWeight:600, color:"#334155", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:150 }}>
+                    {statusDot(d.key ? dayStatus[d.key] : undefined)}Day {d.dayNum}: {d.topic}
+                  </span>
+                  <span style={{ fontSize:11, color:statusColor[d.key ? dayStatus[d.key] : ""]||"#94a3b8", fontWeight:700, flexShrink:0, marginLeft:8 }}>
+                    {(d.key && dayStatus[d.key]) || "Not Started"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Per-day breakdown table (top 10 with any status) ── */}
+      {enrichedDays.filter(d => d.key && dayStatus[d.key]).length > 0 && (
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>📅 Day-by-Day Status</div>
+          <div style={{ overflowX:"auto" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+              <thead>
+                <tr style={{ background:"#f8fafc" }}>
+                  {["Day","Topic","My Status","Trainer Status","Quiz Score","Code Runs","Practicals"].map(h => (
+                    <th key={h} style={{ padding:"8px 12px", textAlign:"left", fontWeight:700, color:"#475569", borderBottom:"1px solid #e2e8f0", whiteSpace:"nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {enrichedDays.filter(d => d.key && dayStatus[d.key]).slice(0, 20).map((d, i) => (
+                  <tr
+                    key={d.key}
+                    onClick={() => goToDay?.(d)}
+                    style={{ background: i%2===0?"#fff":"#fafafa", cursor:goToDay?"pointer":"default" }}
+                    onMouseEnter={e => e.currentTarget.style.background="#f0f9ff"}
+                    onMouseLeave={e => e.currentTarget.style.background=i%2===0?"#fff":"#fafafa"}
+                  >
+                    <td style={{ padding:"8px 12px", color:"#64748b", fontWeight:600 }}>{d.dayNum}</td>
+                    <td style={{ padding:"8px 12px", color:"#0f172a", maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.topic}</td>
+                    <td style={{ padding:"8px 12px" }}>
+                      <span style={{ padding:"2px 10px", borderRadius:99, fontSize:11, fontWeight:700, background:`${statusColor[dayStatus[d.key]]||"#e2e8f0"}20`, color:statusColor[dayStatus[d.key]]||"#64748b" }}>
+                        {dayStatus[d.key] || "—"}
+                      </span>
+                    </td>
+                    <td style={{ padding:"8px 12px" }}>
+                      <span style={{ padding:"2px 10px", borderRadius:99, fontSize:11, fontWeight:700, background:`${statusColor[trainerDayStatus[d.key]]||"#e2e8f0"}20`, color:statusColor[trainerDayStatus[d.key]]||"#94a3b8" }}>
+                        {trainerDayStatus[d.key] || "—"}
+                      </span>
+                    </td>
+                    <td style={{ padding:"8px 12px", fontWeight:700, textAlign:"center" }}>
+                      {(act.quizScores||{})[d.key]
+                        ? <span style={{ color:(act.quizScores[d.key].pct>=80?"#16a34a":act.quizScores[d.key].pct>=50?"#d97706":"#dc2626") }}>{act.quizScores[d.key].pct}%</span>
+                        : <span style={{ color:"#cbd5e1" }}>—</span>}
+                    </td>
+                    <td style={{ padding:"8px 12px", color:"#3b82f6", fontWeight:600, textAlign:"center" }}>{(act.codeRuns||{})[d.key] || "—"}</td>
+                    <td style={{ padding:"8px 12px", color:"#f97316", fontWeight:600, textAlign:"center" }}>{(act.practicals||{})[d.key] || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    ORIGINAL LMS APP (inner course workspace) — Supabase-backed
 ═══════════════════════════════════════════════════════════════════ */
@@ -3294,6 +3739,18 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const withJoin = { ...act, joinedAt: act.joinedAt || new Date().toISOString(), lastSeen: new Date().toISOString() };
         setStudentActivity(withJoin);
         studentActivityRef.current = withJoin;
+        // FIX: hydrate dayData.quizScore from Supabase activity so "Last score" survives refresh.
+        // All other stats (codeRuns, practicals, exampleViews etc.) are read directly from
+        // studentActivity state — quizScore is the only one also embedded in dayData.
+        if (Object.keys(withJoin.quizScores || {}).length > 0) {
+          setDayData(prev => {
+            const next = { ...prev };
+            for (const [dayKey, qs] of Object.entries(withJoin.quizScores)) {
+              next[dayKey] = { ...(next[dayKey] || {}), quizScore: qs };
+            }
+            return next;
+          });
+        }
       } else if (course.dayStatus) {
         setDayStatus(course.dayStatus);
       }
@@ -3390,6 +3847,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           }
           for (const [k, v] of Object.entries(contentByDay)) {
             next[k] = { ...(next[k] || {}), ...v };
+          }
+          // FIX: re-hydrate quizScore from Supabase studentActivity on every sync
+          // so "Last score" badge in QuizTab never goes stale after a refresh or Realtime event.
+          const currentAct = studentActivityRef.current || {};
+          for (const [dayKey, qs] of Object.entries(currentAct.quizScores || {})) {
+            next[dayKey] = { ...(next[dayKey] || {}), quizScore: qs };
           }
           return next;
         });
@@ -3650,7 +4113,23 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         }
       }
     }
-  }, [studentMode, sb, courseId, trainerId]);
+    // FIX: Student quiz score — updateDay only updates in-memory dayData (not persisted for students).
+    // quizScore is already tracked via trackActivity("quizScore",...) → lms_student_activity.
+    // But dayData.quizScore (shown as "Last score") is lost on refresh. Persist it immediately here.
+    if (studentMode && sb && courseId && studentId && patch.quizScore) {
+      setStudentActivity(prev => {
+        const next = {
+          ...prev,
+          lastSeen: new Date().toISOString(),
+          quizScores: { ...(prev.quizScores || {}), [key]: patch.quizScore },
+        };
+        studentActivityRef.current = next;
+        sbSaveStudentActivity(sb, studentId, courseId, next)
+          .catch(e => console.warn("Quiz score persist failed:", e.message));
+        return next;
+      });
+    }
+  }, [studentMode, sb, courseId, trainerId, studentId]);
 
   /* ════ AI caller ════ */
   const callAI = useCallback(async (messages) => {
@@ -4477,6 +4956,264 @@ Hard rules:
           .lms-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:199}
           .lms-mobile-menu-btn{display:none}
           .lms-desktop-collapse-btn{display:flex}
+
+          /* ══════════════════════════════════════════════════════
+             CONTENT DESIGN SYSTEM  v12 — Neumorphic × Liquid Glass
+             Mirrors LandingPage.jsx aesthetic exactly
+          ══════════════════════════════════════════════════════ */
+
+          /* ── Shell palette ── */
+          :root{
+            --shell:   #EDF1F7;
+            --shellDp: #E4E9F2;
+            --sdw-d:   #C4CDD9;
+            --sdw-l:   #FFFFFF;
+            --text:    #1E2A3B;
+            --textMid: #64748B;
+            --textLt:  #94A3B8;
+            --violet:  #8B5CF6;
+            --violetL: #A78BFA;
+            --teal:    #14B8A6;
+            --tealL:   #5EEAD4;
+            --blue:    #6366F1;
+            --blueL:   #818CF8;
+            --pink:    #E879F9;
+          }
+
+          /* ── Raised shadow helpers ── */
+          .neu-sm  { box-shadow: 6px 6px 14px var(--sdw-d), -4px -4px 10px var(--sdw-l); }
+          .neu-md  { box-shadow: 12px 12px 28px var(--sdw-d), -8px -8px 20px var(--sdw-l); }
+          .neu-lg  { box-shadow: 20px 20px 48px var(--sdw-d), -12px -12px 32px var(--sdw-l); }
+          .neu-in  { box-shadow: inset 4px 4px 10px var(--sdw-d), inset -3px -3px 8px var(--sdw-l); }
+
+          /* ── Base body ── */
+          .pr-body{ font-family:'Plus Jakarta Sans',system-ui,sans-serif; color:var(--text); }
+
+          /* ── H1 — gradient text, neu underline ── */
+          .pr-h1{
+            font-size:22px; font-weight:800; letter-spacing:-.5px; line-height:1.2;
+            margin:0 0 22px; padding-bottom:16px;
+            background:linear-gradient(135deg,var(--violet),var(--blue));
+            -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
+            border-bottom: 2px solid var(--sdw-d);
+          }
+
+          /* ── H2 — neumorphic pill-band ── */
+          .pr-h2{
+            font-size:15.5px; font-weight:800; color:var(--text); letter-spacing:-.2px; line-height:1.35;
+            margin:24px 0 12px;
+            padding:10px 18px;
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            box-shadow: 6px 6px 14px var(--sdw-d), -4px -4px 10px var(--sdw-l);
+            border-radius:12px;
+            border:1px solid var(--sdw-l);
+            display:flex; align-items:center; gap:10px;
+          }
+          .pr-h2::before{
+            content:''; width:4px; height:16px; border-radius:2px; flex-shrink:0;
+            background:linear-gradient(180deg,var(--violet),var(--blue));
+          }
+
+          /* ── H3 — small eyebrow label ── */
+          .pr-h3{
+            font-size:10.5px; font-weight:800; color:var(--violet);
+            text-transform:uppercase; letter-spacing:.12em;
+            margin:20px 0 8px;
+            display:flex; align-items:center; gap:8px;
+          }
+          .pr-h3::after{ content:''; flex:1; height:1px; background:linear-gradient(90deg,rgba(139,92,246,.3),transparent); }
+
+          /* ── Body text ── */
+          .pr-p{ font-size:14.5px; color:var(--textMid); line-height:1.85; margin:7px 0; }
+          .pr-bold-line{
+            font-size:14.5px; font-weight:700; color:var(--text);
+            margin:14px 0 5px; line-height:1.5;
+            padding:8px 14px 8px 18px;
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            border-radius:10px; border:1px solid var(--sdw-l);
+            border-left:3px solid var(--violet);
+            box-shadow: 4px 4px 10px var(--sdw-d),-3px -3px 8px var(--sdw-l);
+          }
+
+          /* ── Bullet list — raised card rows ── */
+          .pr-ul{ display:flex; flex-direction:column; gap:0; margin:10px 0; padding:0; list-style:none;
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            border-radius:16px; border:1px solid var(--sdw-l);
+            box-shadow:6px 6px 14px var(--sdw-d),-4px -4px 10px var(--sdw-l);
+            overflow:hidden;
+          }
+          .pr-li{
+            display:flex; gap:12px; align-items:flex-start;
+            font-size:14px; color:var(--textMid); line-height:1.75;
+            padding:10px 16px; border-bottom:1px solid rgba(196,205,217,.4);
+            transition:background .15s;
+          }
+          .pr-li:last-child{ border-bottom:none; }
+          .pr-li:hover{ background:rgba(139,92,246,.05); }
+          .pr-li-dot{
+            width:22px; height:22px; border-radius:8px; flex-shrink:0; margin-top:1px;
+            background:linear-gradient(135deg,var(--violet),var(--blue));
+            box-shadow:0 3px 8px rgba(139,92,246,.35), inset 0 1px 0 rgba(255,255,255,.25);
+            display:flex; align-items:center; justify-content:center;
+          }
+          .pr-li-dot::after{ content:''; width:5px; height:5px; border-radius:50%; background:#fff; }
+
+          /* ── Numbered list — individual raised cards ── */
+          .pr-ol{ display:flex; flex-direction:column; gap:8px; margin:10px 0; padding:0; list-style:none; }
+          .pr-oli{
+            display:flex; gap:13px; align-items:flex-start;
+            font-size:14px; color:var(--textMid); line-height:1.75;
+            padding:12px 16px; border-radius:14px;
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            box-shadow:6px 6px 14px var(--sdw-d),-4px -4px 10px var(--sdw-l);
+            border:1px solid var(--sdw-l);
+            transition:transform .18s, box-shadow .18s;
+          }
+          .pr-oli:hover{ transform:translateY(-2px); box-shadow:12px 12px 28px var(--sdw-d),-8px -8px 20px var(--sdw-l); }
+          .pr-oli-num{
+            min-width:28px; height:28px; border-radius:9px; flex-shrink:0;
+            background:linear-gradient(135deg,var(--violet),var(--blue));
+            color:#fff; font-size:12px; font-weight:800; letter-spacing:-.3px;
+            display:flex; align-items:center; justify-content:center;
+            box-shadow:0 3px 10px rgba(139,92,246,.4), inset 0 1px 0 rgba(255,255,255,.3);
+          }
+
+          /* ── Inline code — glass pill ── */
+          .pr-code{
+            background:rgba(139,92,246,.1); border:1px solid rgba(139,92,246,.3);
+            padding:2px 8px; border-radius:6px;
+            font-family:'JetBrains Mono','Fira Code',monospace;
+            font-size:12.5px; color:var(--violet); font-weight:600; white-space:nowrap;
+          }
+
+          /* ── Callout boxes ── */
+          .pr-callout{
+            display:flex; gap:12px; padding:13px 16px; border-radius:14px; margin:12px 0;
+            backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+            border:1.5px solid; box-shadow:0 8px 32px rgba(0,0,0,.07), inset 0 1px 0 rgba(255,255,255,.7);
+          }
+
+          /* ── Divider ── */
+          .pr-hr{ border:none; margin:22px 0; height:1px;
+            background:linear-gradient(90deg,transparent,var(--sdw-d) 30%,var(--sdw-d) 70%,transparent);
+          }
+
+          /* ── Code block — terminal chrome ── */
+          .pr-codeblock{ border-radius:16px; overflow:hidden; margin:20px 0;
+            box-shadow: 12px 12px 28px var(--sdw-d), -8px -8px 20px var(--sdw-l);
+            border:1px solid rgba(255,255,255,.04);
+          }
+          .pr-codeblock-header{
+            display:flex; align-items:center; justify-content:space-between;
+            background:#1a2332; padding:10px 18px;
+            border-bottom:1px solid rgba(255,255,255,.06);
+          }
+          .pr-codeblock-dots{ display:flex; gap:7px; align-items:center; }
+          .pr-codeblock-dot{ width:12px; height:12px; border-radius:50%; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+          .pr-codeblock-lang{
+            font-size:10.5px; font-weight:800; color:#64748b;
+            letter-spacing:.12em; text-transform:uppercase;
+            background:rgba(255,255,255,.06); padding:3px 10px; border-radius:20px;
+            border:1px solid rgba(255,255,255,.08);
+          }
+          .pr-codeblock-body{
+            background:#0d1117; padding:20px 22px;
+            font-family:'JetBrains Mono','Fira Code',monospace;
+            font-size:13px; line-height:1.8; color:#c9d1d9;
+            white-space:pre-wrap; word-break:break-all; overflow-x:auto;
+          }
+          .pr-codeblock-btn{
+            background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12);
+            border-radius:8px; padding:5px 14px; color:#94a3b8; font-size:11.5px;
+            font-weight:700; cursor:pointer; display:flex; align-items:center; gap:5px;
+            transition:all .15s; font-family:inherit; letter-spacing:.02em;
+          }
+          .pr-codeblock-btn:hover{ background:rgba(255,255,255,.14); color:#e2e8f0; }
+
+          /* ── Notebook section card — raised neumorphic ── */
+          .pr-nb-section{
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            border-radius:24px; border:1px solid var(--sdw-l);
+            box-shadow:12px 12px 28px var(--sdw-d),-8px -8px 20px var(--sdw-l);
+            margin-bottom:22px; overflow:hidden;
+            animation:lms-in .25s ease; transition:transform .25s, box-shadow .25s;
+          }
+          .pr-nb-section:hover{ transform:translateY(-4px); box-shadow:20px 20px 48px var(--sdw-d),-12px -12px 32px var(--sdw-l); }
+          .pr-nb-head{
+            padding:18px 24px;
+            border-bottom:1px solid var(--sdw-d);
+            display:flex; align-items:center; gap:16px;
+          }
+          .pr-nb-icon{
+            width:44px; height:44px; border-radius:14px; flex-shrink:0;
+            display:flex; align-items:center; justify-content:center; font-size:22px;
+            box-shadow: 4px 4px 12px rgba(0,0,0,.1), inset 0 1px 0 rgba(255,255,255,.65);
+          }
+          .pr-nb-body{ padding:24px 26px; }
+
+          /* ── Code quick-links ── */
+          .pr-codelinks{
+            display:flex; flex-wrap:wrap; gap:10px; padding:18px 22px; margin-top:24px;
+            background:linear-gradient(145deg,var(--shell),var(--shellDp));
+            border-radius:18px; border:1px solid var(--sdw-l);
+            box-shadow:6px 6px 14px var(--sdw-d),-4px -4px 10px var(--sdw-l);
+          }
+          .pr-codelinks-label{
+            width:100%; margin-bottom:8px;
+            font-size:10px; font-weight:800; color:var(--violet);
+            text-transform:uppercase; letter-spacing:.12em;
+            display:flex; align-items:center; gap:8px;
+          }
+          .pr-codelinks-label::after{ content:''; flex:1; height:1px; background:rgba(139,92,246,.2); }
+
+          /* ── Content section cards (Tasks / Challenges / Examples) ── */
+          .pr-section-card{
+            border-radius:20px; overflow:hidden; margin-bottom:16px;
+            box-shadow:12px 12px 28px var(--sdw-d),-8px -8px 20px var(--sdw-l);
+            border:1px solid var(--sdw-l);
+            transition:transform .25s, box-shadow .25s;
+          }
+          .pr-section-card:hover{ transform:translateY(-4px); box-shadow:20px 20px 48px var(--sdw-d),-12px -12px 32px var(--sdw-l); }
+          .pr-section-strip{ padding:16px 22px; display:flex; align-items:center; gap:14px; }
+          .pr-section-badge{
+            font-size:10px; font-weight:800; padding:4px 12px; border-radius:99px;
+            letter-spacing:.07em; text-transform:uppercase; flex-shrink:0;
+            background:rgba(255,255,255,.2); color:#fff; border:1px solid rgba(255,255,255,.3);
+          }
+
+          /* ── Teaching guide cards ── */
+          .pr-guide-card{
+            border-radius:24px; overflow:hidden; margin-bottom:18px;
+            box-shadow:12px 12px 28px var(--sdw-d),-8px -8px 20px var(--sdw-l);
+            border:1px solid var(--sdw-l);
+            transition:transform .25s, box-shadow .25s;
+          }
+          .pr-guide-card:hover{ transform:translateY(-4px); box-shadow:20px 20px 48px var(--sdw-d),-12px -12px 32px var(--sdw-l); }
+          .pr-guide-strip{ padding:18px 24px; display:flex; align-items:center; gap:16px; }
+          .pr-guide-icon{
+            width:44px; height:44px; border-radius:13px; flex-shrink:0;
+            background:rgba(255,255,255,.2); backdrop-filter:blur(8px);
+            display:flex; align-items:center; justify-content:center; font-size:22px;
+            border:1px solid rgba(255,255,255,.3);
+            box-shadow:0 2px 8px rgba(0,0,0,.12);
+          }
+          .pr-guide-body{ padding:22px 26px; }
+
+          /* ── Quiz explanation — glass teal/violet ── */
+          .pr-explanation{
+            margin-top:16px; border-radius:14px; overflow:hidden;
+            background:linear-gradient(140deg,rgba(99,102,241,.1),rgba(139,92,246,.06));
+            backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+            border:1.5px solid rgba(99,102,241,.35);
+            box-shadow:0 8px 32px rgba(0,0,0,.06), inset 0 1px 0 rgba(255,255,255,.7);
+          }
+          .pr-explanation-head{
+            padding:9px 16px; font-size:10.5px; font-weight:800;
+            color:var(--blue); letter-spacing:.12em; text-transform:uppercase;
+            display:flex; align-items:center; gap:8px;
+            border-bottom:1px solid rgba(99,102,241,.2);
+          }
+          .pr-explanation-body{ padding:14px 18px; font-size:14px; color:var(--textMid); line-height:1.85; }
         `}</style>
 
         {!isOnline && (
@@ -4498,9 +5235,11 @@ Hard rules:
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
-              ...(studentMode ? [] : [{ id:"setup",    ic:"upload",  label:"Setup Plan" }]),
+              ...(studentMode ? [] : [{ id:"setup",       ic:"upload",   label:"Setup Plan"         }]),
+              ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
-              ...(studentMode ? [] : [{ id:"settings", ic:"settings",label:"Settings" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"teacher",  label:"Student Performance" }]),
+              ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}>
                 <Ic n={item.ic} s={16} />
@@ -4566,7 +5305,7 @@ Hard rules:
             <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
               <span style={{ color:"#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color:"#0f172a", fontWeight:600 }}>
-                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
+                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
@@ -4586,6 +5325,7 @@ Hard rules:
 
           <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 80px", minHeight:0 }}>
             <ErrorBoundary>
+              {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} />}
               {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
               {parsePlanConfirm && (
@@ -4666,6 +5406,14 @@ Hard rules:
                   setStartDate={setStartDate} setMonfri={setMonfri}
                   setDayStatus={setDayStatus} setDayData={setDayData}
                   setDayOverrides={setDayOverrides}
+                />
+              )}
+              {!leaderboardOpen && page==="performance" && !studentMode && courseId && (
+                <TrainerStudentPerformance
+                  sb={sb}
+                  courseId={courseId}
+                  planDays={planDays}
+                  dayMap={dayMap}
                 />
               )}
               {/* ── LEADERBOARD — visible to both trainer and student ── */}
@@ -7348,37 +8096,101 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
 ═══════════════════════════════════════════════════════════════════ */
 function NotebookView({ content, codeBlocks, onUseCode }) {
   if (!content) return null;
-  const parts = content.split(/(```(?:python)?\n[\s\S]*?```)/g);
+
+  const rawSections = content.split(/(?=^## )/m).filter(s => s.trim());
+  const sections = rawSections.length > 1 ? rawSections : [content];
+
+  // Glass tints from LandingPage glassStyle() — violet/teal/blue/pink cycle
+  const NB_THEMES = [
+    { iconBg:"linear-gradient(135deg,#8B5CF6,#6366F1)", headGlass:"rgba(139,92,246,0.10)", headBorder:"rgba(139,92,246,0.35)", accentBar:"#8B5CF6",  emoji:"📘", tintColor:"#8B5CF6" },
+    { iconBg:"linear-gradient(135deg,#14B8A6,#5EEAD4)", headGlass:"rgba(20,184,166,0.10)",  headBorder:"rgba(20,184,166,0.35)",  accentBar:"#14B8A6",  emoji:"🔬", tintColor:"#14B8A6" },
+    { iconBg:"linear-gradient(135deg,#6366F1,#818CF8)", headGlass:"rgba(99,102,241,0.10)",  headBorder:"rgba(99,102,241,0.35)",  accentBar:"#6366F1",  emoji:"⚡", tintColor:"#6366F1" },
+    { iconBg:"linear-gradient(135deg,#E879F9,#A78BFA)", headGlass:"rgba(232,121,249,0.10)", headBorder:"rgba(232,121,249,0.35)", accentBar:"#E879F9",  emoji:"🎯", tintColor:"#C026D3" },
+    { iconBg:"linear-gradient(135deg,#14B8A6,#6366F1)", headGlass:"rgba(20,184,166,0.09)",  headBorder:"rgba(20,184,166,0.30)",  accentBar:"#14B8A6",  emoji:"💡", tintColor:"#14B8A6" },
+    { iconBg:"linear-gradient(135deg,#8B5CF6,#E879F9)", headGlass:"rgba(139,92,246,0.09)",  headBorder:"rgba(139,92,246,0.30)",  accentBar:"#8B5CF6",  emoji:"🛠️", tintColor:"#8B5CF6" },
+  ];
+
   return (
     <div>
-      {parts.map((part, i) => {
-        const codeMatch = part.match(/```(?:python)?\n([\s\S]*?)```/);
-        if (codeMatch) {
-          const code = codeMatch[1];
-          return (
-            <div key={i} style={{ marginBottom:14 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#1e293b", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
-                <span style={{ fontSize:11.5, fontWeight:600, color:"#94a3b8" }}>Python</span>
-                <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#334155", color:"#e2e8f0", borderRadius:6 }} onClick={()=>onUseCode(code)}>
-                  <Ic n="play" s={11} c="#e2e8f0"/>Use in Compiler
-                </button>
+      {/* Section progress bar */}
+      {sections.length > 1 && (
+        <div style={{ display:"flex", gap:4, marginBottom:22, alignItems:"center" }}>
+          {sections.map((_, si) => {
+            const t = NB_THEMES[si % NB_THEMES.length];
+            return <div key={si} style={{ flex:1, height:4, borderRadius:4, background:t.accentBar, opacity:.4, boxShadow:`0 2px 6px ${t.accentBar}44` }}/>;
+          })}
+          <span style={{ fontSize:10.5, fontWeight:800, color:"#94A3B8", marginLeft:10, letterSpacing:".1em", textTransform:"uppercase", whiteSpace:"nowrap" }}>
+            {sections.length} Sections
+          </span>
+        </div>
+      )}
+
+      {sections.map((section, si) => {
+        const t = NB_THEMES[si % NB_THEMES.length];
+        const parts = section.split(/(```(?:python)?\n[\s\S]*?```)/g);
+        const headingMatch = section.match(/^## (.+)/m);
+        const sectionTitle = headingMatch ? headingMatch[1].trim() : null;
+
+        return (
+          <div key={si} className="pr-nb-section" style={{ borderLeft:`3px solid ${t.accentBar}` }}>
+            {sectionTitle && (
+              <div className="pr-nb-head" style={{
+                background:`linear-gradient(140deg, ${t.headGlass.replace("0.10","0.13")}, ${t.headGlass.replace("0.10","0.07")})`,
+                backdropFilter:"blur(18px)", WebkitBackdropFilter:"blur(18px)",
+                borderBottom:`1px solid ${t.headBorder}`,
+              }}>
+                <div className="pr-nb-icon" style={{ background: t.iconBg, boxShadow:`4px 4px 12px rgba(0,0,0,.12), 0 4px 16px ${t.accentBar}44, inset 0 1px 0 rgba(255,255,255,.3)` }}>
+                  <span style={{ fontSize:22 }}>{t.emoji}</span>
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <p style={{ fontWeight:800, fontSize:16, color:"#1E2A3B", margin:0, letterSpacing:"-.3px", lineHeight:1.3 }}>{sectionTitle}</p>
+                  <p style={{ fontSize:10.5, color:t.tintColor, fontWeight:800, margin:"3px 0 0", letterSpacing:".1em", textTransform:"uppercase" }}>
+                    Section {si + 1} of {sections.length}
+                  </p>
+                </div>
+                <div style={{ width:34, height:34, borderRadius:11, background:`linear-gradient(145deg,#EDF1F7,#E4E9F2)`, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:13, fontWeight:900, color:t.tintColor, boxShadow:`6px 6px 14px #C4CDD9,-4px -4px 10px #FFF` }}>
+                  {si + 1}
+                </div>
               </div>
-              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#0f172a", color:"#e2e8f0" }}>{code}</div>
+            )}
+            <div className="pr-nb-body">
+              {parts.map((part, pi) => {
+                const codeMatch = part.match(/```(?:python)?\n([\s\S]*?)```/);
+                if (codeMatch) {
+                  const code = codeMatch[1];
+                  return (
+                    <div key={pi} className="pr-codeblock">
+                      <div className="pr-codeblock-header">
+                        <div className="pr-codeblock-dots">
+                          <div className="pr-codeblock-dot" style={{ background:"#FF5F57" }}/>
+                          <div className="pr-codeblock-dot" style={{ background:"#FEBC2E" }}/>
+                          <div className="pr-codeblock-dot" style={{ background:"#28C840" }}/>
+                        </div>
+                        <span className="pr-codeblock-lang">Python</span>
+                        <button className="pr-codeblock-btn" onClick={() => onUseCode(code)}>
+                          <Ic n="play" s={11} c="#94a3b8"/> Run in Compiler
+                        </button>
+                      </div>
+                      <div className="pr-codeblock-body">{code}</div>
+                    </div>
+                  );
+                }
+                const bodyText = sectionTitle ? part.replace(/^## .+\n?/m, "") : part;
+                return <MdRenderer key={pi} text={bodyText}/>;
+              })}
             </div>
-          );
-        }
-        return <MdRenderer key={i} text={part} />;
-      })}
-      {codeBlocks.length > 0 && (
-        <div style={{ marginTop:16, padding:"12px 16px", background:"#f8fafc", borderRadius:10, border:"1.5px solid #e2e8f0" }}>
-          <p style={{ fontSize:12, fontWeight:700, color:"#94a3b8", marginBottom:8 }}>QUICK ACCESS · {codeBlocks.length} CODE BLOCK{codeBlocks.length>1?"S":""}</p>
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            {codeBlocks.map((cb,i) => (
-              <button key={i} className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 12px" }} onClick={()=>onUseCode(cb)}>
-                <Ic n="code" s={12}/>Block {i+1}
-              </button>
-            ))}
           </div>
+        );
+      })}
+
+      {codeBlocks.length > 0 && (
+        <div className="pr-codelinks">
+          <p className="pr-codelinks-label">⚡ Quick-Access Code Blocks</p>
+          {codeBlocks.map((cb, i) => (
+            <button key={i} className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 12px" }} onClick={() => onUseCode(cb)}>
+              <Ic n="code" s={12}/> Block {i + 1}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -7391,13 +8203,11 @@ function renderInline(text) {
   const parts = text.split(/(`[^`]+`)/g);
   return parts.flatMap((part, j) => {
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2)
-      return [<code key={`c${j}`} style={{ background:"#f1f5f9", padding:"1px 6px", borderRadius:4, fontFamily:"monospace", fontSize:12.5, color:"#0f172a" }}>{part.slice(1,-1)}</code>];
+      return [<code key={`c${j}`} className="pr-code">{part.slice(1,-1)}</code>];
 
-    // Use non-global regexes for split (global regex consumed by split is fine),
-    // but use non-global regex for the .test() check to avoid lastIndex mutation
-    const boldItalicRe = /(\*\*\*[^*]+\*\*\*|___[^_]+___)/g;
-    const boldRe       = /(\*\*[^*]+\*\*|__[^_]+__)/g;
-    const italicRe     = /(\*[^*]+\*|_[^_]+_)/g;
+    const boldItalicRe   = /(\*\*\*[^*]+\*\*\*|___[^_]+___)/g;
+    const boldRe         = /(\*\*[^*]+\*\*|__[^_]+__)/g;
+    const italicRe       = /(\*[^*]+\*|_[^_]+_)/g;
     const boldItalicTest = /^\*\*\*[^*]+\*\*\*$|^___[^_]+___$/;
     const boldTest       = /^\*\*[^*]+\*\*$|^__[^_]+__$/;
     const italicTest     = /^\*[^*]+\*$|^_[^_]+_$/;
@@ -7415,41 +8225,117 @@ function renderInline(text) {
       });
       nodes = result;
     };
-    applyRe(boldItalicRe, boldItalicTest, (s,k) => <strong key={`bi${k}`}><em>{s.startsWith("___") ? s.slice(3,-3) : s.slice(3,-3)}</em></strong>);
+    applyRe(boldItalicRe, boldItalicTest, (s,k) => <strong key={`bi${k}`}><em>{s.slice(3,-3)}</em></strong>);
     applyRe(boldRe,       boldTest,       (s,k) => <strong key={`b${k}`}>{s.startsWith("__") ? s.slice(2,-2) : s.slice(2,-2)}</strong>);
     applyRe(italicRe,     italicTest,     (s,k) => <em key={`i${k}`}>{s.startsWith("_") ? s.slice(1,-1) : s.slice(1,-1)}</em>);
     return nodes;
   });
 }
 
-/* ─── Markdown renderer ─── */
+/* ─── Premium Markdown renderer ─── */
 function MdRenderer({ text }) {
   if (!text?.trim()) return null;
   const lines = text.split("\n");
-  return (
-    <div className="lms-prose" style={{ marginBottom:8 }}>
-      {lines.map((line, i) => {
-        if (line.startsWith("### ")) return <h3 key={i} style={{ fontSize:14, fontWeight:700, color:"#0f172a", margin:"14px 0 5px" }}>{renderInline(line.slice(4))}</h3>;
-        if (line.startsWith("## "))  return <h2 key={i} style={{ fontSize:16, fontWeight:700, color:"#0f172a", margin:"18px 0 6px", borderBottom:"1.5px solid #f1f5f9", paddingBottom:6 }}>{renderInline(line.slice(3))}</h2>;
-        if (line.startsWith("# "))   return <h1 key={i} style={{ fontSize:19, fontWeight:800, color:"#0f172a", margin:"20px 0 8px", letterSpacing:"-.3px" }}>{renderInline(line.slice(2))}</h1>;
-        // Whole-line bold — entire line wrapped in ** with no nested ** inside
-        const trimmed = line.trim();
-        if (trimmed.startsWith("**") && trimmed.endsWith("**") && trimmed.length > 4 && !trimmed.slice(2, -2).includes("**"))
-          return <p key={i} style={{ fontWeight:700, color:"#0f172a", margin:"5px 0" }}>{trimmed.slice(2, -2)}</p>;
-        if (line.match(/^[-*] /)) return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#3b82f6", fontWeight:700, marginTop:2, flexShrink:0 }}>•</span><span style={{ fontSize:13.5, color:"#374151", lineHeight:1.6 }}>{renderInline(line.slice(2))}</span></div>;
-        if (line.match(/^\d+\. /)) { const [num,...rest]=line.split(". "); return <div key={i} style={{ display:"flex", gap:8, margin:"3px 0 3px 8px" }}><span style={{ color:"#3b82f6", fontWeight:700, minWidth:20, flexShrink:0 }}>{num}.</span><span style={{ fontSize:13.5, color:"#374151", lineHeight:1.6 }}>{renderInline(rest.join(". "))}</span></div>; }
-        if (line.startsWith("---")) return <hr key={i} style={{ border:"none", borderTop:"1.5px solid #f1f5f9", margin:"14px 0" }}/>;
-        if (!line.trim()) return <div key={i} style={{ height:6 }}/>;
-        return <p key={i} style={{ fontSize:13.5, color:"#374151", lineHeight:1.7, margin:"3px 0" }}>{renderInline(line)}</p>;
-      })}
-    </div>
-  );
+  const nodes = [];
+  let olBuffer = [];
+  let ulBuffer = [];
+
+  const flushOl = () => {
+    if (!olBuffer.length) return;
+    nodes.push(
+      <ol key={`ol-${nodes.length}`} className="pr-ol">
+        {olBuffer.map(({ content, idx, i }) => (
+          <li key={i} className="pr-oli">
+            <span className="pr-oli-num">{idx}</span>
+            <span style={{ flex:1 }}>{renderInline(content)}</span>
+          </li>
+        ))}
+      </ol>
+    );
+    olBuffer = [];
+  };
+  const flushUl = () => {
+    if (!ulBuffer.length) return;
+    nodes.push(
+      <ul key={`ul-${nodes.length}`} className="pr-ul">
+        {ulBuffer.map(({ content, i }) => (
+          <li key={i} className="pr-li">
+            <span className="pr-li-dot"/>
+            <span style={{ flex:1 }}>{renderInline(content)}</span>
+          </li>
+        ))}
+      </ul>
+    );
+    ulBuffer = [];
+  };
+
+  // Detect callout lines: "> Note:" / "> ⚠️" / "> 💡" etc.
+  const renderCallout = (line, i) => {
+    const inner = line.slice(2).trim();
+    const isWarn  = /^(⚠️|Warning|Note:|Caution)/i.test(inner);
+    const isTip   = /^(💡|Tip:|Hint:|Pro tip)/i.test(inner);
+    const isInfo  = /^(ℹ️|Info:|Note:)/i.test(inner);
+    const cfg = isWarn
+      ? { bg:"#fffbeb", border:"#fde68a", color:"#92400e", icon:"⚠️", dot:"#f59e0b" }
+      : isTip
+      ? { bg:"#f0fdf4", border:"#bbf7d0", color:"#14532d", icon:"💡", dot:"#22c55e" }
+      : { bg:"#eff6ff", border:"#bfdbfe", color:"#1e40af", icon:"ℹ️", dot:"#3b82f6" };
+    return (
+      <div key={i} style={{ display:"flex", gap:12, padding:"12px 16px", background:cfg.bg, border:`1.5px solid ${cfg.border}`, borderRadius:10, margin:"10px 0" }}>
+        <span style={{ fontSize:16, flexShrink:0, marginTop:1 }}>{cfg.icon}</span>
+        <p style={{ fontSize:14, color:cfg.color, lineHeight:1.75, margin:0 }}>{renderInline(inner.replace(/^(⚠️|💡|ℹ️)\s*/,""))}</p>
+      </div>
+    );
+  };
+
+  lines.forEach((line, i) => {
+    // Callout
+    if (line.startsWith("> ")) { flushUl(); flushOl(); nodes.push(renderCallout(line, i)); return; }
+    // H1
+    if (line.startsWith("# "))   { flushUl(); flushOl(); nodes.push(<h1 key={i} className="pr-h1">{renderInline(line.slice(2))}</h1>); return; }
+    // H2
+    if (line.startsWith("## "))  { flushUl(); flushOl(); nodes.push(<h2 key={i} className="pr-h2">{renderInline(line.slice(3))}</h2>); return; }
+    // H3
+    if (line.startsWith("### ")) { flushUl(); flushOl(); nodes.push(<h3 key={i} className="pr-h3">{renderInline(line.slice(4))}</h3>); return; }
+    // HR
+    if (line.startsWith("---"))  { flushUl(); flushOl(); nodes.push(<hr key={i} className="pr-hr"/>); return; }
+    // UL
+    if (line.match(/^[-*] /)) { flushOl(); ulBuffer.push({ content: line.slice(2), i }); return; }
+    // OL
+    const olMatch = line.match(/^(\d+)\. (.*)/);
+    if (olMatch) { flushUl(); olBuffer.push({ idx: parseInt(olMatch[1]), content: olMatch[2], i }); return; }
+    // Blank
+    if (!line.trim()) { flushUl(); flushOl(); nodes.push(<div key={i} style={{ height:10 }}/>); return; }
+    // Whole-line bold
+    const trimmed = line.trim();
+    if (trimmed.startsWith("**") && trimmed.endsWith("**") && trimmed.length > 4 && !trimmed.slice(2,-2).includes("**")) {
+      flushUl(); flushOl();
+      nodes.push(<p key={i} className="pr-bold-line">{trimmed.slice(2,-2)}</p>);
+      return;
+    }
+    // Normal paragraph
+    flushUl(); flushOl();
+    nodes.push(<p key={i} className="pr-p">{renderInline(line)}</p>);
+  });
+  flushUl(); flushOl();
+
+  return <div className="pr-body">{nodes}</div>;
 }
 
-/* ─── Generic content renderer ─── */
+/* ─── Content renderer (Examples, Assignment, Resources) — glass+neumorphic ─── */
+const CONTENT_PALETTES = [
+  { border:"rgba(139,92,246,.35)", headerGrad:"linear-gradient(135deg,#8B5CF6,#6366F1)", icon:"🎯", badge:"Task"      },
+  { border:"rgba(20,184,166,.35)",  headerGrad:"linear-gradient(135deg,#14B8A6,#5EEAD4)", icon:"⚡", badge:"Exercise"  },
+  { border:"rgba(232,121,249,.35)", headerGrad:"linear-gradient(135deg,#E879F9,#A78BFA)", icon:"🔬", badge:"Challenge" },
+  { border:"rgba(99,102,241,.35)",  headerGrad:"linear-gradient(135deg,#6366F1,#818CF8)", icon:"💡", badge:"Problem"   },
+  { border:"rgba(139,92,246,.30)",  headerGrad:"linear-gradient(135deg,#8B5CF6,#E879F9)", icon:"🛠️", badge:"Step"      },
+  { border:"rgba(20,184,166,.30)",  headerGrad:"linear-gradient(135deg,#14B8A6,#6366F1)", icon:"📊", badge:"Section"   },
+];
+
 function ContentRenderer({ content, onUseCode }) {
   if (!content) return null;
   const parts = content.split(/(```(?:python)?\n[\s\S]*?```)/g);
+
   return (
     <div>
       {parts.map((part, i) => {
@@ -7457,52 +8343,156 @@ function ContentRenderer({ content, onUseCode }) {
         if (codeMatch) {
           const code = codeMatch[1];
           return (
-            <div key={i} style={{ marginBottom:12 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"#1e293b", padding:"7px 14px", borderRadius:"10px 10px 0 0" }}>
-                <span style={{ fontSize:11.5, fontWeight:600, color:"#94a3b8" }}>Python</span>
-                {onUseCode && <button className="lms-btn" style={{ padding:"3px 10px", fontSize:11.5, background:"#334155", color:"#e2e8f0", borderRadius:6 }} onClick={()=>onUseCode(code)}><Ic n="play" s={11} c="#e2e8f0"/>Try it</button>}
+            <div key={i} className="pr-codeblock">
+              <div className="pr-codeblock-header">
+                <div className="pr-codeblock-dots">
+                  <div className="pr-codeblock-dot" style={{ background:"#ff5f57" }}/>
+                  <div className="pr-codeblock-dot" style={{ background:"#febc2e" }}/>
+                  <div className="pr-codeblock-dot" style={{ background:"#28c840" }}/>
+                </div>
+                <span className="pr-codeblock-lang">Python</span>
+                {onUseCode && (
+                  <button className="pr-codeblock-btn" onClick={() => onUseCode(code)}>
+                    <Ic n="play" s={11} c="#94a3b8"/> Try it
+                  </button>
+                )}
               </div>
-              <div className="lms-cell" style={{ borderRadius:"0 0 10px 10px", borderTop:"none", background:"#0f172a", color:"#e2e8f0" }}>{code}</div>
+              <div className="pr-codeblock-body">{code}</div>
             </div>
           );
         }
-        return <MdRenderer key={i} text={part} />;
+
+        // Detect numbered sections
+        const sectionSplitRe = /(?=^## (?:Task|Challenge|Exercise|Question|Step|Part|Section|Example|Problem)\s*\d+)/mi;
+        const subSections = part.split(sectionSplitRe).filter(s => s.trim());
+
+        if (subSections.length <= 1) return <MdRenderer key={i} text={part}/>;
+
+        const total = subSections.filter(s => s.match(/^## /m)).length;
+
+        return (
+          <div key={i} style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {subSections.map((sub, si) => {
+              const headingMatch = sub.match(/^## (.+)/m);
+              if (!headingMatch) return <MdRenderer key={si} text={sub}/>;
+
+              const pal   = CONTENT_PALETTES[si % CONTENT_PALETTES.length];
+              const title = headingMatch[1].trim();
+              const body  = sub.replace(/^## .+\n?/, "");
+
+              return (
+                <div key={si} className="pr-section-card" style={{ border:`1.5px solid ${pal.border}`, background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
+                  {/* Gradient header */}
+                  <div className="pr-section-strip" style={{ background: pal.headerGrad }}>
+                    <div style={{ width:38, height:38, borderRadius:11, background:"rgba(255,255,255,.2)", backdropFilter:"blur(8px)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0, border:"1px solid rgba(255,255,255,.35)", boxShadow:"0 2px 8px rgba(0,0,0,.12)" }}>
+                      {pal.icon}
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <p style={{ fontWeight:800, fontSize:15, color:"#fff", margin:0, letterSpacing:"-.2px", lineHeight:1.3, textShadow:"0 1px 2px rgba(0,0,0,.15)" }}>{title}</p>
+                    </div>
+                    <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4, flexShrink:0 }}>
+                      <span style={{ fontSize:10, fontWeight:800, color:"rgba(255,255,255,.7)", letterSpacing:".08em", textTransform:"uppercase" }}>{si+1} / {total}</span>
+                      <span className="pr-section-badge" style={{ background:"rgba(255,255,255,.2)", color:"#fff", border:"1px solid rgba(255,255,255,.3)" }}>{pal.badge}</span>
+                    </div>
+                  </div>
+                  <div style={{ padding:"22px 26px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
+                    <MdRenderer text={body}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
       })}
     </div>
   );
 }
 
-/* ─── Teaching guide renderer ─── */
+/* ─── Premium Teaching guide renderer ─── */
 function TeachingGuideView({ content }) {
   if (!content) return null;
-  const blockColors = ["#eff6ff","#f0fdf4","#fffbeb","#fdf4ff","#fff7ed","#f0f9ff"];
-  const blockBorders= ["#bfdbfe","#bbf7d0","#fde68a","#e9d5ff","#fed7aa","#bae6fd"];
-  const blockAccents= ["#3b82f6","#22c55e","#f59e0b","#a855f7","#f97316","#06b6d4"];
 
-  const sections = content.split(/(?=^## BLOCK|^---$|^## 🎯|^## 🚨|^## 💡)/m).filter(s=>s.trim());
+  // LandingPage glass tints for each block
+  const GUIDE_THEMES = [
+    { gradient:"linear-gradient(135deg,#8B5CF6,#6366F1)", border:"rgba(139,92,246,.35)", shadow:"rgba(139,92,246,.18)" },
+    { gradient:"linear-gradient(135deg,#14B8A6,#5EEAD4)", border:"rgba(20,184,166,.35)",  shadow:"rgba(20,184,166,.18)"  },
+    { gradient:"linear-gradient(135deg,#6366F1,#818CF8)", border:"rgba(99,102,241,.35)",  shadow:"rgba(99,102,241,.18)"  },
+    { gradient:"linear-gradient(135deg,#E879F9,#A78BFA)", border:"rgba(232,121,249,.35)", shadow:"rgba(232,121,249,.18)" },
+    { gradient:"linear-gradient(135deg,#8B5CF6,#E879F9)", border:"rgba(139,92,246,.30)",  shadow:"rgba(139,92,246,.15)"  },
+    { gradient:"linear-gradient(135deg,#14B8A6,#6366F1)", border:"rgba(20,184,166,.30)",  shadow:"rgba(20,184,166,.15)"  },
+  ];
+  const SPECIAL_THEMES = {
+    overview: { gradient:"linear-gradient(135deg,#1E2A3B,#334155)", border:"rgba(100,116,139,.35)", shadow:"rgba(30,42,59,.18)",   emoji:"🎯", label:"Session Overview" },
+    trouble:  { gradient:"linear-gradient(135deg,#E879F9,#8B5CF6)", border:"rgba(232,121,249,.35)", shadow:"rgba(232,121,249,.18)",emoji:"🚨", label:"Troubleshooting"  },
+    tips:     { gradient:"linear-gradient(135deg,#14B8A6,#5EEAD4)", border:"rgba(20,184,166,.35)",  shadow:"rgba(20,184,166,.18)",  emoji:"💡", label:"Teaching Tips"     },
+  };
+
+  const sections = content.split(/(?=^## )/m).filter(s => s.trim());
   let blockIdx = 0;
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
       {sections.map((section, i) => {
-        const isBlock = section.match(/^## BLOCK (\d+)/m);
-        const isOverview = section.includes("🎯");
-        const isTrouble = section.includes("🚨");
-        const isTips = section.includes("💡");
-        const colorIdx = isBlock ? (blockIdx++ % blockColors.length) : (isTrouble ? 0 : isTips ? 2 : 5);
-        const header = section.split("\n")[0].replace(/^##\s*/,"").trim();
-        if (!header && !section.trim()) return null;
+        const isBlock    = section.match(/^## BLOCK (\d+)/mi);
+        const isOverview = /🎯|Overview/i.test(section.split("\n")[0]);
+        const isTrouble  = /🚨|Troubleshoot/i.test(section.split("\n")[0]);
+        const isTips     = /💡|Tips/i.test(section.split("\n")[0]);
+
+        if (section.trim() === "---") return <hr key={i} className="pr-hr"/>;
+
+        const rawHeader = section.split("\n")[0].replace(/^##\s*/,"").trim();
+        if (!rawHeader) return null;
+
+        let theme, emoji, label, blockNum;
+        if (isBlock) {
+          blockNum = isBlock[1];
+          theme = GUIDE_THEMES[blockIdx++ % GUIDE_THEMES.length];
+          emoji = blockNum;
+          label = `Block ${blockNum}`;
+        } else if (isOverview) {
+          theme = SPECIAL_THEMES.overview; emoji = "🎯"; label = SPECIAL_THEMES.overview.label;
+        } else if (isTrouble) {
+          theme = SPECIAL_THEMES.trouble;  emoji = "🚨"; label = SPECIAL_THEMES.trouble.label;
+        } else {
+          theme = SPECIAL_THEMES.tips;     emoji = "💡"; label = SPECIAL_THEMES.tips.label;
+        }
+
+        const cleanTitle = rawHeader
+          .replace(/^BLOCK \d+\s*[—-]?\s*/i,"")
+          .replace(/🎯|🚨|💡/g,"")
+          .trim();
+        const bodyText = section.split("\n").slice(1).join("\n");
+        const isNumEmoji = /^\d+$/.test(String(emoji));
+
         return (
-          <div key={i} style={{ background:blockColors[colorIdx], border:`1.5px solid ${blockBorders[colorIdx]}`, borderRadius:14, padding:20 }}>
-            {header && (
-              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14, paddingBottom:12, borderBottom:`1px solid ${blockBorders[colorIdx]}` }}>
-                <div style={{ width:30, height:30, background:blockAccents[colorIdx], borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>
-                  {isBlock ? section.match(/BLOCK (\d+)/)?.[1] || "•" : isOverview ? "🎯" : isTrouble ? "🚨" : "💡"}
-                </div>
-                <span style={{ fontWeight:700, fontSize:14, color:"#0f172a" }}>{header}</span>
+          <div key={i} className="pr-guide-card" style={{ border:`1.5px solid ${theme.border}` }}>
+            {/* Gradient strip */}
+            <div className="pr-guide-strip" style={{ background: theme.gradient }}>
+              <div className="pr-guide-icon">
+                <span style={{ fontSize: isNumEmoji ? 16 : 20, fontWeight:900, color:"#fff" }}>{emoji}</span>
               </div>
-            )}
-            <MdRenderer text={section.split("\n").slice(1).join("\n")} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <p style={{ fontSize:10, fontWeight:800, color:"rgba(255,255,255,.6)", letterSpacing:".12em", textTransform:"uppercase", margin:0 }}>{label}</p>
+                {cleanTitle && (
+                  <p style={{ fontSize:16, fontWeight:800, color:"#fff", margin:"3px 0 0", letterSpacing:"-.3px", lineHeight:1.3, textShadow:"0 1px 3px rgba(0,0,0,.2)" }}>
+                    {cleanTitle}
+                  </p>
+                )}
+              </div>
+              {/* Time estimate badge if detectable */}
+              {/\d+\s*min/i.test(bodyText) && (
+                <div style={{ display:"flex", alignItems:"center", gap:5, background:"rgba(255,255,255,.15)", border:"1px solid rgba(255,255,255,.25)", borderRadius:8, padding:"5px 10px", flexShrink:0 }}>
+                  <Ic n="clock" s={11} c="rgba(255,255,255,.8)"/>
+                  <span style={{ fontSize:11, fontWeight:700, color:"rgba(255,255,255,.9)" }}>
+                    {(bodyText.match(/(\d+)\s*min/i)||[])[1]} min
+                  </span>
+                </div>
+              )}
+            </div>
+            {/* Body */}
+            <div className="pr-guide-body" style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
+              <MdRenderer text={bodyText}/>
+            </div>
           </div>
         );
       })}
@@ -7534,8 +8524,11 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
     setSubmitted(true);
     const pct = Math.round(finalScore / questions.length * 100);
     notify(`Quiz complete! ${finalScore}/${questions.length} (${pct}%)`);
-    updateDay(k, { quizScore: { score: finalScore, total: questions.length, pct, date: new Date().toISOString() } });
-    if (trackActivity) trackActivity("quizScore", k, { pct, score: finalScore, total: questions.length, date: new Date().toISOString() });
+    const quizResult = { score: finalScore, total: questions.length, pct, date: new Date().toISOString() };
+    // updateDay persists quizScore to lms_student_activity immediately (not debounced)
+    updateDay(k, { quizScore: quizResult });
+    // trackActivity ALSO merges into studentActivity state + schedules debounced upsert (double-safety)
+    if (trackActivity) trackActivity("quizScore", k, quizResult);
   };
 
   const handleReset = () => {
@@ -7584,69 +8577,94 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
 
       {questions && (
         <div key={quizKey}>
-          {/* Score banner after submit */}
-          {submitted && (
-            <div style={{ marginBottom:20, padding:"18px 22px", borderRadius:14,
-              background: score/questions.length >= 0.8 ? "#f0fdf4" : score/questions.length >= 0.5 ? "#fffbeb" : "#fef2f2",
-              border: `2px solid ${score/questions.length >= 0.8 ? "#86efac" : score/questions.length >= 0.5 ? "#fde68a" : "#fecaca"}` }}>
-              <div style={{ display:"flex", alignItems:"center", gap:14 }}>
-                <span style={{ fontSize:36 }}>{score/questions.length >= 0.8 ? "🎉" : score/questions.length >= 0.5 ? "📚" : "💪"}</span>
-                <div>
-                  <p style={{ fontSize:20, fontWeight:800, color:"#0f172a" }}>{score}/{questions.length} Correct</p>
-                  <p style={{ fontSize:13.5, color:"#64748b" }}>
-                    {score/questions.length >= 0.8 ? "Excellent! You've mastered this topic." : score/questions.length >= 0.5 ? "Good progress! Review the explanations below." : "Keep practicing! Read the notebook and try again."}
-                  </p>
-                </div>
-                <div style={{ marginLeft:"auto", textAlign:"center" }}>
-                  <div style={{ fontSize:28, fontWeight:800, color: score/questions.length >= 0.8 ? "#16a34a" : score/questions.length >= 0.5 ? "#d97706" : "#dc2626" }}>
-                    {Math.round(score/questions.length*100)}%
+          {/* ── Score banner ── */}
+          {submitted && (() => {
+            const pct = score / questions.length;
+            const isGreat = pct >= 0.8, isOk = pct >= 0.5;
+            const grad = isGreat
+              ? "linear-gradient(135deg,#22c55e,#16a34a)"
+              : isOk
+              ? "linear-gradient(135deg,#f59e0b,#f97316)"
+              : "linear-gradient(135deg,#f43f5e,#ef4444)";
+            const emoji = isGreat ? "🏆" : isOk ? "📚" : "💪";
+            const msg   = isGreat ? "Excellent! You've mastered this topic." : isOk ? "Good progress! Review the explanations below." : "Keep practicing! Read the notebook and try again.";
+            return (
+              <div style={{ marginBottom:22, borderRadius:16, overflow:"hidden", boxShadow:"0 4px 20px rgba(0,0,0,.1)" }}>
+                <div style={{ background:grad, padding:"18px 22px", display:"flex", alignItems:"center", gap:16 }}>
+                  <span style={{ fontSize:38, filter:"drop-shadow(0 2px 4px rgba(0,0,0,.2))" }}>{emoji}</span>
+                  <div style={{ flex:1 }}>
+                    <p style={{ fontSize:20, fontWeight:900, color:"#fff", margin:0, letterSpacing:"-.4px", textShadow:"0 1px 3px rgba(0,0,0,.2)" }}>{score}/{questions.length} Correct</p>
+                    <p style={{ fontSize:13, color:"rgba(255,255,255,.85)", margin:"4px 0 0", fontWeight:500 }}>{msg}</p>
+                  </div>
+                  <div style={{ textAlign:"center", background:"rgba(255,255,255,.2)", borderRadius:14, padding:"10px 18px", border:"1px solid rgba(255,255,255,.3)" }}>
+                    <div style={{ fontSize:30, fontWeight:900, color:"#fff", lineHeight:1, textShadow:"0 2px 4px rgba(0,0,0,.2)" }}>{Math.round(pct*100)}%</div>
+                    <div style={{ fontSize:10, fontWeight:700, color:"rgba(255,255,255,.7)", textTransform:"uppercase", letterSpacing:".08em", marginTop:3 }}>Score</div>
                   </div>
                 </div>
+                {/* Progress bar */}
+                <div style={{ height:6, background:"rgba(0,0,0,.08)" }}>
+                  <div style={{ height:"100%", width:`${Math.round(pct*100)}%`, background: isGreat?"linear-gradient(90deg,#14B8A6,#5EEAD4)": isOk?"linear-gradient(90deg,#8B5CF6,#A78BFA)":"linear-gradient(90deg,#E879F9,#8B5CF6)", transition:"width .6s ease", borderRadius:3 }}/>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
-          {/* Questions */}
-          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          {/* ── Questions ── */}
+          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
             {questions.map((q, qi) => {
-              const chosen = answers[qi];
+              const chosen    = answers[qi];
               const isCorrect = submitted && chosen === q.answer;
-              const isWrong = submitted && chosen !== undefined && chosen !== q.answer;
+              const isWrong   = submitted && chosen !== undefined && chosen !== q.answer;
+              const cardBg     = submitted ? (isCorrect ? "#f0fdf4" : isWrong ? "#fef2f2" : "#fff") : "#fff";
+              const cardBorder = submitted ? (isCorrect ? "#86efac" : isWrong ? "#fca5a5" : "#e2e8f0") : "#e8edf3";
+              const statusIcon = submitted ? (isCorrect ? "✓" : isWrong ? "✗" : "–") : null;
+              const statusColor = submitted ? (isCorrect ? "#16a34a" : isWrong ? "#dc2626" : "#94a3b8") : null;
+
               return (
-                <div key={qi} style={{
-                  padding:18, borderRadius:14, border:`1.5px solid ${submitted ? (isCorrect?"#86efac":isWrong?"#fca5a5":"#e2e8f0") : "#e2e8f0"}`,
-                  background: submitted ? (isCorrect?"#f0fdf4":isWrong?"#fef2f2":"#fff") : "#fff"
-                }}>
-                  <p style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12, lineHeight:1.5 }}>
-                    <span style={{ color:"#3b82f6", marginRight:8 }}>Q{qi+1}.</span>{q.q}
-                  </p>
-                  <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                <div key={qi} style={{ borderRadius:20, border:`1.5px solid ${cardBorder}`, background:submitted?(isCorrect?"rgba(20,184,166,.06)":isWrong?"rgba(232,121,249,.06)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)"):"linear-gradient(145deg,#EDF1F7,#E4E9F2)", overflow:"hidden", boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #FFF", transition:"all .2s" }}>
+                  {/* Question header */}
+                  <div style={{ padding:"14px 18px", borderBottom:`1px solid ${cardBorder}`, display:"flex", alignItems:"flex-start", gap:12,
+                    background: submitted ? (isCorrect ? "linear-gradient(140deg,rgba(20,184,166,.14),rgba(94,234,212,.07))" : isWrong ? "linear-gradient(140deg,rgba(232,121,249,.13),rgba(248,113,113,.07))" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)") : "linear-gradient(145deg,#E4E9F2,#EDF1F7)" }}>
+                    <div style={{ width:30, height:30, borderRadius:9, background: submitted ? (isCorrect?"#22c55e":isWrong?"#ef4444":"#e2e8f0") : "linear-gradient(135deg,#3b82f6,#6366f1)",
+                      display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow:"0 2px 6px rgba(0,0,0,.12)" }}>
+                      <span style={{ fontSize:12, fontWeight:900, color:"#fff" }}>{submitted ? statusIcon : `Q${qi+1}`}</span>
+                    </div>
+                    <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a", margin:0, lineHeight:1.6, flex:1 }}>{q.q}</p>
+                  </div>
+
+                  {/* Options */}
+                  <div style={{ padding:"14px 18px", display:"flex", flexDirection:"column", gap:8 }}>
                     {q.options.map((opt, oi) => {
-                      const isChosenOpt = chosen === oi;
+                      const isChosenOpt  = chosen === oi;
                       const isCorrectOpt = submitted && oi === q.answer;
-                      const isWrongOpt = submitted && isChosenOpt && oi !== q.answer;
-                      let bg = "#f8fafc", border = "#e2e8f0", color = "#374151";
-                      if (isChosenOpt && !submitted) { bg="#eff6ff"; border="#3b82f6"; color="#1e40af"; }
-                      if (isCorrectOpt) { bg="#f0fdf4"; border="#22c55e"; color="#15803d"; }
-                      if (isWrongOpt) { bg="#fef2f2"; border="#ef4444"; color="#dc2626"; }
+                      const isWrongOpt   = submitted && isChosenOpt && oi !== q.answer;
+                      let bg = "#f8fafc", border = "#e8edf3", color = "#374151", labelBg = "#e2e8f0", labelColor = "#64748b";
+                      if (isChosenOpt && !submitted) { bg="#eff6ff"; border="#3b82f6"; color="#1e40af"; labelBg="#3b82f6"; labelColor="#fff"; }
+                      if (isCorrectOpt) { bg="#f0fdf4"; border="#22c55e"; color="#15803d"; labelBg="#22c55e"; labelColor="#fff"; }
+                      if (isWrongOpt)   { bg="#fef2f2"; border="#ef4444"; color="#dc2626"; labelBg="#ef4444"; labelColor="#fff"; }
+                      const letters = ["A","B","C","D"];
                       return (
                         <button key={oi} disabled={submitted}
                           onClick={() => !submitted && setAnswers(p => ({...p, [qi]: oi}))}
-                          style={{ textAlign:"left", padding:"10px 14px", borderRadius:9, border:`1.5px solid ${border}`, background:bg, color, cursor:submitted?"default":"pointer", fontSize:13.5, fontFamily:"inherit", fontWeight: isChosenOpt||isCorrectOpt ? 600 : 400, display:"flex", alignItems:"center", gap:10 }}>
-                          <span style={{ width:20, height:20, borderRadius:"50%", border:`1.5px solid ${border}`, background: isChosenOpt||isCorrectOpt ? border : "transparent", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:11, fontWeight:700, color: isChosenOpt||isCorrectOpt ? "#fff" : color }}>
-                            {["A","B","C","D"][oi]}
+                          style={{ textAlign:"left", padding:"11px 14px", borderRadius:13, border:`1.5px solid ${border}`, background: isChosenOpt&&!submitted ? "linear-gradient(140deg,rgba(139,92,246,.13),rgba(167,139,250,.07))" : isCorrectOpt ? "linear-gradient(140deg,rgba(20,184,166,.13),rgba(94,234,212,.07))" : isWrongOpt ? "linear-gradient(140deg,rgba(232,121,249,.13),rgba(248,113,113,.07))" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", color, cursor:submitted?"default":"pointer", fontSize:14, fontFamily:"inherit", fontWeight: isChosenOpt||isCorrectOpt ? 700 : 400, display:"flex", alignItems:"center", gap:12, transition:"all .15s", width:"100%", boxShadow: isChosenOpt||isCorrectOpt ? "none" : "6px 6px 14px #C4CDD9,-4px -4px 10px #FFF" }}>
+                          <span style={{ width:26, height:26, borderRadius:8, background:labelBg, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:12, fontWeight:800, color:labelColor, boxShadow:"0 1px 3px rgba(0,0,0,.12)" }}>
+                            {letters[oi]}
                           </span>
-                          {opt}
+                          <span style={{ flex:1, lineHeight:1.5 }}>{opt}</span>
+                          {isCorrectOpt && <span style={{ fontSize:16, flexShrink:0 }}>✓</span>}
+                          {isWrongOpt   && <span style={{ fontSize:16, flexShrink:0 }}>✗</span>}
                         </button>
                       );
                     })}
                   </div>
-                  {/* Explanation after submit */}
+
+                  {/* Explanation */}
                   {submitted && (
-                    <div style={{ marginTop:12, padding:"10px 14px", background:"#f8fafc", borderRadius:9, border:"1px solid #e2e8f0" }}>
-                      <p style={{ fontSize:12.5, color:"#475569", lineHeight:1.6 }}>
-                        <strong style={{ color:"#0f172a" }}>Explanation: </strong>{q.explanation}
-                      </p>
+                    <div className="pr-explanation" style={{ margin:"0 18px 16px" }}>
+                      <div className="pr-explanation-head">
+                        <span>💬</span> Explanation
+                      </div>
+                      <div className="pr-explanation-body">{q.explanation}</div>
                     </div>
                   )}
                 </div>
@@ -7655,13 +8673,13 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
           </div>
 
           {!submitted && (
-            <button className="lms-btn lms-btn-dark" style={{ marginTop:16, width:"100%", justifyContent:"center" }}
+            <button className="lms-btn lms-btn-dark" style={{ marginTop:18, width:"100%", justifyContent:"center", padding:"12px 0", fontSize:14 }}
               onClick={handleSubmit}>
               <Ic n="check" s={15}/>Submit Quiz
             </button>
           )}
           {submitted && (
-            <button className="lms-btn lms-btn-ghost" style={{ marginTop:16, width:"100%", justifyContent:"center" }}
+            <button className="lms-btn lms-btn-ghost" style={{ marginTop:18, width:"100%", justifyContent:"center", padding:"12px 0", fontSize:14 }}
               onClick={handleReset}>
               <Ic n="refresh" s={15}/>Retake Quiz
             </button>
