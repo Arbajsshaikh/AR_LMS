@@ -5043,10 +5043,10 @@ Hard rules:
           @keyframes lms-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
           @keyframes lms-slide{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
           @keyframes lms-toast{0%{opacity:0;transform:translateY(8px)}100%{opacity:1;transform:translateY(0)}}
-          .lms-nav{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;transition:all .15s;color:#64748b;font-size:13.5px;font-weight:500;white-space:nowrap;border:none;background:transparent;width:100%;text-align:left;font-family:inherit}
+          .lms-nav{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;cursor:pointer;transition:all .15s;color:#64748b;font-size:16.5px;font-weight:500;white-space:nowrap;border:none;background:transparent;width:100%;text-align:left;font-family:inherit}
           .lms-nav:hover{background:#f1f5f9;color:#0f172a}
           .lms-nav.on{background:#0f172a;color:#fff}
-          .lms-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap}
+          .lms-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:9px;border:none;cursor:pointer;font-size:16px;font-weight:600;font-family:inherit;transition:all .15s;white-space:nowrap}
           .lms-btn:disabled{opacity:.55;cursor:not-allowed}
           .lms-btn-dark{background:#0f172a;color:#fff}
           .lms-btn-dark:hover:not(:disabled){background:#1e293b}
@@ -5063,22 +5063,22 @@ Hard rules:
           .lms-btn-ghost{background:#f1f5f9;color:#475569}
           .lms-btn-ghost:hover:not(:disabled){background:#e2e8f0;color:#0f172a}
           .lms-card{background:#fff;border-radius:16px;border:1px solid #e8edf3;box-shadow:0 1px 3px rgba(0,0,0,.04)}
-          .lms-input{width:100%;padding:9px 13px;border:1.5px solid #e2e8f0;border-radius:9px;font-size:13px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:#0f172a}
+          .lms-input{width:100%;padding:9px 13px;border:1.5px solid #e2e8f0;border-radius:9px;font-size:16px;font-family:inherit;outline:none;transition:border .15s;background:#fff;color:#0f172a}
           .lms-input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
           textarea.lms-input{resize:vertical;min-height:80px;line-height:1.55}
           select.lms-input{cursor:pointer}
-          .lms-tab{padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:all .15s;color:#64748b;border:none;background:transparent;font-family:inherit}
+          .lms-tab{padding:7px 14px;border-radius:8px;cursor:pointer;font-size:16px;font-weight:500;transition:all .15s;color:#64748b;border:none;background:transparent;font-family:inherit}
           .lms-tab.on{background:#0f172a;color:#fff}
           .lms-tab:hover:not(.on){background:#f1f5f9;color:#334155}
-          .lms-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:99px;font-size:11.5px;font-weight:600}
-          .lms-cell{background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#1e293b;white-space:pre-wrap;word-break:break-all;overflow-x:auto}
-          .lms-output{background:#0f172a;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;line-height:1.65;color:#e2e8f0;white-space:pre-wrap;word-break:break-all;min-height:80px}
+          .lms-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 10px;border-radius:99px;font-size:14.5px;font-weight:600}
+          .lms-cell{background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:15.5px;line-height:1.65;color:#1e293b;white-space:pre-wrap;word-break:break-all;overflow-x:auto}
+          .lms-output{background:#0f172a;border-radius:10px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:15.5px;line-height:1.65;color:#e2e8f0;white-space:pre-wrap;word-break:break-all;min-height:80px}
           .lms-block{background:#fff;border:1.5px solid #e8edf3;border-radius:14px;padding:20px;margin-bottom:14px;animation:lms-in .25s ease}
           .lms-block-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f1f5f9}
-          .lms-section-label{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
-          .lms-prose{font-size:13.5px;line-height:1.75;color:#374151}
+          .lms-section-label{font-size:14px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px}
+          .lms-prose{font-size:16.5px;line-height:1.75;color:#374151}
           .lms-prose h1,.lms-prose h2,.lms-prose h3{color:#0f172a;font-weight:700;margin:16px 0 6px}
-          .lms-prose h1{font-size:18px}.lms-prose h2{font-size:16px}.lms-prose h3{font-size:14px}
+          .lms-prose h1{font-size:22px}.lms-prose h2{font-size:19.5px}.lms-prose h3{font-size:17px}
           .upload-zone{border:2px dashed #cbd5e1;border-radius:12px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;background:#f8fafc;display:block}
           .upload-zone:hover{border-color:#3b82f6;background:#eff6ff}
           .day-cell{cursor:pointer;border-radius:12px;padding:10px;border:1.5px solid #e8edf3;background:#fff;transition:all .18s;min-height:78px}
@@ -5134,7 +5134,7 @@ Hard rules:
 
           /* ── H1 — gradient text, neu underline ── */
           .pr-h1{
-            font-size:22px; font-weight:800; letter-spacing:-.5px; line-height:1.2;
+            font-size:26px; font-weight:800; letter-spacing:-.5px; line-height:1.2;
             margin:0 0 22px; padding-bottom:16px;
             background:linear-gradient(135deg,var(--violet),var(--blue));
             -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
@@ -5143,7 +5143,7 @@ Hard rules:
 
           /* ── H2 — neumorphic pill-band ── */
           .pr-h2{
-            font-size:15.5px; font-weight:800; color:var(--text); letter-spacing:-.2px; line-height:1.35;
+            font-size:18.5px; font-weight:800; color:var(--text); letter-spacing:-.2px; line-height:1.35;
             margin:24px 0 12px;
             padding:10px 18px;
             background:linear-gradient(145deg,var(--shell),var(--shellDp));
@@ -5159,7 +5159,7 @@ Hard rules:
 
           /* ── H3 — small eyebrow label ── */
           .pr-h3{
-            font-size:10.5px; font-weight:800; color:var(--violet);
+            font-size:13.5px; font-weight:800; color:var(--violet);
             text-transform:uppercase; letter-spacing:.12em;
             margin:20px 0 8px;
             display:flex; align-items:center; gap:8px;
@@ -5167,9 +5167,9 @@ Hard rules:
           .pr-h3::after{ content:''; flex:1; height:1px; background:linear-gradient(90deg,rgba(139,92,246,.3),transparent); }
 
           /* ── Body text ── */
-          .pr-p{ font-size:14.5px; color:var(--textMid); line-height:1.85; margin:7px 0; }
+          .pr-p{ font-size:17.5px; color:var(--textMid); line-height:1.85; margin:7px 0; }
           .pr-bold-line{
-            font-size:14.5px; font-weight:700; color:var(--text);
+            font-size:17.5px; font-weight:700; color:var(--text);
             margin:14px 0 5px; line-height:1.5;
             padding:8px 14px 8px 18px;
             background:linear-gradient(145deg,var(--shell),var(--shellDp));
@@ -5187,7 +5187,7 @@ Hard rules:
           }
           .pr-li{
             display:flex; gap:12px; align-items:flex-start;
-            font-size:14px; color:var(--textMid); line-height:1.75;
+            font-size:17px; color:var(--textMid); line-height:1.75;
             padding:10px 16px; border-bottom:1px solid rgba(196,205,217,.4);
             transition:background .15s;
           }
@@ -5205,7 +5205,7 @@ Hard rules:
           .pr-ol{ display:flex; flex-direction:column; gap:8px; margin:10px 0; padding:0; list-style:none; }
           .pr-oli{
             display:flex; gap:13px; align-items:flex-start;
-            font-size:14px; color:var(--textMid); line-height:1.75;
+            font-size:17px; color:var(--textMid); line-height:1.75;
             padding:12px 16px; border-radius:14px;
             background:linear-gradient(145deg,var(--shell),var(--shellDp));
             box-shadow:6px 6px 14px var(--sdw-d),-4px -4px 10px var(--sdw-l);
@@ -5226,7 +5226,7 @@ Hard rules:
             background:rgba(139,92,246,.1); border:1px solid rgba(139,92,246,.3);
             padding:2px 8px; border-radius:6px;
             font-family:'JetBrains Mono','Fira Code',monospace;
-            font-size:12.5px; color:var(--violet); font-weight:600; white-space:nowrap;
+            font-size:15.5px; color:var(--violet); font-weight:600; white-space:nowrap;
           }
 
           /* ── Callout boxes ── */
@@ -5254,7 +5254,7 @@ Hard rules:
           .pr-codeblock-dots{ display:flex; gap:7px; align-items:center; }
           .pr-codeblock-dot{ width:12px; height:12px; border-radius:50%; box-shadow:0 1px 3px rgba(0,0,0,.4); }
           .pr-codeblock-lang{
-            font-size:10.5px; font-weight:800; color:#64748b;
+            font-size:13.5px; font-weight:800; color:#64748b;
             letter-spacing:.12em; text-transform:uppercase;
             background:rgba(255,255,255,.06); padding:3px 10px; border-radius:20px;
             border:1px solid rgba(255,255,255,.08);
@@ -5262,12 +5262,12 @@ Hard rules:
           .pr-codeblock-body{
             background:#0d1117; padding:20px 22px;
             font-family:'JetBrains Mono','Fira Code',monospace;
-            font-size:13px; line-height:1.8; color:#c9d1d9;
+            font-size:16px; line-height:1.8; color:#c9d1d9;
             white-space:pre-wrap; word-break:break-all; overflow-x:auto;
           }
           .pr-codeblock-btn{
             background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.12);
-            border-radius:8px; padding:5px 14px; color:#94a3b8; font-size:11.5px;
+            border-radius:8px; padding:5px 14px; color:#94a3b8; font-size:14.5px;
             font-weight:700; cursor:pointer; display:flex; align-items:center; gap:5px;
             transition:all .15s; font-family:inherit; letter-spacing:.02em;
           }
@@ -5303,7 +5303,7 @@ Hard rules:
           }
           .pr-codelinks-label{
             width:100%; margin-bottom:8px;
-            font-size:10px; font-weight:800; color:var(--violet);
+            font-size:13px; font-weight:800; color:var(--violet);
             text-transform:uppercase; letter-spacing:.12em;
             display:flex; align-items:center; gap:8px;
           }
