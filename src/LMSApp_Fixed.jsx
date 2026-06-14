@@ -3833,6 +3833,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const [busy,   setBusy]   = useState({});
   const [toasts, setToasts] = useState([]);
+  const [darkMode, setDarkMode] = useState(false);
 
   // FIX #12: Scope AI prefs to the auth session (user-level), not per-course
   // Previously "lms_ai_prefs_{courseId}" meant the Groq key was lost when switching courses
@@ -5030,7 +5031,7 @@ Hard rules:
   ════════════════════════════════════════════════ */
   return (
     <ErrorBoundary>
-      <div style={{ display:"flex", width:"100vw", height:"100vh", background:"transparent", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
+      <div data-pr-dark={darkMode ? "1" : "0"} style={{ display:"flex", width:"100vw", height:"100vh", background: darkMode ? "#0d1117" : "transparent", fontFamily:"'Plus Jakarta Sans','DM Sans',system-ui,sans-serif", overflow:"hidden", position:"relative" }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
           *{box-sizing:border-box;margin:0;padding:0}
@@ -5308,6 +5309,110 @@ Hard rules:
           }
           .pr-codelinks-label::after{ content:''; flex:1; height:1px; background:rgba(139,92,246,.2); }
 
+          /* ══════════════════════════════════════════════════════
+             DARK MODE — scoped to [data-pr-dark="1"] on outermost wrapper
+             Covers ALL shell, sidebar, header, nav, tabs, cards, inputs,
+             calendar, compiler, modals, content, and scrollbars.
+          ══════════════════════════════════════════════════════ */
+          [data-pr-dark="1"] {
+            --shell:   #1e293b;
+            --shellDp: #162032;
+            --sdw-d:   #0d1625;
+            --sdw-l:   #2a3a52;
+            --text:    #e2e8f0;
+            --textMid: #94a3b8;
+            --textLt:  #64748b;
+          }
+
+          /* ── Scrollbar ── */
+          [data-pr-dark="1"] ::-webkit-scrollbar-thumb { background:#334155; }
+          [data-pr-dark="1"] ::-webkit-scrollbar-track { background:#111827; }
+
+          /* ── Sidebar ── */
+          [data-pr-dark="1"] .lms-sidebar { background:#111827 !important; border-right-color:#1f2937 !important; }
+          [data-pr-dark="1"] .lms-sidebar > div:first-child { border-bottom-color:#1f2937 !important; }
+          [data-pr-dark="1"] .lms-sidebar > div:last-child { border-top-color:#1f2937 !important; }
+          [data-pr-dark="1"] .lms-sidebar span[style*="color:\"#0f172a\""] { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lms-sidebar span[style*="color:\"#94a3b8\""] { color:#64748b !important; }
+
+          /* ── Nav buttons ── */
+          [data-pr-dark="1"] .lms-nav { color:#94a3b8 !important; background:transparent !important; }
+          [data-pr-dark="1"] .lms-nav:hover { background:#1f2937 !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lms-nav.on { background:#3b82f6 !important; color:#fff !important; }
+
+          /* ── Header ── */
+          [data-pr-dark="1"] header { background:#111827 !important; border-bottom-color:#1f2937 !important; }
+          [data-pr-dark="1"] header span { color:#94a3b8 !important; }
+          [data-pr-dark="1"] header span[style*="color:\"#0f172a\""] { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] header span[style*="color:\"#475569\""] { color:#94a3b8 !important; }
+
+          /* ── Main area ── */
+          [data-pr-dark="1"] main { background:#0d1117; }
+
+          /* ── Tabs ── */
+          [data-pr-dark="1"] .lms-tab { color:#64748b !important; }
+          [data-pr-dark="1"] .lms-tab.on { background:#1e3a5f !important; color:#93c5fd !important; }
+          [data-pr-dark="1"] .lms-tab:hover:not(.on) { background:#1f2937 !important; color:#cbd5e1 !important; }
+
+          /* ── Cards ── */
+          [data-pr-dark="1"] .lms-card { background:#1e293b !important; border-color:#2a3a52 !important; color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .lms-block { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lms-block-head { border-bottom-color:#2a3a52 !important; }
+
+          /* ── Inputs ── */
+          [data-pr-dark="1"] .lms-input { background:#1e293b !important; border-color:#334155 !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lms-input:focus { border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,.15) !important; }
+          [data-pr-dark="1"] textarea.lms-input { background:#1e293b !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] select.lms-input { background:#1e293b !important; color:#e2e8f0 !important; }
+
+          /* ── Buttons ── */
+          [data-pr-dark="1"] .lms-btn-ghost { background:#1f2937 !important; color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .lms-btn-ghost:hover:not(:disabled) { background:#2d3748 !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lms-btn-dark { background:#3b82f6 !important; }
+
+          /* ── Labels / text ── */
+          [data-pr-dark="1"] .lms-section-label { color:#64748b !important; }
+          [data-pr-dark="1"] .lms-prose { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .lms-prose h1, [data-pr-dark="1"] .lms-prose h2, [data-pr-dark="1"] .lms-prose h3 { color:#f1f5f9 !important; }
+
+          /* ── Code editor & output ── */
+          [data-pr-dark="1"] .lms-cell { background:#1e293b !important; border-color:#334155 !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lms-output { background:#050a12 !important; }
+
+          /* ── Day cells (calendar) ── */
+          [data-pr-dark="1"] .day-cell { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .day-cell:hover { border-color:#3b82f6 !important; box-shadow:0 4px 16px rgba(59,130,246,.15) !important; }
+          [data-pr-dark="1"] .day-cell.today { border-color:#3b82f6 !important; box-shadow:0 0 0 2px rgba(59,130,246,.3) !important; }
+
+          /* ── Notebook / content dark overrides ── */
+          [data-pr-dark="1"] .pr-nb-section { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-nb-body { color:#cbd5e1; }
+          [data-pr-dark="1"] .pr-p { color:#cbd5e1; }
+          [data-pr-dark="1"] .pr-h1, [data-pr-dark="1"] .pr-h2, [data-pr-dark="1"] .pr-h3 { color:#f1f5f9; }
+          [data-pr-dark="1"] .pr-nb-head { border-bottom-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-nb-head p { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .pr-oli { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; color:#cbd5e1; }
+          [data-pr-dark="1"] .pr-oli:hover { background:linear-gradient(145deg,#243249,#1a2a40); }
+          [data-pr-dark="1"] .pr-ul { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-li { color:#cbd5e1; border-bottom-color:rgba(42,58,82,.4); }
+          [data-pr-dark="1"] .pr-li:hover { background:rgba(59,130,246,.06); }
+          [data-pr-dark="1"] .pr-bold-line { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; color:#e2e8f0; }
+          [data-pr-dark="1"] .pr-h2 { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; color:#f1f5f9; }
+          [data-pr-dark="1"] .pr-quote { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; color:#94a3b8; }
+          [data-pr-dark="1"] .pr-table th { background:#1e3a5f; color:#e2e8f0; }
+          [data-pr-dark="1"] .pr-table td { color:#cbd5e1; border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-table tr:nth-child(even) td { background:#1a2a3e; }
+          [data-pr-dark="1"] .pr-callout { box-shadow:0 8px 32px rgba(0,0,0,.4); }
+          [data-pr-dark="1"] .pr-hr { background:linear-gradient(90deg,transparent,#2a3a52 30%,#2a3a52 70%,transparent); }
+          [data-pr-dark="1"] .pr-codelinks { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-section-card { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-section-body { background:#162032; color:#cbd5e1; }
+          [data-pr-dark="1"] .pr-section-body p, [data-pr-dark="1"] .pr-section-body li { color:#cbd5e1; }
+          [data-pr-dark="1"] .pr-explanation { background:linear-gradient(140deg,rgba(59,130,246,.12),rgba(139,92,246,.08)); border-color:rgba(99,102,241,.3); }
+          [data-pr-dark="1"] .pr-explanation-body { color:#94a3b8; }
+          [data-pr-dark="1"] .pr-guide-card { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          [data-pr-dark="1"] .pr-guide-body { padding:22px 26px; background:#162032; color:#cbd5e1; }
+
           /* ── Content section cards (Tasks / Challenges / Examples) ── */
           .pr-section-card{
             border-radius:20px; overflow:hidden; margin-bottom:16px;
@@ -5368,12 +5473,12 @@ Hard rules:
         {mobileMenuOpen && <div className="lms-overlay" style={{ display:"block" }} onClick={()=>setMobileMenuOpen(false)}/>}
 
         {/* ── SIDEBAR ── */}
-        <aside className={`lms-sidebar${mobileMenuOpen?" open":""}`} style={{ width:collapsed?58:210, flexShrink:0, background:"#fff", borderRight:"1.5px solid #e8edf3", display:"flex", flexDirection:"column", transition:"width .2s", overflow:"hidden" }}>
-          <div style={{ padding:"16px 12px 12px", display:"flex", alignItems:"center", gap:9, borderBottom:"1px solid #f1f5f9" }}>
+        <aside className={`lms-sidebar${mobileMenuOpen?" open":""}`} style={{ width:collapsed?58:210, flexShrink:0, background: darkMode ? "#111827" : "#fff", borderRight:`1.5px solid ${darkMode ? "#1f2937" : "#e8edf3"}`, display:"flex", flexDirection:"column", transition:"width .2s", overflow:"hidden" }}>
+          <div style={{ padding:"16px 12px 12px", display:"flex", alignItems:"center", gap:9, borderBottom:`1px solid ${darkMode ? "#1f2937" : "#f1f5f9"}` }}>
             <div style={{ width:32, height:32, background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
               <Ic n="brain" s={17} c="#fff" />
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color:"#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI With ARBAJ</span>}
+            {!collapsed && <span style={{ fontWeight:800, fontSize:14.5, color: darkMode ? "#e2e8f0" : "#0f172a", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI With ARBAJ</span>}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -5421,12 +5526,12 @@ Hard rules:
               </button>
             )}
           </nav>
-          <div style={{ padding:"10px 6px", borderTop:"1px solid #f1f5f9" }}>
+          <div style={{ padding:"10px 6px", borderTop:`1px solid ${darkMode ? "#1f2937" : "#f1f5f9"}` }}>
             <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
               <div style={{ width:28, height:28, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:12, fontWeight:700, flexShrink:0 }}>T</div>
               {!collapsed && (
                 <div style={{ flex:1 }}>
-                  <div style={{ fontSize:12.5, fontWeight:600, color:"#0f172a" }}>Trainer</div>
+                  <div style={{ fontSize:12.5, fontWeight:600, color: darkMode ? "#e2e8f0" : "#0f172a" }}>Trainer</div>
                   <div style={{ fontSize:11, color:"#94a3b8" }}>{aiProvider==="groq"?"Groq":"Ollama"} AI</div>
                 </div>
               )}
@@ -5441,17 +5546,17 @@ Hard rules:
 
         {/* ── MAIN ── */}
         <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", marginTop: isOnline ? 0 : 36 }}>
-          <header style={{ height:52, background:"#fff", borderBottom:"1.5px solid #e8edf3", display:"flex", alignItems:"center", padding:"0 16px", gap:10, flexShrink:0 }}>
+          <header style={{ height:52, background: darkMode ? "#111827" : "#fff", borderBottom:`1.5px solid ${darkMode ? "#1f2937" : "#e8edf3"}`, display:"flex", alignItems:"center", padding:"0 16px", gap:10, flexShrink:0 }}>
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
-            <div style={{ flex:1, fontSize:13, color:"#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color:"#475569" }}>AI With ARBAJ</span>{" › "}
-              <span style={{ color:"#0f172a", fontWeight:600 }}>
+            <div style={{ flex:1, fontSize:13, color: darkMode ? "#94a3b8" : "#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
+              <span style={{ color: darkMode ? "#64748b" : "#475569" }}>AI With ARBAJ</span>{" › "}
+              <span style={{ color: darkMode ? "#f1f5f9" : "#0f172a", fontWeight:600 }}>
                 {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
-              <div style={{ display:"flex", alignItems:"center", gap:6, background:"#f1f5f9", padding:"4px 12px", borderRadius:8, fontSize:12.5, color:"#475569", flexShrink:0 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:6, background: darkMode ? "#1e293b" : "#f1f5f9", padding:"4px 12px", borderRadius:8, fontSize:12.5, color: darkMode ? "#94a3b8" : "#475569", flexShrink:0 }}>
                 <Ic n="chart" s={13} />{planDays.length} days · {Object.values(dayStatus).filter(s=>s==="Completed").length} done
               </div>
             )}
@@ -5463,9 +5568,23 @@ Hard rules:
                 <Ic n="search" s={14}/>
               </button>
             )}
+            <button
+              onClick={() => setDarkMode(d => !d)}
+              title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              style={{
+                flexShrink:0, display:"flex", alignItems:"center", gap:5,
+                padding:"5px 10px", borderRadius:8, border:"none", cursor:"pointer",
+                fontSize:12, fontWeight:700, transition:"all .2s",
+                background: darkMode ? "#1e293b" : "#f1f5f9",
+                color: darkMode ? "#e2e8f0" : "#475569",
+                boxShadow: darkMode ? "0 2px 8px rgba(0,0,0,.4)" : "none",
+              }}
+            >
+              {darkMode ? "☀️" : "🌙"}
+            </button>
           </header>
 
-          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 80px", minHeight:0 }}>
+          <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 80px", minHeight:0, background: darkMode ? "#0d1117" : "transparent" }}>
             <ErrorBoundary>
               {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />}
               {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
@@ -5523,6 +5642,7 @@ Hard rules:
                   groqKey={groqKey} groqModel={groqModel}
                   sb={sb} courseId={courseId} trainerId={trainerId} studentId={studentId}
                   trackActivity={studentMode ? trackActivity : null}
+                  darkMode={darkMode} setDarkMode={setDarkMode}
                   onEditTopic={(newTopic) => {
                     // Find the planDays index for this day key and update only its topic
                     const pidx = dayMap[selDay.key];
@@ -7589,7 +7709,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -7726,7 +7846,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
                 </div>
               ) : (
                 <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                  <h1 style={{ fontSize:20, fontWeight:800, color:"#0f172a", letterSpacing:"-.3px", margin:0 }}>{day.topic}</h1>
+                  <h1 style={{ fontSize:20, fontWeight:800, color: darkMode ? "#f8fafc" : "#0f172a", letterSpacing:"-.3px", margin:0 }}>{day.topic}</h1>
                   {!studentMode && onEditTopic && !day.isExtra && !day.isSpecial && (
                     <button
                       title="Edit topic name"
@@ -7793,7 +7913,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
       </div>
 
       {/* Tabs — scrollable on mobile */}
-      <div style={{ display:"flex", gap:3, background:"#f1f5f9", padding:4, borderRadius:12, marginBottom:20, overflowX:"auto", WebkitOverflowScrolling:"touch", flexShrink:0 }}>
+      <div style={{ display:"flex", gap:3, background: darkMode ? "#1e293b" : "#f1f5f9", padding:4, borderRadius:12, marginBottom:20, overflowX:"auto", WebkitOverflowScrolling:"touch", flexShrink:0, alignItems:"center" }}>
         {TABS.map(t => (
           <button key={t.id} className={`lms-tab${tab===t.id?" on":""}`} onClick={()=>{
             setTab(t.id);
@@ -7805,6 +7925,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
             }
           }} style={{ flexShrink:0 }}>{t.label}</button>
         ))}
+        <div style={{ flex:1 }} />
       </div>
 
       {/* ── Sub-topics input — trainer only, shared across ALL generators for this day ── */}
@@ -7822,6 +7943,13 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           onFileUpload={onFileUpload}
         />
       )}
+
+      {/* ── Content area ── */}
+      <div style={{
+        borderRadius: darkMode ? 18 : 0,
+        background: "transparent",
+        transition: "background .3s",
+      }}>
 
       {/* ── NOTEBOOK ── */}
       {tab==="notebook" && (
@@ -8223,6 +8351,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           )}
         </div>
       )}
+      </div>{/* end dark mode content wrapper */}
+
     {exportOpen && (
       <DayExportPanel
         day={day}
