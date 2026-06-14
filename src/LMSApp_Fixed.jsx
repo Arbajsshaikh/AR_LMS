@@ -5485,11 +5485,11 @@ Hard rules:
               ...(studentMode ? [] : [{ id:"setup",       ic:"upload",   label:"Setup Plan"         }]),
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
-              ...(studentMode ? [] : [{ id:"performance", ic:"teacher",  label:"Student Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}>
-                <Ic n={item.ic} s={16} />
+                {item.ic.length <= 2 ? <span style={{ fontSize:16, lineHeight:1 }}>{item.ic}</span> : <Ic n={item.ic} s={16} />}
                 {!collapsed && <span>{item.label}</span>}
               </button>
             ))}
@@ -5499,7 +5499,18 @@ Hard rules:
                 {!collapsed && <span style={{ overflow:"hidden", textOverflow:"ellipsis", maxWidth:130 }}>Day {selDay.dayNum}</span>}
               </button>
             )}
-
+            {/* ── Leaderboard nav button — visible to both trainer and student ── */}
+            {courseId && (
+              <button
+                className={`lms-nav${leaderboardOpen?" on":""}`}
+                onClick={() => { setLeaderboardOpen(p => !p); setMobileMenuOpen(false); }}
+                title={collapsed ? "Leaderboard" : ""}
+                style={leaderboardOpen ? { background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" } : {}}
+              >
+                <span style={{ fontSize:16, lineHeight:1 }}>🏆</span>
+                {!collapsed && <span>Leaderboard</span>}
+              </button>
+            )}
             {/* Students nav button — Supabase-fetched count */}
             {!studentMode && courseId && (
               <StudentsNavBtn
@@ -5513,18 +5524,7 @@ Hard rules:
               />
             )}
 
-            {/* ── Leaderboard nav button — visible to both trainer and student ── */}
-            {courseId && (
-              <button
-                className={`lms-nav${leaderboardOpen?" on":""}`}
-                onClick={() => { setLeaderboardOpen(p => !p); setMobileMenuOpen(false); }}
-                title={collapsed ? "Leaderboard" : ""}
-                style={leaderboardOpen ? { background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" } : {}}
-              >
-                <span style={{ fontSize:16, lineHeight:1 }}>🏆</span>
-                {!collapsed && <span>Leaderboard</span>}
-              </button>
-            )}
+            
           </nav>
           <div style={{ padding:"10px 6px", borderTop:`1px solid ${darkMode ? "#1f2937" : "#f1f5f9"}` }}>
             <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
