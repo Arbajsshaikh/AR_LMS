@@ -873,6 +873,76 @@ async function sbLoadAllStudentActivity(sb, courseId) {
   } catch { return {}; }
 }
 
+// ── QUIZ ATTEMPTS — dedicated table, never lost on refresh ───────────────
+// SQL to run ONCE in Supabase SQL editor:
+//
+//   create table if not exists lms_quiz_attempts (
+//     id          text primary key,   -- "{studentId}__{courseId}__{dayKey}"
+//     student_id  text not null,
+//     course_id   text not null,
+//     day_key     text not null,
+//     pct         integer not null,
+//     score       integer not null,
+//     total       integer not null,
+//     attempted_at timestamptz not null default now()
+//   );
+//
+// This is the single source of truth for quiz scores.
+// lms_student_activity.quizScores is kept in sync as a read cache.
+async function sbSaveQuizAttempt(sb, studentId, courseId, dayKey, pct, score, total) {
+  if (!sb || !studentId || !courseId || !dayKey) return;
+  const id = `${studentId}__${courseId}__${dayKey}`;
+  await sb.upsert("lms_quiz_attempts", {
+    id,
+    student_id:   studentId,
+    course_id:    courseId,
+    day_key:      dayKey,
+    pct,
+    score,
+    total,
+    attempted_at: new Date().toISOString(),
+  });
+}
+
+async function sbLoadQuizAttempts(sb, studentId, courseId) {
+  if (!sb || !studentId || !courseId) return {};
+  try {
+    const rows = await sb.select(
+      "lms_quiz_attempts",
+      `student_id=eq.${encodeURIComponent(studentId)}&course_id=eq.${encodeURIComponent(courseId)}`
+    );
+    // Returns { [dayKey]: { pct, score, total, date } }
+    const result = {};
+    for (const r of (rows || [])) {
+      result[r.day_key] = { pct: r.pct, score: r.score, total: r.total, date: r.attempted_at };
+    }
+    return result;
+  } catch (e) {
+    console.warn("sbLoadQuizAttempts error:", e.message);
+    return {};
+  }
+}
+
+async function sbLoadAllQuizAttempts(sb, courseId) {
+  if (!sb || !courseId) return {};
+  try {
+    const rows = await sb.select(
+      "lms_quiz_attempts",
+      `course_id=eq.${encodeURIComponent(courseId)}`
+    );
+    // Returns { [studentId]: { [dayKey]: { pct, score, total, date } } }
+    const result = {};
+    for (const r of (rows || [])) {
+      if (!result[r.student_id]) result[r.student_id] = {};
+      result[r.student_id][r.day_key] = { pct: r.pct, score: r.score, total: r.total, date: r.attempted_at };
+    }
+    return result;
+  } catch (e) {
+    console.warn("sbLoadAllQuizAttempts error:", e.message);
+    return {};
+  }
+}
+
 async function sbGetLeaderboardData(sb, courseId, planDays) {
   // Fetch all students and filter to those enrolled in this course.
   // We can't do a server-side JSONB array filter easily with the REST client,
@@ -2425,8 +2495,20 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
         const { enrolled } = await sbGetLeaderboardData(sb, courseId, planDays);
         setStudents(enrolled);
 
-        const aMap = await sbLoadAllStudentActivity(sb, courseId);
-        setActivityMap(aMap);
+        // Load both activity cache AND dedicated quiz attempts (source of truth)
+        const [aMap, allQuizAttempts] = await Promise.all([
+          sbLoadAllStudentActivity(sb, courseId),
+          sbLoadAllQuizAttempts(sb, courseId),
+        ]);
+        // Merge quiz attempts (dedicated table) over activity cache (may be stale)
+        const mergedAMap = { ...aMap };
+        for (const [sid, quizScores] of Object.entries(allQuizAttempts)) {
+          mergedAMap[sid] = {
+            ...(mergedAMap[sid] || {}),
+            quizScores: { ...(mergedAMap[sid]?.quizScores || {}), ...quizScores },
+          };
+        }
+        setActivityMap(mergedAMap);
 
         // Load day statuses for all students in parallel
         const sMap = {};
@@ -2741,6 +2823,7 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
 function StudentCourseView({ sb, auth, handleLogout }) {
   // FIX 11 & 12: Added refresh mechanism + retry on empty enrollment
   const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [pendingCourses, setPendingCourses]   = useState([]);
   const [activeCourseId, setActiveCourseId]   = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -2761,6 +2844,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
       if (!student) { setLoading(false); return; }
       const enrolled = getStudentEnrolledCourses(student);
       setEnrolledCourses(enrolled);
+      setPendingCourses(student.pendingCourseIds || []);
       // Default to first enrolled course; preserve active selection if still valid
       setActiveCourseId(prev => {
         if (prev && enrolled.some(e => e.courseId === prev)) return prev;
@@ -2981,7 +3065,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
       )}
 
       {hasAnyCourse && activeCourseId ? (
-        <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} studentId={auth?.id} />
+        <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} studentId={auth?.id} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />
       ) : (
         <div style={{ maxWidth:600, margin:"80px auto", padding:"0 20px", textAlign:"center" }}>
           <div style={{ background:"white", borderRadius:12, padding:"48px 40px", boxShadow:"0 4px 20px rgba(0,0,0,.06)" }}>
@@ -3027,9 +3111,20 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
         const { enrolled } = await sbGetLeaderboardData(sb, courseId, planDays);
         setStudents(enrolled);
 
-        // 2. Activity map for all students in this course (single query)
-        const aMap = await sbLoadAllStudentActivity(sb, courseId);
-        setActivityMap(aMap);
+        // 2. Activity map + quiz attempts (dedicated table = source of truth)
+        const [aMap, allQuizAttempts] = await Promise.all([
+          sbLoadAllStudentActivity(sb, courseId),
+          sbLoadAllQuizAttempts(sb, courseId),
+        ]);
+        // Merge quiz attempts over activity cache so scores are never stale
+        const mergedAMap = { ...aMap };
+        for (const [sid, quizScores] of Object.entries(allQuizAttempts)) {
+          mergedAMap[sid] = {
+            ...(mergedAMap[sid] || {}),
+            quizScores: { ...(mergedAMap[sid]?.quizScores || {}), ...quizScores },
+          };
+        }
+        setActivityMap(mergedAMap);
 
         // 3. Per-student day status map (parallel fetch)
         const statusMap = {};
@@ -3409,7 +3504,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
    STUDENT DASHBOARD — personal progress overview for enrolled students
    Shows stats, activity breakdown, recent days, and a quick-actions strip.
 ═══════════════════════════════════════════════════════════════════ */
-function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, studentActivity, dayData, startDate, courseId, onSelectDay, readOnly = false }) {
+function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, studentActivity, dayData, startDate, courseId, onSelectDay, readOnly = false, enrolledCourses = [], pendingCourses = [] }) {
   const act = studentActivity || {};
   const goToDay = readOnly ? null : onSelectDay;
 
@@ -3470,11 +3565,11 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
   });
 
   const statBox = (icon, value, label, color) => (
-    <div style={{ ...card(), display:"flex", alignItems:"center", gap:14, minWidth:0 }}>
-      <div style={{ width:44, height:44, borderRadius:12, background:`${color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>{icon}</div>
-      <div style={{ minWidth:0 }}>
-        <div style={{ fontSize:24, fontWeight:800, color:"#0f172a", lineHeight:1 }}>{value}</div>
-        <div style={{ fontSize:12, color:"#64748b", marginTop:3, whiteSpace:"nowrap" }}>{label}</div>
+    <div style={{ ...card(), display:"flex", alignItems:"center", gap:12, minWidth:0 }}>
+      <div style={{ width:42, height:42, borderRadius:12, background:`${color}18`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>{icon}</div>
+      <div style={{ minWidth:0, flex:1 }}>
+        <div style={{ fontSize:22, fontWeight:800, color:"#0f172a", lineHeight:1 }}>{value}</div>
+        <div style={{ fontSize:11.5, color:"#64748b", marginTop:3, whiteSpace:"normal", lineHeight:1.3 }}>{label}</div>
       </div>
     </div>
   );
@@ -3483,7 +3578,7 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
   const statusDot   = (s) => <span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:statusColor[s]||"#e2e8f0", marginRight:6 }} />;
 
   return (
-    <div style={{ maxWidth:860, margin:"0 auto", display:"flex", flexDirection:"column", gap:20 }}>
+    <div style={{ width:"100%", display:"flex", flexDirection:"column", gap:20 }}>
 
       {/* ── Header ── */}
       <div style={{ ...card({ background:"linear-gradient(135deg,#3b82f6,#8b5cf6)", border:"none", color:"#fff" }) }}>
@@ -3510,7 +3605,7 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
       </div>
 
       {/* ── Stat boxes grid ── */}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:12 }}>
         {statBox("💻", codeRuns,   "Code Runs",         "#3b82f6")}
         {statBox("⚗️", practicals,  "Practicals",        "#f97316")}
         {statBox("📖", exViews,    "Examples Viewed",   "#8b5cf6")}
@@ -3520,10 +3615,66 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
         {statBox("🎯", avgQuizPct !== null ? `${avgQuizPct}%` : "—", `Quiz Avg (${quizTaken} taken)`, "#6366f1")}
       </div>
 
+      {/* ── My Courses ── */}
+      {(enrolledCourses.length > 0 || pendingCourses.length > 0) && (
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:14 }}>📚 My Courses</div>
+
+          {/* Enrolled courses */}
+          {enrolledCourses.length > 0 && (
+            <>
+              <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>✅ Enrolled</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom: pendingCourses.length > 0 ? 16 : 0 }}>
+                {enrolledCourses.map(e => {
+                  const isActive = e.courseId === courseId;
+                  return (
+                    <div key={e.courseId} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:10, background: isActive ? "#eff6ff" : "#f8fafc", border: `1.5px solid ${isActive ? "#bfdbfe" : "#e2e8f0"}` }}>
+                      <div style={{ width:36, height:36, borderRadius:10, background: isActive ? "#3b82f6" : "#e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
+                        📖
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontWeight:700, fontSize:13.5, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{e.courseName || "Unnamed Course"}</div>
+                        <div style={{ fontSize:11, color:"#64748b", marginTop:1 }}>Course ID: {e.courseId?.slice(0, 12)}…</div>
+                      </div>
+                      {isActive && (
+                        <span style={{ fontSize:10, fontWeight:700, color:"#2563eb", background:"#dbeafe", padding:"2px 8px", borderRadius:99, flexShrink:0 }}>ACTIVE</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* Pending courses */}
+          {pendingCourses.length > 0 && (
+            <>
+              <div style={{ fontSize:11, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>⏳ Pending Approval</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {pendingCourses.map(p => (
+                  <div key={p.courseId} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:10, background:"#fffbeb", border:"1.5px solid #fde68a" }}>
+                    <div style={{ width:36, height:36, borderRadius:10, background:"#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>
+                      ⏳
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontWeight:700, fontSize:13.5, color:"#92400e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.courseName || "Unnamed Course"}</div>
+                      <div style={{ fontSize:11, color:"#b45309", marginTop:1 }}>
+                        Requested {p.requestedAt ? new Date(p.requestedAt).toLocaleDateString() : "recently"} · Awaiting trainer approval
+                      </div>
+                    </div>
+                    <span style={{ fontSize:10, fontWeight:700, color:"#d97706", background:"#fef3c7", padding:"2px 8px", borderRadius:99, flexShrink:0 }}>PENDING</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ── Quiz breakdown (only if quizzes taken) ── */}
       {quizTaken > 0 && (
         <div style={card()}>
-          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>🎯 Quiz Scores</div>
+          <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", marginBottom:12 }}>🎯 Quiz Scores (saved from lms_student_activity)</div>
           <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
             {Object.entries(act.quizScores || {}).map(([dayKey, qs]) => {
               const day = enrichedDays.find(d => d.key === dayKey);
@@ -3648,7 +3799,7 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
 /* ═══════════════════════════════════════════════════════════════════
    ORIGINAL LMS APP (inner course workspace) — Supabase-backed
 ═══════════════════════════════════════════════════════════════════ */
-function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, sb, trainerId = null, studentId = null }) {
+function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, sb, trainerId = null, studentId = null, enrolledCourses = [], pendingCourses = [] }) {
   const [aiProvider, setAiProvider] = useState("groq");
   const [groqKey,    setGroqKey]    = useState("");
   const [groqModel,  setGroqModel]  = useState(GROQ_MODELS[0]);
@@ -3734,18 +3885,27 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         if (Object.keys(studentStatus).length > 0) setDayStatus(studentStatus);
         // Also store trainer's day_status for read-only display to student
         if (course.dayStatus) setTrainerDayStatus(course.dayStatus);
-        // Load student's own activity record
+        // Load student's own activity record from lms_student_activity
         const act = await sbLoadMyActivity(sb, studentId, courseId).catch(() => ({}));
-        const withJoin = { ...act, joinedAt: act.joinedAt || new Date().toISOString(), lastSeen: new Date().toISOString() };
+        // ── QUIZ SOURCE OF TRUTH: load from lms_quiz_attempts (dedicated table, never lost) ──
+        // lms_student_activity.quizScores may be stale/empty if the upsert failed silently.
+        // lms_quiz_attempts is always written first on submit, so always wins.
+        const quizFromDb = await sbLoadQuizAttempts(sb, studentId, courseId).catch(() => ({}));
+        // Merge: dedicated table overrides anything in activity cache
+        const mergedQuizScores = { ...(act.quizScores || {}), ...quizFromDb };
+        const withJoin = {
+          ...act,
+          quizScores: mergedQuizScores,
+          joinedAt: act.joinedAt || new Date().toISOString(),
+          lastSeen: new Date().toISOString(),
+        };
         setStudentActivity(withJoin);
         studentActivityRef.current = withJoin;
-        // FIX: hydrate dayData.quizScore from Supabase activity so "Last score" survives refresh.
-        // All other stats (codeRuns, practicals, exampleViews etc.) are read directly from
-        // studentActivity state — quizScore is the only one also embedded in dayData.
-        if (Object.keys(withJoin.quizScores || {}).length > 0) {
+        // Also hydrate dayData.quizScore so "Last score" badge survives refresh
+        if (Object.keys(mergedQuizScores).length > 0) {
           setDayData(prev => {
             const next = { ...prev };
-            for (const [dayKey, qs] of Object.entries(withJoin.quizScores)) {
+            for (const [dayKey, qs] of Object.entries(mergedQuizScores)) {
               next[dayKey] = { ...(next[dayKey] || {}), quizScore: qs };
             }
             return next;
@@ -3847,12 +4007,6 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           }
           for (const [k, v] of Object.entries(contentByDay)) {
             next[k] = { ...(next[k] || {}), ...v };
-          }
-          // FIX: re-hydrate quizScore from Supabase studentActivity on every sync
-          // so "Last score" badge in QuizTab never goes stale after a refresh or Realtime event.
-          const currentAct = studentActivityRef.current || {};
-          for (const [dayKey, qs] of Object.entries(currentAct.quizScores || {})) {
-            next[dayKey] = { ...(next[dayKey] || {}), quizScore: qs };
           }
           return next;
         });
@@ -5325,7 +5479,7 @@ Hard rules:
 
           <main style={{ flex:1, overflowY:"auto", padding:"20px 20px 80px", minHeight:0 }}>
             <ErrorBoundary>
-              {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} />}
+              {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />}
               {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
               {parsePlanConfirm && (
@@ -5379,7 +5533,7 @@ Hard rules:
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
                   groqKey={groqKey} groqModel={groqModel}
-                  sb={sb} courseId={courseId} trainerId={trainerId}
+                  sb={sb} courseId={courseId} trainerId={trainerId} studentId={studentId}
                   trackActivity={studentMode ? trackActivity : null}
                   onEditTopic={(newTopic) => {
                     // Find the planDays index for this day key and update only its topic
@@ -7447,7 +7601,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, trackActivity }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -8020,6 +8174,9 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           notify={notify}
           studentMode={studentMode}
           trackActivity={trackActivity}
+          sb={sb}
+          courseId={courseId}
+          studentId={studentId}
         />
       )}
 
@@ -8503,7 +8660,7 @@ function TeachingGuideView({ content }) {
 /* ═══════════════════════════════════════════════════════════════════
    QUIZ TAB — interactive MCQ with scoring
 ═══════════════════════════════════════════════════════════════════ */
-function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode, trackActivity }) {
+function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId }) {
   const k = day.key;
   const questions = dayData.quiz || null;
   const [answers, setAnswers] = useState({});
@@ -8514,20 +8671,29 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
     ? questions.filter((q, i) => answers[i] === q.answer).length
     : 0;
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (Object.keys(answers).length < (questions?.length || 0)) {
       notify("Answer all questions before submitting", "warn");
       return;
     }
-    // Compute score inline — don't rely on the `score` variable (computed when !submitted, always 0)
     const finalScore = questions.filter((q, i) => answers[i] === q.answer).length;
     setSubmitted(true);
     const pct = Math.round(finalScore / questions.length * 100);
     notify(`Quiz complete! ${finalScore}/${questions.length} (${pct}%)`);
-    const quizResult = { score: finalScore, total: questions.length, pct, date: new Date().toISOString() };
-    // updateDay persists quizScore to lms_student_activity immediately (not debounced)
+    const quizResult = { pct, score: finalScore, total: questions.length, date: new Date().toISOString() };
+
+    // ── Step 1: Write to dedicated lms_quiz_attempts table (source of truth) ──
+    // This is a simple upsert — always succeeds independently of activity table.
+    if (studentMode && sb && courseId && studentId && k) {
+      sbSaveQuizAttempt(sb, studentId, courseId, k, pct, finalScore, questions.length)
+        .catch(e => console.error("❌ Quiz attempt save failed:", e.message,
+          "\nEnsure lms_quiz_attempts table exists — see SQL in code comments."));
+    }
+
+    // ── Step 2: Update in-memory dayData (shows "Last score" badge immediately) ──
     updateDay(k, { quizScore: quizResult });
-    // trackActivity ALSO merges into studentActivity state + schedules debounced upsert (double-safety)
+
+    // ── Step 3: Merge into studentActivity state + debounced lms_student_activity upsert ──
     if (trackActivity) trackActivity("quizScore", k, quizResult);
   };
 
