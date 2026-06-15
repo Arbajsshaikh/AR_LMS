@@ -571,13 +571,13 @@ function makeSupabase(url, key) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   SESSION STORAGE HELPERS (credentials + auth only — no app data)
+   LOCAL STORAGE HELPERS (auth persists across tabs + browser restarts)
 ═══════════════════════════════════════════════════════════════════ */
 function getAuthState() {
-  try { const s = sessionStorage.getItem(SB_AUTH_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
+  try { const s = localStorage.getItem(SB_AUTH_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
 }
 function saveAuthState(state) {
-  try { sessionStorage.setItem(SB_AUTH_KEY, JSON.stringify(state)); } catch {}
+  try { localStorage.setItem(SB_AUTH_KEY, JSON.stringify(state)); } catch {}
 }
 function getSbCreds() { return { url: _SB_URL, key: _SB_KEY }; }
 function saveSbCreds() { /* no-op: credentials are in .env */ }
@@ -6432,7 +6432,7 @@ Hard rules:
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
@@ -11605,7 +11605,7 @@ export default function LMSApp() {
   }, [sb, auth?.id]);
 
   const handleLogout = () => {
-    try { sessionStorage.removeItem(SB_AUTH_KEY); } catch {}
+    try { localStorage.removeItem(SB_AUTH_KEY); } catch {}
     setAuth(null);
     setCourseView(false);
     setCurrentCourseId(null);
