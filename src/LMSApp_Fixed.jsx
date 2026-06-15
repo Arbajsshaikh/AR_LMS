@@ -1111,7 +1111,7 @@ async function sbCreateAttendanceSession(sb, courseId, trainerId, label = "") {
   const token   = generateId();
   const id      = "att_sess_" + generateId();
   const now     = new Date();
-  const expires = new Date(now.getTime() + 15 * 1000);
+  const expires = new Date(now.getTime() + 60 * 1000);
   const row = {
     id, course_id: courseId, trainer_id: trainerId,
     session_date: now.toISOString().split("T")[0],
@@ -1138,7 +1138,7 @@ async function sbGetActiveSession(sb, token) {
 async function sbMarkAttendance(sb, token, studentId, studentName, courseId) {
   const session = await sbGetActiveSession(sb, token);
   if (!session) throw new Error("Invalid attendance token.");
-  if (session.expired) throw new Error("This QR code has expired (15-second window). Ask your trainer for a new one.");
+  if (session.expired) throw new Error("This QR code has expired (60-second window). Ask your trainer for a new one.");
   if (session.course_id !== courseId) throw new Error("This QR code is for a different course.");
   const existing = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(session.id)}&student_id=eq.${encodeURIComponent(studentId)}&limit=1`);
   if (existing?.length > 0) throw new Error("You have already marked attendance for this session.");
@@ -3943,9 +3943,9 @@ function QRCodeCanvas({ token, courseId, size = 200 }) {
   );
 }
 
-/* ─── QR Display with 15-second countdown ring ─────────────────── */
+/* ─── QR Display with 60-second countdown ring ─────────────────── */
 function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0 }) {
-  const [timeLeft, setTimeLeft] = useState(15);
+  const [timeLeft, setTimeLeft] = useState(60);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -3961,8 +3961,8 @@ function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0 }) {
   }, [session]);
 
   if (!session) return null;
-  const pct      = (timeLeft / 15) * 100;
-  const color    = timeLeft > 10 ? "#22c55e" : timeLeft > 5 ? "#f59e0b" : "#ef4444";
+  const pct      = (timeLeft / 60) * 100;
+  const color    = timeLeft > 40 ? "#22c55e" : timeLeft > 15 ? "#f59e0b" : "#ef4444";
   const R        = 108;
   const circ     = 2 * Math.PI * R;
 
@@ -4082,7 +4082,7 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
     try {
       const s = await sbCreateAttendanceSession(sb, courseId, trainerId);
       setSession(s); setLiveCount(0);
-      showAttToast("✅ Attendance QR is live — 15 seconds!");
+      showAttToast("✅ Attendance QR is live — 60 seconds!");
     } catch (e) {
       showAttToast("❌ " + e.message, "err");
     } finally {
@@ -4306,7 +4306,7 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9800, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
           <div style={{ background:"#fff", borderRadius:24, padding:"32px 28px", maxWidth:440, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.4)", textAlign:"center" }}>
             <div style={{ fontWeight:800, fontSize:20, color:"#0f172a", marginBottom:6 }}>📷 Scan to Mark Attendance</div>
-            <div style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>QR expires in 15 seconds — no proxy possible</div>
+            <div style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>QR expires in 60 seconds — no proxy possible</div>
             <AttendanceQRDisplay session={session} onExpire={handleExpire} courseId={courseId} liveCount={liveCount}/>
             <div style={{ marginTop:16, padding:"10px 14px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, fontSize:11.5, color:"#64748b", wordBreak:"break-all" }}>
               🔗 Students scan with phone camera to open the URL automatically
