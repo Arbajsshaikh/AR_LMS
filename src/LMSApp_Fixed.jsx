@@ -4718,7 +4718,6 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [studentsOpen, setStudentsOpen] = useState(false);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
-  const [attendanceOpen, setAttendanceOpen]   = useState(false);
 
   // ── Detect attendance QR scan URL params (?att=TOKEN&course=ID) ──
   const [attScanActive, setAttScanActive] = useState(() => {
@@ -6409,10 +6408,12 @@ Hard rules:
               ...(studentMode ? [] : [{ id:"setup",       ic:"upload",   label:"Setup Plan"         }]),
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
+              ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
               ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
-              <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen&&!attendanceOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); setAttendanceOpen(false); }} title={collapsed?item.label:""}>
+              <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
+                style={page===item.id&&!leaderboardOpen&&item.id==="attendance" ? { background:"linear-gradient(135deg,#10b981,#059669)", color:"#fff" } : {}}>
                 {item.ic.length <= 2 ? <span style={{ fontSize:16, lineHeight:1 }}>{item.ic}</span> : <Ic n={item.ic} s={16} />}
                 {!collapsed && <span>{item.label}</span>}
               </button>
@@ -6441,25 +6442,12 @@ Hard rules:
             {courseId && (
               <button
                 className={`lms-nav${leaderboardOpen?" on":""}`}
-                onClick={() => { setLeaderboardOpen(p => !p); setAttendanceOpen(false); setMobileMenuOpen(false); }}
+                onClick={() => { setLeaderboardOpen(p => !p); setMobileMenuOpen(false); }}
                 title={collapsed ? "Leaderboard" : ""}
                 style={leaderboardOpen ? { background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" } : {}}
               >
                 <span style={{ fontSize:16, lineHeight:1 }}>🏆</span>
                 {!collapsed && <span>Leaderboard</span>}
-              </button>
-            )}
-
-            {/* ── Attendance nav button — trainer only ── */}
-            {!studentMode && courseId && (
-              <button
-                className={`lms-nav${attendanceOpen?" on":""}`}
-                onClick={() => { setAttendanceOpen(p => !p); setLeaderboardOpen(false); setMobileMenuOpen(false); }}
-                title={collapsed ? "Attendance" : ""}
-                style={attendanceOpen ? { background:"linear-gradient(135deg,#10b981,#059669)", color:"#fff" } : {}}
-              >
-                <Ic n="clipbrd" s={16} />
-                {!collapsed && <span>Attendance</span>}
               </button>
             )}
           </nav>
@@ -6489,7 +6477,7 @@ Hard rules:
             <div style={{ flex:1, fontSize:13, color: darkMode ? "#94a3b8" : "#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
               <span style={{ color: darkMode ? "#64748b" : "#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color: darkMode ? "#f1f5f9" : "#0f172a", fontWeight:600 }}>
-                {leaderboardOpen?"🏆 Leaderboard":attendanceOpen?"📋 Attendance":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
+                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="attendance"?"📋 Attendance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
@@ -6625,8 +6613,8 @@ Hard rules:
                   currentStudentId={studentMode ? studentId : null}
                 />
               )}
-              {/* ── ATTENDANCE — trainer only ── */}
-              {attendanceOpen && !studentMode && courseId && (
+              {/* ── ATTENDANCE — trainer only, proper page route ── */}
+              {!leaderboardOpen && page==="attendance" && !studentMode && courseId && (
                 <AttendancePage
                   sb={sb}
                   courseId={courseId}
@@ -11557,10 +11545,24 @@ export default function LMSApp() {
   const [currentCourseId, setCurrentCourseId] = useState(null);
   const [courseView, setCourseView]           = useState(false);
 
+  // ── Detect QR attendance URL params once on mount ──────────────
+  // ?att=TOKEN&course=COURSE_ID — set by trainer's QR display
+  const hasQRParams = (() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      return !!(p.get("att") && p.get("course"));
+    } catch { return false; }
+  })();
+
   // ── Page routing: "landing" | "login" | "register" ───────────
   // If user is already logged in we skip straight to the app.
+  // If not logged in but a QR scan URL is detected, skip landing → go straight to login.
   // If not logged in we start on the landing page.
-  const [page, setPage] = useState(() => getAuthState() ? "app" : "landing");
+  const [page, setPage] = useState(() => {
+    if (getAuthState()) return "app";
+    if (hasQRParams) return "login"; // QR scanned while logged out → show login immediately
+    return "landing";
+  });
 
   const isTrainer = auth?.role === "trainer";
   const isStudent = auth?.role === "student";
@@ -11617,7 +11619,7 @@ export default function LMSApp() {
       <LoginScreen
         onLogin={() => { setAuth(getAuthState()); setPage("app"); }}
         sb={sb}
-        initialMode={page === "register" ? "register" : "select"}
+        initialMode={page === "register" ? "register" : hasQRParams ? "student" : "select"}
         onBackToLanding={() => setPage("landing")}
       />
     );
