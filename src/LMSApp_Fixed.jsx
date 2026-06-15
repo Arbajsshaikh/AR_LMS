@@ -6432,7 +6432,7 @@ Hard rules:
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
