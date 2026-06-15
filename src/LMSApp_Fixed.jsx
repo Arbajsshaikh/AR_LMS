@@ -4259,7 +4259,7 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
   );
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", gap:20, maxWidth:1200, margin:"0 auto" }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:20, width:"100%" }}>
 
       {/* ── Header banner ── */}
       <div style={{ background:"linear-gradient(135deg,#064e3b,#065f46)", borderRadius:18, padding:"22px 26px", color:"#fff" }}>
@@ -6432,7 +6432,7 @@ Hard rules:
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
