@@ -4646,11 +4646,28 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
   const [state, setState]   = useState("scanning");
   const [scanMsg, setScanMsg] = useState("");
 
+  // Capture URL params at component creation time (before anything wipes the URL).
+  // Stored in a ref so re-renders don't re-read a cleared window.location.search.
+  const attParamsRef = useRef(null);
+  if (attParamsRef.current === null) {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      attParamsRef.current = { token: p.get("att") || "", courseId: p.get("course") || "" };
+    } catch { attParamsRef.current = { token: "", courseId: "" }; }
+  }
+  const { token, courseId } = attParamsRef.current;
+
+  // hasFiredRef ensures sbMarkAttendance is called exactly once even if
+  // auth is passed as an inline object literal (new reference each render).
+  const hasFiredRef = useRef(false);
+
   useEffect(() => {
-    const params   = new URLSearchParams(window.location.search);
-    const token    = params.get("att");
-    const courseId = params.get("course");
-    if (!token || !courseId || !sb || !auth) {
+    if (hasFiredRef.current) return;   // already fired — never call twice
+    if (!sb || !auth?.id) return;      // not ready yet — wait for deps to settle
+
+    hasFiredRef.current = true;        // mark BEFORE the async call
+
+    if (!token || !courseId) {
       setState("error"); setScanMsg("Invalid or missing attendance token."); return;
     }
     if (auth.role !== "student") {
@@ -4666,7 +4683,9 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
         setState("error"); setScanMsg(e.message);
         window.history.replaceState({}, "", window.location.pathname);
       });
-  }, [sb, auth]);
+  // Use stable primitives only — avoids re-firing when parent re-renders
+  // and passes a new inline auth object on every render cycle.
+  }, [sb, auth?.id]);
 
   return (
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9900, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
@@ -4720,9 +4739,13 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
 
   // ── Detect attendance QR scan URL params (?att=TOKEN&course=ID) ──
+  // Captured at first render via lazy init — remains true even after
+  // AttendanceScanHandler calls window.history.replaceState to wipe the URL.
   const [attScanActive, setAttScanActive] = useState(() => {
-    const p = new URLSearchParams(window.location.search);
-    return !!(p.get("att") && p.get("course"));
+    try {
+      const p = new URLSearchParams(window.location.search);
+      return !!(p.get("att") && p.get("course"));
+    } catch { return false; }
   });
 
   const [planText,  setPlanText]  = useState("");
@@ -6629,10 +6652,13 @@ Hard rules:
         </div>
 
         {/* ── Attendance QR scan handler (student sees this after scanning) ── */}
-        {attScanActive && studentMode && sb && auth && (
+        {/* FIX: pass auth directly (not an inline object) so the handler's
+            useEffect dep [sb, auth?.id] stays stable across re-renders.
+            Also guard on studentId so it only shows when the student is ready. */}
+        {attScanActive && studentMode && sb && auth && studentId && (
           <AttendanceScanHandler
             sb={sb}
-            auth={{ id: studentId, name: auth.name, role: "student" }}
+            auth={auth}
             onDismiss={() => setAttScanActive(false)}
           />
         )}
