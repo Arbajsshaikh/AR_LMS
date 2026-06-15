@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Component } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
 
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
@@ -1087,6 +1087,86 @@ async function sbDeleteFile(sb, fileId) {
   await sb.delete("lms_day_files", `id=eq.${encodeURIComponent(fileId)}`);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//   ATTENDANCE SYSTEM — SUPABASE DATA LAYER
+//   SQL to run once in Supabase:
+//
+//   CREATE TABLE IF NOT EXISTS lms_attendance_sessions (
+//     id text PRIMARY KEY, course_id text NOT NULL, trainer_id text NOT NULL,
+//     session_date date NOT NULL, qr_token text NOT NULL UNIQUE,
+//     qr_expires_at timestamptz NOT NULL, label text, created_at timestamptz DEFAULT now()
+//   );
+//   CREATE TABLE IF NOT EXISTS lms_attendance_records (
+//     id text PRIMARY KEY, session_id text NOT NULL, student_id text NOT NULL,
+//     student_name text NOT NULL, course_id text NOT NULL, session_date date NOT NULL,
+//     scanned_at timestamptz DEFAULT now(), UNIQUE(session_id, student_id)
+//   );
+//   CREATE INDEX IF NOT EXISTS idx_att_sess_course ON lms_attendance_sessions(course_id);
+//   CREATE INDEX IF NOT EXISTS idx_att_rec_session ON lms_attendance_records(session_id);
+//   CREATE INDEX IF NOT EXISTS idx_att_rec_student ON lms_attendance_records(student_id);
+//   CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_id);
+// ═══════════════════════════════════════════════════════════════════
+
+async function sbCreateAttendanceSession(sb, courseId, trainerId, label = "") {
+  const token   = generateId();
+  const id      = "att_sess_" + generateId();
+  const now     = new Date();
+  const expires = new Date(now.getTime() + 15 * 1000);
+  const row = {
+    id, course_id: courseId, trainer_id: trainerId,
+    session_date: now.toISOString().split("T")[0],
+    qr_token: token, qr_expires_at: expires.toISOString(),
+    label: label || `Session ${now.toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}`,
+    created_at: now.toISOString(),
+  };
+  await sb.upsert("lms_attendance_sessions", row);
+  return { ...row, expiresAt: expires };
+}
+
+async function sbGetAttendanceSessions(sb, courseId) {
+  const rows = await sb.select("lms_attendance_sessions", `course_id=eq.${encodeURIComponent(courseId)}&order=created_at.desc&limit=500`);
+  return rows || [];
+}
+
+async function sbGetActiveSession(sb, token) {
+  const rows = await sb.select("lms_attendance_sessions", `qr_token=eq.${encodeURIComponent(token)}&limit=1`);
+  const session = rows?.[0];
+  if (!session) return null;
+  return { ...session, expired: new Date(session.qr_expires_at) < new Date() };
+}
+
+async function sbMarkAttendance(sb, token, studentId, studentName, courseId) {
+  const session = await sbGetActiveSession(sb, token);
+  if (!session) throw new Error("Invalid attendance token.");
+  if (session.expired) throw new Error("This QR code has expired (15-second window). Ask your trainer for a new one.");
+  if (session.course_id !== courseId) throw new Error("This QR code is for a different course.");
+  const existing = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(session.id)}&student_id=eq.${encodeURIComponent(studentId)}&limit=1`);
+  if (existing?.length > 0) throw new Error("You have already marked attendance for this session.");
+  const record = {
+    id: "att_rec_" + generateId(),
+    session_id: session.id, student_id: studentId, student_name: studentName,
+    course_id: courseId, session_date: session.session_date,
+    scanned_at: new Date().toISOString(),
+  };
+  await sb.upsert("lms_attendance_records", record);
+  return record;
+}
+
+async function sbGetAttendanceRecords(sb, courseId) {
+  const rows = await sb.select("lms_attendance_records", `course_id=eq.${encodeURIComponent(courseId)}&order=scanned_at.asc&limit=5000`);
+  return rows || [];
+}
+
+async function sbGetAttendanceBySession(sb, sessionId) {
+  const rows = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(sessionId)}&order=scanned_at.asc`);
+  return rows || [];
+}
+
+async function sbDeleteAttendanceSession(sb, sessionId) {
+  await sb.delete("lms_attendance_records", `session_id=eq.${encodeURIComponent(sessionId)}`).catch(() => {});
+  await sb.delete("lms_attendance_sessions", `id=eq.${encodeURIComponent(sessionId)}`);
+}
+
 // ── PER-STUDENT DAY STATUS — lms_student_day_status table ────────────────
 // One row per (student_id, course_id) stores the full { dayKey: status } map.
 // Trainers use lms_courses.day_status (unchanged). Students use this table.
@@ -1862,6 +1942,7 @@ const Ic = ({ n, s=16, c="currentColor" }) => {
   if (n==="refresh")  return <svg {...a}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>;
   if (n==="search")   return <svg {...a}><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
   if (n==="shield")   return <svg {...a}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
+  if (n==="clipbrd")  return <svg {...a}><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>;
   return null;
 };
 
@@ -3065,7 +3146,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
       )}
 
       {hasAnyCourse && activeCourseId ? (
-        <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} studentId={auth?.id} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />
+        <OriginalLMSApp key={activeCourseId} courseId={activeCourseId} studentMode={true} sb={sb} studentId={auth?.id} auth={auth} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />
       ) : (
         <div style={{ maxWidth:600, margin:"80px auto", padding:"0 20px", textAlign:"center" }}>
           <div style={{ background:"white", borderRadius:12, padding:"48px 40px", boxShadow:"0 4px 20px rgba(0,0,0,.06)" }}>
@@ -3787,7 +3868,843 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
 /* ═══════════════════════════════════════════════════════════════════
    ORIGINAL LMS APP (inner course workspace) — Supabase-backed
 ═══════════════════════════════════════════════════════════════════ */
-function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, sb, trainerId = null, studentId = null, enrolledCourses = [], pendingCourses = [] }) {
+/* ═══════════════════════════════════════════════════════════════════
+   ATTENDANCE SYSTEM — UI COMPONENTS
+═══════════════════════════════════════════════════════════════════ */
+
+/* ─── Lazy-load qrcode.js ──────────────────────────────────────── */
+let _qrLibPromise = null;
+function loadQRLib() {
+  if (typeof QRCode !== "undefined") return Promise.resolve();
+  if (_qrLibPromise) return _qrLibPromise;
+  _qrLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src   = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
+    s.onload  = resolve;
+    s.onerror = () => { _qrLibPromise = null; reject(new Error("Failed to load QR library")); };
+    document.head.appendChild(s);
+  });
+  return _qrLibPromise;
+}
+
+/* ─── SheetJS lazy loader ──────────────────────────────────────── */
+let _xlsxLibPromise = null;
+function loadXLSX() {
+  if (typeof XLSX !== "undefined") return Promise.resolve(window.XLSX);
+  if (_xlsxLibPromise) return _xlsxLibPromise;
+  _xlsxLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src   = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.onload  = () => resolve(window.XLSX);
+    s.onerror = () => { _xlsxLibPromise = null; reject(new Error("Failed to load Excel library")); };
+    document.head.appendChild(s);
+  });
+  return _xlsxLibPromise;
+}
+
+/* ─── Canvas-based QR renderer ─────────────────────────────────── */
+function QRCodeCanvas({ token, courseId, size = 200 }) {
+  const containerRef = useRef(null);
+  const [loaded, setLoaded] = useState(false);
+  const [qrError, setQrError] = useState(false);
+  const scanUrl = `${window.location.origin}${window.location.pathname}?att=${token}&course=${courseId}`;
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    setLoaded(false); setQrError(false);
+    loadQRLib().then(() => {
+      if (!containerRef.current) return;
+      containerRef.current.innerHTML = "";
+      try {
+        new QRCode(containerRef.current, {
+          text: scanUrl, width: size, height: size,
+          colorDark: "#0f172a", colorLight: "#ffffff",
+          correctLevel: QRCode.CorrectLevel.M,
+        });
+        setLoaded(true);
+      } catch { setQrError(true); }
+    }).catch(() => setQrError(true));
+  }, [token, courseId, size, scanUrl]);
+
+  return (
+    <div style={{ position:"relative", width:size, height:size, flexShrink:0 }}>
+      <div ref={containerRef} style={{ width:size, height:size, borderRadius:10, overflow:"hidden", background:"#fff" }}/>
+      {!loaded && !qrError && (
+        <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"#f8fafc", borderRadius:10, fontSize:12, color:"#94a3b8" }}>
+          Loading QR…
+        </div>
+      )}
+      {qrError && (
+        <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"#fef2f2", borderRadius:10, fontSize:11, color:"#dc2626", textAlign:"center", padding:8 }}>
+          QR load failed.<br/>Check internet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── QR Display with 15-second countdown ring ─────────────────── */
+function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0 }) {
+  const [timeLeft, setTimeLeft] = useState(15);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    if (!session) return;
+    const update = () => {
+      const rem = Math.max(0, Math.ceil((new Date(session.qr_expires_at) - new Date()) / 1000));
+      setTimeLeft(rem);
+      if (rem <= 0) { clearInterval(timerRef.current); onExpire?.(); }
+    };
+    update();
+    timerRef.current = setInterval(update, 250);
+    return () => clearInterval(timerRef.current);
+  }, [session]);
+
+  if (!session) return null;
+  const pct      = (timeLeft / 15) * 100;
+  const color    = timeLeft > 10 ? "#22c55e" : timeLeft > 5 ? "#f59e0b" : "#ef4444";
+  const R        = 108;
+  const circ     = 2 * Math.PI * R;
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:16 }}>
+      <div style={{ position:"relative", display:"inline-flex", alignItems:"center", justifyContent:"center" }}>
+        {/* SVG ring */}
+        <svg width={248} height={248} style={{ transform:"rotate(-90deg)", position:"absolute", top:0, left:0 }}>
+          <circle cx={124} cy={124} r={R} fill="none" stroke="#f1f5f9" strokeWidth={8}/>
+          <circle cx={124} cy={124} r={R} fill="none" stroke={color} strokeWidth={8}
+            strokeDasharray={circ}
+            strokeDashoffset={circ * (1 - pct / 100)}
+            strokeLinecap="round"
+            style={{ transition:"stroke-dashoffset .25s linear, stroke .5s" }}
+          />
+        </svg>
+        {/* QR code in centre */}
+        <div style={{ width:248, height:248, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8 }}>
+          <QRCodeCanvas token={session.qr_token} courseId={courseId} size={190}/>
+        </div>
+      </div>
+
+      {/* Countdown number */}
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:54, fontWeight:900, color, lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{timeLeft}s</div>
+        <div style={{ fontSize:13, color:"#64748b", marginTop:4 }}>
+          {timeLeft > 0 ? "Students scan before time runs out" : "QR code has expired"}
+        </div>
+      </div>
+
+      {liveCount > 0 && (
+        <div style={{ padding:"10px 22px", background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:12, fontSize:14, fontWeight:800, color:"#16a34a" }}>
+          ✅ {liveCount} student{liveCount !== 1 ? "s" : ""} marked present
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ATTENDANCE PAGE — Full trainer view
+═══════════════════════════════════════════════════════════════════ */
+function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, darkMode = false }) {
+  const [tab, setTab]               = useState("manage");
+  const [session, setSession]       = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [sessions, setSessions]     = useState([]);
+  const [records, setRecords]       = useState([]);
+  const [students, setStudents]     = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [attError, setAttError]     = useState("");
+  const [attToast, setAttToast]     = useState(null);
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [liveCount, setLiveCount]   = useState(0);
+  const pollRef                     = useRef(null);
+
+  const showAttToast = (msg, type = "ok") => {
+    setAttToast({ msg, type });
+    setTimeout(() => setAttToast(null), 4000);
+  };
+
+  const loadData = useCallback(async () => {
+    if (!sb || !courseId) return;
+    setLoading(true); setAttError("");
+    try {
+      const [sessRows, recRows] = await Promise.all([
+        sbGetAttendanceSessions(sb, courseId),
+        sbGetAttendanceRecords(sb, courseId),
+      ]);
+      // Fetch enrolled students for this course
+      let studRows = [];
+      try {
+        studRows = await sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=name.asc&limit=500`);
+      } catch {
+        studRows = await sb.select("lms_students", `requested_course_id=eq.${encodeURIComponent(courseId)}&approved=eq.true&limit=500`).catch(() => []);
+      }
+      const allStudents = (studRows || []).map(dbRowToStudent);
+      const enrolled = allStudents.filter(s => {
+        if (Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.some(e => e.courseId === courseId)) return true;
+        if (s.approved && s.requestedCourseId === courseId) return true;
+        return false;
+      });
+      setSessions(sessRows);
+      setRecords(recRows);
+      setStudents(enrolled);
+    } catch (e) {
+      setAttError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [sb, courseId, trainerId]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // Poll live count while session active
+  useEffect(() => {
+    if (!session) { clearInterval(pollRef.current); return; }
+    const poll = async () => {
+      try {
+        const recs = await sbGetAttendanceBySession(sb, session.id);
+        setLiveCount(recs.length);
+        if (new Date(session.qr_expires_at) < new Date()) {
+          clearInterval(pollRef.current);
+          const allRecs = await sbGetAttendanceRecords(sb, courseId);
+          setRecords(allRecs);
+        }
+      } catch {}
+    };
+    poll();
+    pollRef.current = setInterval(poll, 1500);
+    return () => clearInterval(pollRef.current);
+  }, [session, sb, courseId]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    try {
+      const s = await sbCreateAttendanceSession(sb, courseId, trainerId);
+      setSession(s); setLiveCount(0);
+      showAttToast("✅ Attendance QR is live — 15 seconds!");
+    } catch (e) {
+      showAttToast("❌ " + e.message, "err");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleExpire = async () => {
+    setSession(null); clearInterval(pollRef.current);
+    showAttToast("⏱️ QR expired. Refreshing data…");
+    await loadData();
+  };
+
+  const handleDeleteSession = async (sessId) => {
+    if (!confirm("Delete this session and all its attendance records?")) return;
+    try {
+      await sbDeleteAttendanceSession(sb, sessId);
+      setSessions(p => p.filter(s => s.id !== sessId));
+      setRecords(p => p.filter(r => r.session_id !== sessId));
+      showAttToast("Session deleted.");
+    } catch (e) {
+      showAttToast("❌ " + e.message, "err");
+    }
+  };
+
+  // ── Build pivot table data ───────────────────────────────────────
+  const { dates, byStudentDate } = useMemo(() => {
+    const dateSet = new Set(sessions.map(s => s.session_date));
+    const dates   = Array.from(dateSet).sort();
+    const sessDateMap = {};
+    for (const s of sessions) sessDateMap[s.id] = s.session_date;
+    const byStudentDate = {};
+    for (const r of records) {
+      const date = sessDateMap[r.session_id] || r.session_date;
+      if (!byStudentDate[r.student_id]) byStudentDate[r.student_id] = {};
+      byStudentDate[r.student_id][date] = r.scanned_at;
+    }
+    return { dates, byStudentDate };
+  }, [sessions, records]);
+
+  const studentStats = useMemo(() =>
+    students.map(s => {
+      const present = dates.filter(d => !!byStudentDate[s.id]?.[d]).length;
+      const total   = dates.length;
+      const pct     = total > 0 ? Math.round((present / total) * 100) : 0;
+      return { ...s, present, total, pct, byDate: byStudentDate[s.id] || {} };
+    }),
+    [students, dates, byStudentDate]
+  );
+
+  // ── Excel export ─────────────────────────────────────────────────
+  const handleExport = async () => {
+    setExportBusy(true);
+    try {
+      const XLSX = await loadXLSX();
+      const wb   = XLSX.utils.book_new();
+
+      // Sheet 1 — Matrix
+      const fmtDate = d => new Date(d + "T12:00:00").toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"2-digit" });
+      const matrixRows = [
+        ["Student Name", "Email", ...dates.map(fmtDate), "Present", "Total", "Attendance %"],
+        ...studentStats.map(s => [
+          s.name, s.email || "", ...dates.map(d => s.byDate[d] ? "P" : "A"),
+          s.present, s.total, s.pct + "%",
+        ]),
+        // Totals row
+        ["DAILY TOTAL", "", ...dates.map(d => students.filter(s => !!byStudentDate[s.id]?.[d]).length), "", "", ""],
+      ];
+      const ws1 = XLSX.utils.aoa_to_sheet(matrixRows);
+      ws1["!cols"] = [{ wch:22 }, { wch:28 }, ...dates.map(() => ({ wch:11 })), { wch:10 }, { wch:10 }, { wch:14 }];
+      XLSX.utils.book_append_sheet(wb, ws1, "Attendance Matrix");
+
+      // Sheet 2 — Summary
+      const summaryRows = [
+        ["Student Name", "Email", "Present Days", "Total Sessions", "Attendance %", "Eligibility"],
+        ...studentStats.map(s => [
+          s.name, s.email || "", s.present, s.total, s.pct + "%",
+          s.pct >= 75 ? "Eligible" : s.pct >= 60 ? "Short Attendance" : "Insufficient",
+        ]),
+      ];
+      const ws2 = XLSX.utils.aoa_to_sheet(summaryRows);
+      ws2["!cols"] = [{ wch:22 }, { wch:28 }, { wch:14 }, { wch:16 }, { wch:14 }, { wch:18 }];
+      XLSX.utils.book_append_sheet(wb, ws2, "Summary");
+
+      // Sheet 3 — Raw records
+      const rawRows = [
+        ["Session Date", "Session Label", "Student Name", "Email", "Scanned At"],
+        ...records.map(r => {
+          const sess = sessions.find(s => s.id === r.session_id);
+          const stu  = students.find(s => s.id === r.student_id);
+          return [
+            r.session_date, sess?.label || "", r.student_name, stu?.email || "",
+            new Date(r.scanned_at).toLocaleString("en-IN"),
+          ];
+        }).sort((a, b) => a[0] > b[0] ? 1 : -1),
+      ];
+      const ws3 = XLSX.utils.aoa_to_sheet(rawRows);
+      ws3["!cols"] = [{ wch:14 }, { wch:26 }, { wch:22 }, { wch:28 }, { wch:22 }];
+      XLSX.utils.book_append_sheet(wb, ws3, "Raw Records");
+
+      // Sheet 4 — Month-wise
+      const monthMap = {};
+      for (const d of dates) {
+        const m = d.slice(0, 7);
+        if (!monthMap[m]) monthMap[m] = [];
+        monthMap[m].push(d);
+      }
+      const monthRows = [
+        ["Student Name", ...Object.keys(monthMap).map(m => {
+          const [yr, mo] = m.split("-");
+          return new Date(+yr, +mo - 1, 1).toLocaleDateString("en-IN", { month:"long", year:"numeric" });
+        })],
+        ...studentStats.map(s => [
+          s.name,
+          ...Object.values(monthMap).map(mDates => {
+            const p = mDates.filter(d => s.byDate[d]).length;
+            const t = mDates.length;
+            return `${p}/${t} (${t > 0 ? Math.round(p/t*100) : 0}%)`;
+          }),
+        ]),
+      ];
+      const ws4 = XLSX.utils.aoa_to_sheet(monthRows);
+      XLSX.utils.book_append_sheet(wb, ws4, "Month-wise");
+
+      const today = new Date().toISOString().split("T")[0];
+      XLSX.writeFile(wb, `Attendance_${courseId.slice(0, 8)}_${today}.xlsx`);
+      showAttToast("✅ Excel exported!");
+    } catch (e) {
+      showAttToast("❌ Export failed: " + e.message, "err");
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  const pctColor = p => p >= 75 ? "#16a34a" : p >= 60 ? "#d97706" : "#dc2626";
+  const pctBg    = p => p >= 75 ? "#f0fdf4" : p >= 60 ? "#fffbeb" : "#fef2f2";
+  const card     = (ex = {}) => ({ background: darkMode ? "#1e293b" : "#fff", border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`, borderRadius: 16, padding:"20px 22px", ...ex });
+
+  if (loading) return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:340, flexDirection:"column", gap:14 }}>
+      <div style={{ width:44, height:44, border:"3px solid #e2e8f0", borderTopColor:"#10b981", borderRadius:"50%", animation:"lms-spin .7s linear infinite" }}/>
+      <p style={{ color:"#94a3b8", fontSize:14, fontWeight:600 }}>Loading attendance data…</p>
+    </div>
+  );
+
+  if (attError) return (
+    <div style={{ padding:32, textAlign:"center" }}>
+      <div style={{ fontSize:36, marginBottom:12 }}>⚠️</div>
+      <p style={{ color:"#dc2626", fontWeight:700, fontSize:15 }}>{attError}</p>
+      <div style={{ marginTop:12, padding:"14px 18px", background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:14, fontSize:12, color:"#64748b", textAlign:"left", maxWidth:560, margin:"12px auto 0" }}>
+        <strong style={{ fontSize:13 }}>📋 Run this SQL once in your Supabase SQL editor:</strong>
+        <pre style={{ marginTop:10, fontSize:10.5, overflowX:"auto", lineHeight:1.7 }}>{`CREATE TABLE IF NOT EXISTS lms_attendance_sessions (
+  id text PRIMARY KEY, course_id text NOT NULL, trainer_id text NOT NULL,
+  session_date date NOT NULL, qr_token text NOT NULL UNIQUE,
+  qr_expires_at timestamptz NOT NULL, label text,
+  created_at timestamptz DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS lms_attendance_records (
+  id text PRIMARY KEY, session_id text NOT NULL,
+  student_id text NOT NULL, student_name text NOT NULL,
+  course_id text NOT NULL, session_date date NOT NULL,
+  scanned_at timestamptz DEFAULT now(),
+  UNIQUE(session_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_att_sess_course ON lms_attendance_sessions(course_id);
+CREATE INDEX IF NOT EXISTS idx_att_rec_session ON lms_attendance_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_att_rec_student ON lms_attendance_records(student_id);
+CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_id);`}</pre>
+        <button onClick={loadData} style={{ marginTop:10, padding:"8px 18px", background:"#0f172a", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontWeight:700, fontSize:13, fontFamily:"inherit" }}>
+          Retry after running SQL
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20, maxWidth:1200, margin:"0 auto" }}>
+
+      {/* ── Header banner ── */}
+      <div style={{ background:"linear-gradient(135deg,#064e3b,#065f46)", borderRadius:18, padding:"22px 26px", color:"#fff" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:14 }}>
+          <div>
+            <div style={{ fontSize:22, fontWeight:800 }}>📋 Attendance Manager</div>
+            <div style={{ fontSize:13, opacity:.8, marginTop:4 }}>
+              {students.length} enrolled · {sessions.length} sessions · {records.length} total scans
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+            <button onClick={handleExport} disabled={exportBusy || records.length === 0}
+              style={{ padding:"10px 18px", background:"rgba(255,255,255,.15)", color:"#fff", border:"1.5px solid rgba(255,255,255,.3)", borderRadius:10, cursor:(exportBusy||records.length===0)?"not-allowed":"pointer", fontWeight:700, fontSize:13, opacity:(exportBusy||records.length===0)?.6:1, fontFamily:"inherit" }}>
+              {exportBusy ? "⟳ Exporting…" : "📊 Export Excel"}
+            </button>
+            <button onClick={handleGenerate} disabled={generating || !!session}
+              style={{ padding:"10px 22px", background:session?"rgba(255,255,255,.1)":"#22c55e", color:"#fff", border:"none", borderRadius:10, cursor:(generating||session)?"not-allowed":"pointer", fontWeight:800, fontSize:14, opacity:(generating||session)?.7:1, fontFamily:"inherit" }}>
+              {generating ? "⟳ Creating…" : session ? "⏳ QR Active…" : "📷 Open Attendance QR"}
+            </button>
+          </div>
+        </div>
+
+        {/* Quick stats row */}
+        {students.length > 0 && dates.length > 0 && (
+          <div style={{ display:"flex", gap:20, marginTop:18, flexWrap:"wrap" }}>
+            {[
+              { label:"Avg Attendance", value: Math.round(studentStats.reduce((a,s) => a+s.pct, 0) / studentStats.length) + "%", color:"#34d399" },
+              { label:"Above 75%", value: studentStats.filter(s=>s.pct>=75).length, color:"#34d399" },
+              { label:"Below 60%", value: studentStats.filter(s=>s.pct<60).length, color:"#f87171" },
+              { label:"Sessions Held", value: sessions.length, color:"#93c5fd" },
+              { label:"Last Session", value: dates.length > 0 ? new Date(dates[dates.length-1]+"T12:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short"}) : "—", color:"#fcd34d" },
+            ].map(s => (
+              <div key={s.label}>
+                <div style={{ fontSize:22, fontWeight:900, color:s.color }}>{s.value}</div>
+                <div style={{ fontSize:11, opacity:.7, marginTop:2 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Active QR modal ── */}
+      {session && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9800, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ background:"#fff", borderRadius:24, padding:"32px 28px", maxWidth:440, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.4)", textAlign:"center" }}>
+            <div style={{ fontWeight:800, fontSize:20, color:"#0f172a", marginBottom:6 }}>📷 Scan to Mark Attendance</div>
+            <div style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>QR expires in 15 seconds — no proxy possible</div>
+            <AttendanceQRDisplay session={session} onExpire={handleExpire} courseId={courseId} liveCount={liveCount}/>
+            <div style={{ marginTop:16, padding:"10px 14px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, fontSize:11.5, color:"#64748b", wordBreak:"break-all" }}>
+              🔗 Students scan with phone camera to open the URL automatically
+            </div>
+            <button onClick={() => { setSession(null); clearInterval(pollRef.current); loadData(); }}
+              style={{ marginTop:14, padding:"10px 28px", background:"#0f172a", color:"#fff", border:"none", borderRadius:10, cursor:"pointer", fontWeight:700, fontSize:14, fontFamily:"inherit" }}>
+              Close QR
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Tabs ── */}
+      <div style={{ display:"flex", gap:4, background:darkMode?"#1e293b":"#f1f5f9", padding:4, borderRadius:12, width:"fit-content" }}>
+        {[{id:"manage",label:"📅 Sessions"},{id:"table",label:"🗂️ Attendance Table"},{id:"report",label:"📈 Student Reports"}].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ padding:"8px 18px", borderRadius:9, border:"none", cursor:"pointer", fontWeight:700, fontSize:13, fontFamily:"inherit", background:tab===t.id?(darkMode?"#334155":"#fff"):"transparent", color:tab===t.id?(darkMode?"#e2e8f0":"#0f172a"):"#64748b", boxShadow:tab===t.id?"0 2px 8px rgba(0,0,0,.08)":"none", transition:"all .15s" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ════ SESSIONS TAB ════ */}
+      {tab === "manage" && (
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {sessions.length === 0 ? (
+            <div style={{ ...card(), textAlign:"center", padding:"48px 24px" }}>
+              <div style={{ fontSize:52, marginBottom:12 }}>📋</div>
+              <p style={{ fontWeight:700, fontSize:16, color:darkMode?"#e2e8f0":"#0f172a" }}>No sessions yet</p>
+              <p style={{ fontSize:13, color:"#94a3b8", marginTop:6 }}>Click "Open Attendance QR" to start your first session.</p>
+            </div>
+          ) : (
+            sessions.map(sess => {
+              const sessRecs = records.filter(r => r.session_id === sess.id);
+              const rate     = students.length > 0 ? Math.round((sessRecs.length / students.length) * 100) : 0;
+              const dateLabel = new Date(sess.session_date + "T12:00:00").toLocaleDateString("en-IN", { weekday:"short", day:"2-digit", month:"short", year:"numeric" });
+              return (
+                <div key={sess.id} style={{ ...card({ padding:"14px 18px" }), display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+                  <div style={{ width:44, height:44, borderRadius:12, background:"linear-gradient(135deg,#10b981,#059669)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>📅</div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>{dateLabel}</div>
+                    <div style={{ fontSize:11.5, color:"#64748b", marginTop:1 }}>{sess.label}</div>
+                  </div>
+                  <div style={{ display:"flex", gap:18, alignItems:"center", flexShrink:0 }}>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:20, fontWeight:800, color:"#22c55e" }}>{sessRecs.length}</div>
+                      <div style={{ fontSize:10, color:"#94a3b8" }}>present</div>
+                    </div>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:20, fontWeight:800, color:"#ef4444" }}>{Math.max(0, students.length - sessRecs.length)}</div>
+                      <div style={{ fontSize:10, color:"#94a3b8" }}>absent</div>
+                    </div>
+                    <div style={{ textAlign:"center" }}>
+                      <div style={{ fontSize:20, fontWeight:800, color:pctColor(rate) }}>{rate}%</div>
+                      <div style={{ fontSize:10, color:"#94a3b8" }}>rate</div>
+                    </div>
+                    <button onClick={() => handleDeleteSession(sess.id)} style={{ padding:"5px 10px", background:"#fef2f2", border:"1px solid #fecaca", borderRadius:8, cursor:"pointer", fontSize:12, color:"#dc2626", fontWeight:700, fontFamily:"inherit" }}>
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {/* ════ ATTENDANCE TABLE TAB ════ */}
+      {tab === "table" && (
+        <div style={{ ...card({ padding:0 }), overflow:"hidden" }}>
+          <div style={{ padding:"14px 18px", borderBottom:`1px solid ${darkMode?"#334155":"#e2e8f0"}`, display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
+            <div>
+              <div style={{ fontWeight:800, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>Attendance Matrix</div>
+              <div style={{ fontSize:11.5, color:"#94a3b8", marginTop:1 }}>Students × Dates · <span style={{color:"#22c55e",fontWeight:700}}>P</span>=Present · <span style={{color:"#ef4444",fontWeight:700}}>A</span>=Absent · Click a student row for their full report</div>
+            </div>
+            <button onClick={handleExport} disabled={exportBusy||dates.length===0} style={{ padding:"7px 16px", background:"#0f172a", color:"#fff", border:"none", borderRadius:8, cursor:(exportBusy||dates.length===0)?"not-allowed":"pointer", fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(exportBusy||dates.length===0)?.5:1 }}>
+              {exportBusy?"⟳":"📊"} Export Excel
+            </button>
+          </div>
+
+          {dates.length === 0 ? (
+            <div style={{ padding:"48px 24px", textAlign:"center" }}>
+              <div style={{ fontSize:40, marginBottom:12 }}>🗂️</div>
+              <p style={{ color:"#94a3b8", fontSize:14 }}>No sessions yet. Generate an attendance QR to begin.</p>
+            </div>
+          ) : (
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12.5 }}>
+                <thead>
+                  <tr style={{ background:darkMode?"#0f172a":"#f8fafc" }}>
+                    <th style={{ padding:"12px 14px", textAlign:"left", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, whiteSpace:"nowrap", position:"sticky", left:0, background:darkMode?"#0f172a":"#f8fafc", zIndex:2 }}>
+                      Student
+                    </th>
+                    {dates.map(d => (
+                      <th key={d} style={{ padding:"10px 6px", textAlign:"center", fontWeight:700, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, minWidth:68 }}>
+                        <div style={{ fontSize:11 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short"})}</div>
+                        <div style={{ fontSize:9.5, color:"#94a3b8", fontWeight:500 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{weekday:"short"})}</div>
+                      </th>
+                    ))}
+                    <th style={{ padding:"12px 12px", textAlign:"center", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, whiteSpace:"nowrap" }}>P/T</th>
+                    <th style={{ padding:"12px 12px", textAlign:"center", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}` }}>%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {studentStats.map((s, i) => (
+                    <tr key={s.id} onClick={() => { setSelectedStudent(s); setTab("report"); }}
+                      style={{ cursor:"pointer", background:i%2===0?(darkMode?"#1e293b":"#fff"):(darkMode?"#162032":"#fafafa") }}
+                      onMouseEnter={e => e.currentTarget.style.background=darkMode?"#1e3a5f":"#eff6ff"}
+                      onMouseLeave={e => e.currentTarget.style.background=i%2===0?(darkMode?"#1e293b":"#fff"):(darkMode?"#162032":"#fafafa")}>
+                      <td style={{ padding:"9px 14px", fontWeight:700, whiteSpace:"nowrap", position:"sticky", left:0, background:i%2===0?(darkMode?"#1e293b":"#fff"):(darkMode?"#162032":"#fafafa"), zIndex:1 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:9 }}>
+                          <div style={{ width:30, height:30, borderRadius:"50%", background:`hsl(${(s.name.charCodeAt(0)*37)%360},55%,52%)`, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:12, flexShrink:0 }}>
+                            {s.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <div style={{ fontSize:13, fontWeight:700, color:darkMode?"#e2e8f0":"#0f172a" }}>{s.name}</div>
+                            <div style={{ fontSize:10, color:"#94a3b8" }}>{s.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      {dates.map(d => {
+                        const present = !!byStudentDate[s.id]?.[d];
+                        return (
+                          <td key={d} style={{ padding:"6px 4px", textAlign:"center" }}>
+                            <span style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", width:26, height:26, borderRadius:"50%", background:present?"#dcfce7":"#fef2f2", color:present?"#16a34a":"#dc2626", fontWeight:800, fontSize:11 }}>
+                              {present?"P":"A"}
+                            </span>
+                          </td>
+                        );
+                      })}
+                      <td style={{ padding:"9px 12px", textAlign:"center", fontWeight:700, color:"#3b82f6", fontSize:13 }}>{s.present}/{s.total}</td>
+                      <td style={{ padding:"9px 12px", textAlign:"center" }}>
+                        <span style={{ padding:"3px 9px", borderRadius:99, fontWeight:800, fontSize:12, background:pctBg(s.pct), color:pctColor(s.pct) }}>{s.pct}%</span>
+                      </td>
+                    </tr>
+                  ))}
+                  {/* Daily totals */}
+                  <tr style={{ background:darkMode?"#0f172a":"#f8fafc", borderTop:`2px solid ${darkMode?"#334155":"#e2e8f0"}` }}>
+                    <td style={{ padding:"10px 14px", fontWeight:800, color:darkMode?"#64748b":"#475569", position:"sticky", left:0, background:darkMode?"#0f172a":"#f8fafc", fontSize:12 }}>📊 Daily Total</td>
+                    {dates.map(d => {
+                      const cnt  = students.filter(s => !!byStudentDate[s.id]?.[d]).length;
+                      const rate = students.length > 0 ? Math.round((cnt/students.length)*100) : 0;
+                      return (
+                        <td key={d} style={{ padding:"6px 4px", textAlign:"center" }}>
+                          <div style={{ fontSize:13, fontWeight:800, color:pctColor(rate) }}>{cnt}</div>
+                          <div style={{ fontSize:9.5, color:"#94a3b8" }}>{rate}%</div>
+                        </td>
+                      );
+                    })}
+                    <td colSpan={2} style={{ textAlign:"center", color:"#64748b", fontSize:11 }}>{students.length} students</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ════ STUDENT REPORTS TAB ════ */}
+      {tab === "report" && (
+        <div style={{ display:"flex", gap:16, alignItems:"flex-start", flexWrap:"wrap" }}>
+          {/* Left: student list */}
+          <div style={{ width:260, flexShrink:0, display:"flex", flexDirection:"column", gap:7 }}>
+            <div style={{ fontWeight:700, fontSize:12, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".07em", marginBottom:4, paddingLeft:4 }}>Select Student</div>
+            {studentStats.map(s => (
+              <button key={s.id} onClick={() => setSelectedStudent(s)} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderRadius:12, border:`2px solid ${selectedStudent?.id===s.id?"#10b981":(darkMode?"#334155":"#e2e8f0")}`, background:selectedStudent?.id===s.id?(darkMode?"#064e3b":"#f0fdf4"):(darkMode?"#1e293b":"#fff"), cursor:"pointer", width:"100%", textAlign:"left", fontFamily:"inherit", transition:"all .15s" }}>
+                <div style={{ width:32, height:32, borderRadius:"50%", background:`hsl(${(s.name.charCodeAt(0)*37)%360},55%,52%)`, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:13, flexShrink:0 }}>
+                  {s.name.charAt(0).toUpperCase()}
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:700, fontSize:13, color:darkMode?"#e2e8f0":"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</div>
+                  <div style={{ fontSize:10.5, color:"#94a3b8" }}>{s.pct}% attendance</div>
+                </div>
+                <span style={{ padding:"2px 8px", borderRadius:99, fontSize:11, fontWeight:800, background:pctBg(s.pct), color:pctColor(s.pct), flexShrink:0 }}>{s.pct}%</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Right: student report */}
+          <div style={{ flex:1, minWidth:0 }}>
+            {!selectedStudent ? (
+              <div style={{ ...card(), textAlign:"center", padding:"48px 24px" }}>
+                <div style={{ fontSize:40 }}>👈</div>
+                <p style={{ color:"#94a3b8", fontSize:14, marginTop:12 }}>Click a student to view their full attendance report</p>
+              </div>
+            ) : (
+              <AttendanceStudentReport
+                student={selectedStudent} sessions={sessions}
+                records={records.filter(r => r.student_id === selectedStudent.id)}
+                dates={dates} darkMode={darkMode}
+                pctColor={pctColor} pctBg={pctBg}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {attToast && (
+        <div style={{ position:"fixed", bottom:24, right:24, padding:"12px 20px", borderRadius:12, background:attToast.type==="err"?"#fef2f2":"#f0fdf4", border:`1.5px solid ${attToast.type==="err"?"#fecaca":"#bbf7d0"}`, color:attToast.type==="err"?"#dc2626":"#15803d", fontWeight:700, fontSize:13.5, boxShadow:"0 8px 32px rgba(0,0,0,.12)", zIndex:9999, display:"flex", alignItems:"center", gap:8 }}>
+          {attToast.type==="err"?"❌":"✅"} {attToast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Per-student attendance report ──────────────────────────────── */
+function AttendanceStudentReport({ student, sessions, records, dates, darkMode, pctColor, pctBg }) {
+  const sessDateMap = {};
+  for (const s of sessions) sessDateMap[s.id] = { date: s.session_date, label: s.label };
+  const byDate = {};
+  for (const r of records) {
+    const d = sessDateMap[r.session_id]?.date || r.session_date;
+    byDate[d] = { scannedAt: r.scanned_at };
+  }
+
+  // Month-wise breakdown
+  const monthMap = {};
+  for (const d of dates) {
+    const m = d.slice(0, 7);
+    if (!monthMap[m]) monthMap[m] = { present:0, total:0, dates:[] };
+    monthMap[m].total++;
+    monthMap[m].dates.push(d);
+    if (byDate[d]) monthMap[m].present++;
+  }
+
+  const card = (ex={}) => ({ background:darkMode?"#1e293b":"#fff", border:`1px solid ${darkMode?"#334155":"#e2e8f0"}`, borderRadius:14, padding:"18px 20px", ...ex });
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+      {/* Header */}
+      <div style={{ background:`linear-gradient(135deg,${pctColor(student.pct)},${pctColor(student.pct)}cc)`, borderRadius:16, padding:"20px 22px", color:"#fff" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <div style={{ width:56, height:56, borderRadius:"50%", background:`hsl(${(student.name.charCodeAt(0)*37)%360},55%,42%)`, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:900, fontSize:22, flexShrink:0 }}>
+            {student.name.charAt(0).toUpperCase()}
+          </div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontWeight:800, fontSize:19 }}>{student.name}</div>
+            <div style={{ fontSize:13, opacity:.85, marginTop:2 }}>{student.email}</div>
+          </div>
+          <div style={{ textAlign:"center", flexShrink:0 }}>
+            <div style={{ fontSize:42, fontWeight:900, lineHeight:1 }}>{student.pct}%</div>
+            <div style={{ fontSize:12, opacity:.8 }}>attendance</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats grid */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))", gap:10 }}>
+        {[
+          { icon:"✅", label:"Present",  value:student.present, color:"#22c55e" },
+          { icon:"❌", label:"Absent",   value:student.total-student.present, color:"#ef4444" },
+          { icon:"📅", label:"Sessions", value:student.total, color:"#3b82f6" },
+          { icon:"🎯", label:"Status",   value:student.pct>=75?"Eligible":student.pct>=60?"Short":"At Risk", color:pctColor(student.pct) },
+        ].map(s => (
+          <div key={s.label} style={{ ...card({ textAlign:"center" }) }}>
+            <div style={{ fontSize:22, marginBottom:4 }}>{s.icon}</div>
+            <div style={{ fontSize:20, fontWeight:800, color:s.color }}>{s.value}</div>
+            <div style={{ fontSize:11, color:"#64748b", marginTop:2 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Progress bar */}
+      <div style={card()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+          <span style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>Attendance Progress</span>
+          <span style={{ fontWeight:800, fontSize:17, color:pctColor(student.pct) }}>{student.pct}%</span>
+        </div>
+        <div style={{ height:13, borderRadius:99, background:darkMode?"#334155":"#e2e8f0", overflow:"hidden" }}>
+          <div style={{ height:"100%", width:`${student.pct}%`, background:pctColor(student.pct), borderRadius:99, transition:"width .4s" }}/>
+        </div>
+        <div style={{ display:"flex", gap:12, marginTop:10, fontSize:11.5, color:"#64748b" }}>
+          <span>✅ {student.present} present</span>
+          <span>❌ {student.total-student.present} absent</span>
+          <span style={{ marginLeft:"auto", fontWeight:700, color:pctColor(student.pct) }}>
+            {student.pct>=75?"✔ Eligible (≥75%)":student.pct>=60?"⚠️ Short attendance":"⛔ Insufficient (<60%)"}
+          </span>
+        </div>
+      </div>
+
+      {/* Month-wise */}
+      {Object.keys(monthMap).length > 0 && (
+        <div style={card()}>
+          <div style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a", marginBottom:12 }}>📆 Month-wise Breakdown</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {Object.entries(monthMap).map(([m, info]) => {
+              const [yr, mo] = m.split("-");
+              const mLabel = new Date(+yr, +mo-1, 1).toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+              const mPct   = info.total > 0 ? Math.round((info.present/info.total)*100) : 0;
+              return (
+                <div key={m}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
+                    <span style={{ fontWeight:600, fontSize:13, color:darkMode?"#e2e8f0":"#334155" }}>{mLabel}</span>
+                    <span style={{ fontWeight:800, fontSize:13, color:pctColor(mPct) }}>{info.present}/{info.total} ({mPct}%)</span>
+                  </div>
+                  <div style={{ height:8, borderRadius:99, background:darkMode?"#334155":"#e2e8f0", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${mPct}%`, background:pctColor(mPct), borderRadius:99 }}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Day log */}
+      <div style={card()}>
+        <div style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a", marginBottom:12 }}>📋 Session Log</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:5, maxHeight:340, overflowY:"auto" }}>
+          {dates.map(d => {
+            const present = !!byDate[d];
+            const dateStr = new Date(d+"T12:00:00").toLocaleDateString("en-IN",{weekday:"short",day:"2-digit",month:"short",year:"numeric"});
+            const sess    = sessions.find(s => s.session_date === d);
+            return (
+              <div key={d} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:9, background:present?(darkMode?"#052e1622":"#f0fdf4"):(darkMode?"#450a0a22":"#fef2f2") }}>
+                <span style={{ fontSize:16 }}>{present?"✅":"❌"}</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontWeight:600, fontSize:12.5, color:darkMode?"#e2e8f0":"#0f172a" }}>{dateStr}</div>
+                  {sess?.label && <div style={{ fontSize:10.5, color:"#94a3b8" }}>{sess.label}</div>}
+                </div>
+                {present && byDate[d]?.scannedAt && (
+                  <div style={{ fontSize:11, color:"#64748b" }}>{new Date(byDate[d].scannedAt).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}</div>
+                )}
+                <span style={{ fontWeight:700, fontSize:12, color:present?"#16a34a":"#dc2626", flexShrink:0 }}>{present?"Present":"Absent"}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Student attendance scan handler (triggered by ?att= URL param) ── */
+function AttendanceScanHandler({ sb, auth, onDismiss }) {
+  const [state, setState]   = useState("scanning");
+  const [scanMsg, setScanMsg] = useState("");
+
+  useEffect(() => {
+    const params   = new URLSearchParams(window.location.search);
+    const token    = params.get("att");
+    const courseId = params.get("course");
+    if (!token || !courseId || !sb || !auth) {
+      setState("error"); setScanMsg("Invalid or missing attendance token."); return;
+    }
+    if (auth.role !== "student") {
+      setState("error"); setScanMsg("Only students can mark attendance."); return;
+    }
+    sbMarkAttendance(sb, token, auth.id, auth.name, courseId)
+      .then(record => {
+        setState("success");
+        setScanMsg(`Marked at ${new Date(record.scanned_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}`);
+        window.history.replaceState({}, "", window.location.pathname);
+      })
+      .catch(e => {
+        setState("error"); setScanMsg(e.message);
+        window.history.replaceState({}, "", window.location.pathname);
+      });
+  }, [sb, auth]);
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9900, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+      <div style={{ background:"#fff", borderRadius:24, padding:"36px 28px", maxWidth:380, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.4)", textAlign:"center" }}>
+        {state === "scanning" && (
+          <>
+            <div style={{ fontSize:52, marginBottom:16 }}>📡</div>
+            <div style={{ fontWeight:800, fontSize:18, color:"#0f172a", marginBottom:8 }}>Marking your attendance…</div>
+            <div style={{ width:40, height:40, border:"3px solid #e2e8f0", borderTopColor:"#10b981", borderRadius:"50%", animation:"lms-spin .7s linear infinite", margin:"16px auto 0" }}/>
+          </>
+        )}
+        {state === "success" && (
+          <>
+            <div style={{ width:72, height:72, borderRadius:"50%", background:"#dcfce7", border:"3px solid #22c55e", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:36 }}>✅</div>
+            <div style={{ fontWeight:800, fontSize:20, color:"#0f172a", marginBottom:6 }}>Attendance Marked!</div>
+            <div style={{ fontSize:14, color:"#64748b", marginBottom:4 }}>Hello, <strong>{auth?.name}</strong>!</div>
+            <div style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>{scanMsg}</div>
+            <button onClick={onDismiss} style={{ padding:"12px 28px", background:"#22c55e", color:"#fff", border:"none", borderRadius:12, cursor:"pointer", fontWeight:800, fontSize:15, fontFamily:"inherit" }}>
+              Continue →
+            </button>
+          </>
+        )}
+        {state === "error" && (
+          <>
+            <div style={{ width:72, height:72, borderRadius:"50%", background:"#fef2f2", border:"3px solid #ef4444", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", fontSize:36 }}>❌</div>
+            <div style={{ fontWeight:800, fontSize:20, color:"#0f172a", marginBottom:8 }}>Could Not Mark Attendance</div>
+            <div style={{ fontSize:13.5, color:"#64748b", marginBottom:20, lineHeight:1.65 }}>{scanMsg}</div>
+            <button onClick={onDismiss} style={{ padding:"12px 28px", background:"#0f172a", color:"#fff", border:"none", borderRadius:12, cursor:"pointer", fontWeight:700, fontSize:14, fontFamily:"inherit" }}>
+              Go Back
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, sb, trainerId = null, studentId = null, auth = null, enrolledCourses = [], pendingCourses = [] }) {
   const [aiProvider, setAiProvider] = useState("groq");
   const [groqKey,    setGroqKey]    = useState("");
   const [groqModel,  setGroqModel]  = useState(GROQ_MODELS[0]);
@@ -3801,6 +4718,13 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [studentsOpen, setStudentsOpen] = useState(false);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
+  const [attendanceOpen, setAttendanceOpen]   = useState(false);
+
+  // ── Detect attendance QR scan URL params (?att=TOKEN&course=ID) ──
+  const [attScanActive, setAttScanActive] = useState(() => {
+    const p = new URLSearchParams(window.location.search);
+    return !!(p.get("att") && p.get("course"));
+  });
 
   const [planText,  setPlanText]  = useState("");
   const [planDays,  setPlanDays]  = useState([]);
@@ -5485,10 +6409,10 @@ Hard rules:
               ...(studentMode ? [] : [{ id:"setup",       ic:"upload",   label:"Setup Plan"         }]),
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
-              <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}>
+              <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen&&!attendanceOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); setAttendanceOpen(false); }} title={collapsed?item.label:""}>
                 {item.ic.length <= 2 ? <span style={{ fontSize:16, lineHeight:1 }}>{item.ic}</span> : <Ic n={item.ic} s={16} />}
                 {!collapsed && <span>{item.label}</span>}
               </button>
@@ -5499,18 +6423,7 @@ Hard rules:
                 {!collapsed && <span style={{ overflow:"hidden", textOverflow:"ellipsis", maxWidth:130 }}>Day {selDay.dayNum}</span>}
               </button>
             )}
-            {/* ── Leaderboard nav button — visible to both trainer and student ── */}
-            {courseId && (
-              <button
-                className={`lms-nav${leaderboardOpen?" on":""}`}
-                onClick={() => { setLeaderboardOpen(p => !p); setMobileMenuOpen(false); }}
-                title={collapsed ? "Leaderboard" : ""}
-                style={leaderboardOpen ? { background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" } : {}}
-              >
-                <span style={{ fontSize:16, lineHeight:1 }}>🏆</span>
-                {!collapsed && <span>Leaderboard</span>}
-              </button>
-            )}
+
             {/* Students nav button — Supabase-fetched count */}
             {!studentMode && courseId && (
               <StudentsNavBtn
@@ -5524,7 +6437,31 @@ Hard rules:
               />
             )}
 
-            
+            {/* ── Leaderboard nav button — visible to both trainer and student ── */}
+            {courseId && (
+              <button
+                className={`lms-nav${leaderboardOpen?" on":""}`}
+                onClick={() => { setLeaderboardOpen(p => !p); setAttendanceOpen(false); setMobileMenuOpen(false); }}
+                title={collapsed ? "Leaderboard" : ""}
+                style={leaderboardOpen ? { background:"linear-gradient(135deg,#f59e0b,#f97316)", color:"#fff" } : {}}
+              >
+                <span style={{ fontSize:16, lineHeight:1 }}>🏆</span>
+                {!collapsed && <span>Leaderboard</span>}
+              </button>
+            )}
+
+            {/* ── Attendance nav button — trainer only ── */}
+            {!studentMode && courseId && (
+              <button
+                className={`lms-nav${attendanceOpen?" on":""}`}
+                onClick={() => { setAttendanceOpen(p => !p); setLeaderboardOpen(false); setMobileMenuOpen(false); }}
+                title={collapsed ? "Attendance" : ""}
+                style={attendanceOpen ? { background:"linear-gradient(135deg,#10b981,#059669)", color:"#fff" } : {}}
+              >
+                <Ic n="clipbrd" s={16} />
+                {!collapsed && <span>Attendance</span>}
+              </button>
+            )}
           </nav>
           <div style={{ padding:"10px 6px", borderTop:`1px solid ${darkMode ? "#1f2937" : "#f1f5f9"}` }}>
             <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
@@ -5552,7 +6489,7 @@ Hard rules:
             <div style={{ flex:1, fontSize:13, color: darkMode ? "#94a3b8" : "#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
               <span style={{ color: darkMode ? "#64748b" : "#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color: darkMode ? "#f1f5f9" : "#0f172a", fontWeight:600 }}>
-                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
+                {leaderboardOpen?"🏆 Leaderboard":attendanceOpen?"📋 Attendance":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
@@ -5688,9 +6625,29 @@ Hard rules:
                   currentStudentId={studentMode ? studentId : null}
                 />
               )}
+              {/* ── ATTENDANCE — trainer only ── */}
+              {attendanceOpen && !studentMode && courseId && (
+                <AttendancePage
+                  sb={sb}
+                  courseId={courseId}
+                  trainerId={trainerId}
+                  planDays={planDays}
+                  dayMap={dayMap}
+                  darkMode={darkMode}
+                />
+              )}
             </ErrorBoundary>
           </main>
         </div>
+
+        {/* ── Attendance QR scan handler (student sees this after scanning) ── */}
+        {attScanActive && studentMode && sb && auth && (
+          <AttendanceScanHandler
+            sb={sb}
+            auth={{ id: studentId, name: auth.name, role: "student" }}
+            onDismiss={() => setAttScanActive(false)}
+          />
+        )}
 
         {/* Search overlay */}
         {searchOpen && (
