@@ -1849,16 +1849,20 @@ async function callOllama(baseUrl, model, messages) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   FIX 1: PYODIDE PYTHON RUNNER — real WASM execution
+   PYODIDE PYTHON RUNNER — Fully Loaded Edition
+   • Real Pyodide WASM execution
+   • Auto-installs ANY package via micropip (with builtin fast-path)
+   • Full NLTK corpus auto-download detection
+   • Matplotlib figure capture (PNG via canvas)
 ═══════════════════════════════════════════════════════════════════ */
-// FIX 3: Renamed to avoid collision with the React state variable of the same name
+const PYODIDE_INDEX = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
+
 let pyodideInstance = null;
 let pyodideLoadingPromise = null;
 
 async function loadPyodide() {
   if (pyodideInstance) return pyodideInstance;
   if (pyodideLoadingPromise) return pyodideLoadingPromise;
-
   pyodideLoadingPromise = new Promise(async (resolve, reject) => {
     try {
       if (!window.loadPyodide) {
@@ -1870,7 +1874,7 @@ async function loadPyodide() {
           document.head.appendChild(script);
         });
       }
-      const py = await window.loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
+      const py = await window.loadPyodide({ indexURL: PYODIDE_INDEX });
       pyodideInstance = py;
       resolve(py);
     } catch (e) {
@@ -1881,25 +1885,145 @@ async function loadPyodide() {
   return pyodideLoadingPromise;
 }
 
-// Packages that are pre-bundled in Pyodide (no micropip needed, just loadPackage)
+// ── Packages bundled inside Pyodide — loadPackage() is faster than micropip ──
 const PYODIDE_BUILTIN_PKGS = new Set([
   "numpy","pandas","scipy","matplotlib","scikit-learn","sklearn",
-  "statsmodels","pillow","PIL","requests","beautifulsoup4","bs4",
-  "lxml","openpyxl","xlrd","sympy","networkx","joblib","pytz",
-  "dateutil","six","packaging","pyparsing","cycler","kiwisolver",
-  "fonttools","contourpy","threadpoolctl","attrs","certifi",
+  "statsmodels","pillow","PIL","beautifulsoup4","bs4","lxml",
+  "openpyxl","xlrd","sympy","networkx","joblib","pytz",
+  "python-dateutil","dateutil","six","packaging","pyparsing",
+  "cycler","kiwisolver","fonttools","contourpy","threadpoolctl",
+  "attrs","certifi","nltk","regex","tqdm","pyyaml","yaml",
+  "tomli","typing-extensions","cffi","pycparser","cryptography",
+  "multidict","aiohttp","frozenlist","yarl","async-timeout",
+  "charset-normalizer","idna","urllib3","requests","micropip",
+  "seaborn","plotly","pyarrow","h5py","imageio","xgboost",
 ]);
 
-// Maps import name → pyodide package name when they differ
+// import name → pyodide/pypi package name
 const PYODIDE_PKG_MAP = {
-  "sklearn": "scikit-learn",
-  "PIL":     "pillow",
-  "bs4":     "beautifulsoup4",
-  "cv2":     "opencv-python",
-  "dateutil":"python-dateutil",
+  "sklearn":      "scikit-learn",
+  "PIL":          "pillow",
+  "bs4":          "beautifulsoup4",
+  "cv2":          "opencv-python",
+  "dateutil":     "python-dateutil",
+  "yaml":         "pyyaml",
+  "seaborn":      "seaborn",
+  "plotly":       "plotly",
+  "xgboost":      "xgboost",
+  "lightgbm":     "lightgbm",
+  "skimage":      "scikit-image",
+  "umap":         "umap-learn",
+  "shap":         "shap",
+  "imblearn":     "imbalanced-learn",
+  "textblob":     "textblob",
+  "wordcloud":    "wordcloud",
+  "docx":         "python-docx",
+  "faker":        "Faker",
+  "tabulate":     "tabulate",
+  "colorama":     "colorama",
+  "rich":         "rich",
+  "pydantic":     "pydantic",
+  "httpx":        "httpx",
+  "loguru":       "loguru",
+  "polars":       "polars",
+  "pyarrow":      "pyarrow",
+  "h5py":         "h5py",
+  "imageio":      "imageio",
+  "geopy":        "geopy",
+  "folium":       "folium",
+  "spacy":        "spacy",
+  "gensim":       "gensim",
 };
 
-// Extract top-level import names from Python code
+// ── Packages that require native C extensions unavailable in Pyodide WASM ──
+// These will never install — show a helpful message instead of hanging.
+const WASM_UNSUPPORTED = {
+  "tensorflow": {
+    reason: "TensorFlow requires native CUDA/CPU extensions that cannot run in WebAssembly.",
+    alternatives: "Use scikit-learn for classical ML, or run TensorFlow locally / in Google Colab.",
+    colabSnippet: "# Run this in Google Colab:\nimport tensorflow as tf\nprint(tf.__version__)",
+  },
+  "tf": {
+    reason: "TensorFlow (imported as tf) is not available in WebAssembly.",
+    alternatives: "Use scikit-learn for classical ML, or run TensorFlow locally / in Google Colab.",
+  },
+  "torch": {
+    reason: "PyTorch requires native extensions that cannot run in WebAssembly.",
+    alternatives: "Use scikit-learn for classical ML, or run PyTorch locally / in Google Colab.",
+    colabSnippet: "# Run this in Google Colab:\nimport torch\nprint(torch.__version__)",
+  },
+  "keras": {
+    reason: "Keras (standalone) requires TensorFlow which is not available in WebAssembly.",
+    alternatives: "Use scikit-learn for ML in the browser. Run Keras locally or in Google Colab.",
+  },
+  "jax": {
+    reason: "JAX requires XLA native compilation, not available in WebAssembly.",
+    alternatives: "Run JAX locally or in Google Colab.",
+  },
+  "cupy": {
+    reason: "CuPy requires CUDA GPU drivers, not available in the browser.",
+    alternatives: "Use numpy for array operations in the browser.",
+  },
+  "numba": {
+    reason: "Numba requires LLVM JIT compilation, not available in WebAssembly.",
+    alternatives: "NumPy is available and provides fast vectorised operations.",
+  },
+};
+
+// ── NLTK corpora detection ──────────────────────────────────────────────────
+const NLTK_CORPORA_SET = new Set([
+  "wordnet","stopwords","punkt","punkt_tab",
+  "averaged_perceptron_tagger","averaged_perceptron_tagger_eng",
+  "maxent_ne_chunker","maxent_ne_chunker_tab",
+  "words","omw-1.4","vader_lexicon",
+  "twitter_samples","movie_reviews","brown","reuters",
+  "gutenberg","inaugural","treebank","conll2000",
+  "names","webtext","senseval","abc","genesis",
+  "nps_chat","sinica_treebank","cess_cat","cess_esp",
+  "floresta","indian","mac_morpho","machado","pl196x",
+  "rte","semcor","shakespeare","verbnet",
+]);
+
+function detectNltkCorpora(code) {
+  const needed = new Set();
+  // Explicit nltk.download() calls
+  const re = /nltk\.download\s*\(\s*['"]([^'"]+)['"]/g;
+  let m;
+  while ((m = re.exec(code)) !== null) { if (NLTK_CORPORA_SET.has(m[1])) needed.add(m[1]); }
+  // Implicit corpus usage patterns
+  if (/nltk\.corpus\.wordnet|from\s+nltk\.corpus\s+import\s+wordnet|\bwn\b/.test(code)) {
+    needed.add("wordnet"); needed.add("omw-1.4");
+  }
+  if (/nltk\.corpus\.stopwords|stopwords\.words|from\s+nltk\.corpus\s+import\s+stopwords/.test(code)) {
+    needed.add("stopwords");
+  }
+  if (/word_tokenize|sent_tokenize|PunktSentenceTokenizer|PunktTokenizer/.test(code)) {
+    needed.add("punkt"); needed.add("punkt_tab");
+  }
+  if (/pos_tag|nltk\.tag|PerceptronTagger/.test(code)) {
+    needed.add("averaged_perceptron_tagger"); needed.add("averaged_perceptron_tagger_eng");
+  }
+  if (/ne_chunk|nltk\.chunk/.test(code)) {
+    needed.add("maxent_ne_chunker"); needed.add("maxent_ne_chunker_tab"); needed.add("words");
+  }
+  if (/SentimentIntensityAnalyzer|vader_lexicon|from\s+nltk\.sentiment/.test(code)) {
+    needed.add("vader_lexicon");
+  }
+  if (/WordNetLemmatizer|lemmatize/.test(code)) { needed.add("wordnet"); needed.add("omw-1.4"); }
+  if (/PorterStemmer|LancasterStemmer|SnowballStemmer/.test(code)) { needed.add("punkt"); }
+  if (/corpus\.brown/.test(code)) needed.add("brown");
+  if (/corpus\.reuters/.test(code)) needed.add("reuters");
+  if (/corpus\.movie_reviews/.test(code)) needed.add("movie_reviews");
+  if (/corpus\.names/.test(code)) needed.add("names");
+  if (/corpus\.gutenberg/.test(code)) needed.add("gutenberg");
+  if (/corpus\.inaugural/.test(code)) needed.add("inaugural");
+  return [...needed];
+}
+
+// ── Session-level caches ────────────────────────────────────────────────────
+const _installedPkgs  = new Set();
+const _nltkDownloaded = new Set(); // corpora successfully fetched this session
+
 function extractImports(code) {
   const names = new Set();
   const re = /^(?:import|from)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm;
@@ -1908,94 +2032,646 @@ function extractImports(code) {
   return [...names];
 }
 
-// Install all imported packages that aren't already loaded
-// Returns a log string of what was installed
-async function ensurePackages(py, code, onStatus) {
-  const imports = extractImports(code);
-  if (!imports.length) return "";
-
-  // Bootstrap micropip (needed for packages not in Pyodide's bundle)
-  await py.loadPackage("micropip");
-  const micropip = py.pyimport("micropip");
-
-  const log = [];
-  for (const name of imports) {
-    // Skip stdlib modules — they're always available
-    const stdlibCheck = await py.runPythonAsync(
-      `import importlib.util; importlib.util.find_spec("${name}") is not None`
-    ).catch(() => false);
-    if (stdlibCheck) continue;
-
-    const pkgName = PYODIDE_PKG_MAP[name] || name;
-    if (onStatus) onStatus(`Installing ${pkgName}…`);
-    try {
-      if (PYODIDE_BUILTIN_PKGS.has(name) || PYODIDE_BUILTIN_PKGS.has(pkgName)) {
-        await py.loadPackage(pkgName);
-      } else {
-        await micropip.install(pkgName);
-      }
-      log.push(`✓ ${pkgName}`);
-    } catch (_) {
-      log.push(`⚠ ${pkgName} not available (skipped)`);
-    }
-  }
-  return log.length ? `📦 Packages: ${log.join(", ")}\n` : "";
+// ── Build a code prefix that sets up matplotlib Agg backend BEFORE user code ──
+// Injecting it as a prefix guarantees it runs before any matplotlib import.
+function buildMplPrefix(code) {
+  const needsMpl = /matplotlib|seaborn|plt\.|sns\./.test(code);
+  if (!needsMpl) return "";
+  return [
+    "import sys as __lms_sys__",
+    "if 'matplotlib' not in __lms_sys__.modules:",
+    "    import matplotlib as __lms_mpl__",
+    "    __lms_mpl__.use('Agg')",
+    "import matplotlib.pyplot as __lms_plt__",
+    "__lms_plt__.switch_backend('Agg')",
+    "",
+  ].join("\n");
 }
 
-// Cache of already-installed packages so we don't re-install on every run
-const _installedPkgs = new Set();
+// ── NLTK corpus CDN map ─────────────────────────────────────────────────────
+// Pyodide WASM cannot make network requests from Python (nltk.download fails).
+// Instead we fetch zip files via JS fetch() and seed them into the WASM VFS.
+// Source: raw GitHub mirror of NLTK's corpus packages (zip format).
+const NLTK_CORPUS_URLS = {
+  "punkt":      "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt.zip",
+  "punkt_tab":  "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip",
+  "stopwords":  "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/stopwords.zip",
+  "wordnet":    "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/wordnet.zip",
+  "omw-1.4":    "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/omw-1.4.zip",
+  "averaged_perceptron_tagger":     "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip",
+  "averaged_perceptron_tagger_eng": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip",
+  "maxent_ne_chunker":     "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/chunkers/maxent_ne_chunker.zip",
+  "maxent_ne_chunker_tab": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/chunkers/maxent_ne_chunker_tab.zip",
+  "words":         "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/words.zip",
+  "vader_lexicon": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/sentiment/vader_lexicon.zip",
+  "brown":       "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/brown.zip",
+  "reuters":     "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/reuters.zip",
+  "movie_reviews":"https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/movie_reviews.zip",
+  "names":       "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/names.zip",
+  "inaugural":   "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/inaugural.zip",
+  "gutenberg":   "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/gutenberg.zip",
+};
 
-async function runPythonReal(code, onStatus) {
+// Subdirectory under /nltk_data where each corpus type lives
+const NLTK_CORPUS_SUBDIR = {
+  "punkt":      "tokenizers",
+  "punkt_tab":  "tokenizers",
+  "averaged_perceptron_tagger":     "taggers",
+  "averaged_perceptron_tagger_eng": "taggers",
+  "maxent_ne_chunker":     "chunkers",
+  "maxent_ne_chunker_tab": "chunkers",
+  "vader_lexicon": "sentiment",
+};
+function _nltkSubdir(corpus) { return NLTK_CORPUS_SUBDIR[corpus] || "corpora"; }
+
+// ── Fetch a corpus zip via JS and unpack it into the Pyodide VFS ────────────
+async function _fetchNltkCorpusViaJS(py, corpus) {
+  const url = NLTK_CORPUS_URLS[corpus];
+  if (!url) return false;
+  const subdir = _nltkSubdir(corpus);
+  const destDir = `/nltk_data/${subdir}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return false;
+    const buf = await resp.arrayBuffer();
+    // Write the zip into the Pyodide VFS then unzip with Python's zipfile module
+    const zipPath = `/nltk_data/__tmp_${corpus}.zip`;
+    py.FS.mkdirTree(destDir);
+    py.FS.writeFile(zipPath, new Uint8Array(buf));
+    await py.runPythonAsync(
+      `import zipfile as __zf\n` +
+      `__zf.ZipFile(${JSON.stringify(zipPath)}).extractall(${JSON.stringify(destDir)})\n` +
+      `import os as __os; __os.remove(${JSON.stringify(zipPath)})\n`
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ── Build a code prefix that injects NLTK data path + downloads all needed corpora ──
+// Returns { prefix: string, log: string }
+async function buildNltkPrefix(py, code, imports) {
+  const needsNltk = imports.includes("nltk") || _installedPkgs.has("nltk");
+  if (!needsNltk) return { prefix: "", log: "" };
+
+  const BASE_PATCH = [
+    "import nltk as __lms_nltk__, os as __lms_os__",
+    "__lms_os__.makedirs('/nltk_data', exist_ok=True)",
+    "if '/nltk_data' not in __lms_nltk__.data.path:",
+    "    __lms_nltk__.data.path.insert(0, '/nltk_data')",
+    // Patch nltk.download to a no-op — real downloads happen via JS fetch above.
+    // This silences user-written nltk.download() calls that cannot work in WASM.
+    "__lms_nltk__.download = lambda *a, **kw: True",
+    "",
+  ].join("\n");
+
+  // Always run the path patch in the engine context first
+  try { await py.runPythonAsync(BASE_PATCH); } catch (_) {}
+
+  const needed = detectNltkCorpora(code);
+  const toDownload = needed.filter(c => !_nltkDownloaded.has(c));
+  let log = "";
+
+  for (const corpus of toDownload) {
+    try {
+      const ok = await _fetchNltkCorpusViaJS(py, corpus);
+      if (ok) {
+        _nltkDownloaded.add(corpus);
+        log += `✓ nltk data: ${corpus}\n`;
+      } else {
+        log += `⚠ nltk data ${corpus}: not available via CDN\n`;
+      }
+    } catch (e) {
+      log += `⚠ nltk data ${corpus}: ${e.message.split("\n")[0]}\n`;
+    }
+  }
+
+  // The prefix injected into user code re-asserts the path every run
+  return { prefix: BASE_PATCH, log };
+}
+
+// ── Capture ALL matplotlib/seaborn figures as base64 PNGs ──────────────────
+async function captureAllFigures(py) {
+  const figDataUrls = [];
+  try {
+    const hasMpl = await py.runPythonAsync(
+      `'matplotlib.pyplot' in __import__('sys').modules`
+    );
+    if (!hasMpl) return figDataUrls;
+
+    const fignums = await py.runPythonAsync(
+      `list(__import__('matplotlib').pyplot.get_fignums())`
+    );
+    const nums = fignums?.toJs ? fignums.toJs() : (Array.isArray(fignums) ? fignums : []);
+    if (!nums || nums.length === 0) return figDataUrls;
+
+    for (const num of nums) {
+      try {
+        const dataUrl = await py.runPythonAsync(`
+import io, base64
+import matplotlib.pyplot as _cap_plt
+_cap_fig = _cap_plt.figure(${num})
+_cap_buf = io.BytesIO()
+_cap_fig.savefig(_cap_buf, format='png', bbox_inches='tight', dpi=130, facecolor='white')
+_cap_buf.seek(0)
+'data:image/png;base64,' + base64.b64encode(_cap_buf.read()).decode('utf-8')
+`);
+        if (dataUrl && dataUrl.startsWith("data:image")) figDataUrls.push(dataUrl);
+      } catch (_) {}
+    }
+    // Close all after capture
+    try { await py.runPythonAsync(`import matplotlib.pyplot as _cap_plt; _cap_plt.close('all')`); } catch (_) {}
+  } catch (_) {}
+  return figDataUrls;
+}
+
+// ── Check for WASM-unsupported packages and return a friendly error ─────────
+function checkWasmUnsupported(imports) {
+  const blocked = imports.filter(n => WASM_UNSUPPORTED[n]);
+  if (!blocked.length) return null;
+  let msg = "⚠️  Browser (WebAssembly) Limitation\n" + "─".repeat(44) + "\n\n";
+  for (const name of blocked) {
+    const info = WASM_UNSUPPORTED[name];
+    msg += `❌ '${name}' — ${info.reason}\n`;
+    msg += `   💡 ${info.alternatives}\n`;
+    if (info.colabSnippet) msg += `\n${info.colabSnippet}\n`;
+    msg += "\n";
+  }
+  msg += "─".repeat(44) + "\n";
+  msg += "Available alternatives in this browser compiler:\n";
+  msg += "  • scikit-learn  — classical ML (SVM, RF, KNN, linear models)\n";
+  msg += "  • xgboost       — gradient boosting\n";
+  msg += "  • numpy/scipy   — numerical computing\n";
+  msg += "  • pandas        — data manipulation\n";
+  msg += "  • matplotlib / seaborn — visualisation\n";
+  msg += "  • nltk / textblob — NLP without heavy models\n";
+  msg += "  • statsmodels   — statistical analysis\n";
+  return msg;
+}
+
+// ── Main execution engine ───────────────────────────────────────────────────
+// Returns { output: string, figureDataUrls: string[] }
+async function runPythonReal(code, onStatus, captureMatplotlib = true) {
   const py = await loadPyodide();
-  let stdout = "";
-  let stderr = "";
-
-  py.setStdout({ batched: (text) => { stdout += text + "\n"; } });
-  py.setStderr({ batched: (text) => { stderr += text + "\n"; } });
-
-  // Auto-install any imported packages not yet loaded in this session
-  const imports = extractImports(code);
-  const missing = imports.filter(n => !_installedPkgs.has(n));
+  let stdout = "", stderr = "";
+  py.setStdout({ batched: t => { stdout += t + "\n"; } });
+  py.setStderr({ batched: t => { stderr += t + "\n"; } });
   let pkgLog = "";
+
+  // ── 1. Check for packages that will never work in WASM ─────────
+  const imports = extractImports(code);
+  const wasmBlock = checkWasmUnsupported(imports);
+  if (wasmBlock) return { output: wasmBlock, figureDataUrls: [] };
+
+  // ── 2. Install missing packages ────────────────────────────────
+  const missing = imports.filter(n => !_installedPkgs.has(n));
   if (missing.length) {
-    // Bootstrap micropip once
-    try { await py.loadPackage("micropip"); } catch(_) {}
-    const micropip = await py.pyimport("micropip");
+    try { await py.loadPackage("micropip"); } catch (_) {}
+    let micropip;
+    try { micropip = py.pyimport("micropip"); } catch (_) {}
 
     for (const name of missing) {
-      // Check if already available in the Python environment
-      let alreadyOk = false;
-      try {
-        alreadyOk = await py.runPythonAsync(
-          `(lambda: (importlib := __import__('importlib'), importlib.util.find_spec('${name}') is not None))[1]`
-        );
-      } catch(_) {}
-      if (alreadyOk) { _installedPkgs.add(name); continue; }
+      // Skip if already importable (e.g. stdlib)
+      let ok = false;
+      try { ok = await py.runPythonAsync(`__import__('importlib').util.find_spec(${JSON.stringify(name)}) is not None`); } catch (_) {}
+      if (ok) { _installedPkgs.add(name); continue; }
 
       const pkgName = PYODIDE_PKG_MAP[name] || name;
       if (onStatus) onStatus(`📦 Installing ${pkgName}…`);
-      try {
-        if (PYODIDE_BUILTIN_PKGS.has(name) || PYODIDE_BUILTIN_PKGS.has(pkgName)) {
+
+      let installed = false;
+      // Try Pyodide built-in first (fastest)
+      if (PYODIDE_BUILTIN_PKGS.has(name) || PYODIDE_BUILTIN_PKGS.has(pkgName)) {
+        try {
           await py.loadPackage(pkgName);
-        } else {
+          installed = true;
+        } catch (_) {}
+      }
+      // Fall back to micropip
+      if (!installed && micropip) {
+        try {
           await micropip.install(pkgName);
+          installed = true;
+        } catch (_) {
+          // Last resort: try the raw import name
+          try { await micropip.install(name); installed = true; } catch (_) {}
         }
+      }
+      if (installed) {
         _installedPkgs.add(name);
         pkgLog += `✓ installed ${pkgName}\n`;
-      } catch (installErr) {
-        pkgLog += `⚠ ${pkgName} not available — ${installErr.message}\n`;
+      } else {
+        pkgLog += `⚠ ${pkgName} — not available in WebAssembly\n`;
       }
     }
   }
 
-  if (onStatus) onStatus(null); // clear status
-  try {
-    await py.runPythonAsync(code);
-    const out = (pkgLog ? pkgLog + "\n" : "") + (stdout || "(no output)") + (stderr ? `\nSTDERR:\n${stderr}` : "");
-    return out;
-  } catch (e) {
-    return (pkgLog ? pkgLog + "\n" : "") + `Error: ${e.message}`;
+  // ── 3. NLTK: download corpora, build path-patch prefix ─────────
+  if (onStatus && (imports.includes("nltk") || _installedPkgs.has("nltk"))) {
+    const needed = detectNltkCorpora(code).filter(c => !_nltkDownloaded.has(c));
+    if (needed.length) onStatus(`📚 Downloading NLTK data: ${needed.join(", ")}…`);
   }
+  const { prefix: nltkPrefix, log: nltkLog } = await buildNltkPrefix(py, code, imports);
+  pkgLog += nltkLog;
+
+  // ── 4. Matplotlib Agg prefix (injected BEFORE user code) ───────
+  const mplPrefix = captureMatplotlib ? buildMplPrefix(code) : "";
+
+  if (onStatus) onStatus(null);
+
+  // ── 5. Run user code (with prefixes prepended) ─────────────────
+  const fullCode = mplPrefix + nltkPrefix + code;
+  try {
+    await py.runPythonAsync(fullCode);
+
+    // ── 6. Capture all matplotlib / seaborn figures ────────────────
+    const figureDataUrls = captureMatplotlib ? await captureAllFigures(py) : [];
+
+    const out = (pkgLog ? "Package Log:\n" + pkgLog + "\n" : "")
+      + (stdout.trim() || (figureDataUrls.length ? "(plot rendered above)" : "(no output)"))
+      + (stderr.trim() ? "\n\nSTDERR:\n" + stderr : "");
+    return { output: out, figureDataUrls };
+
+  } catch (e) {
+    const rawMsg = e.message || String(e);
+    // Strip ANSI escape codes
+    const cleanMsg = rawMsg.replace(/\x1b\[[0-9;]*m/g, "");
+
+    // NLTK LookupError — corpus still missing despite our JS-fetch auto-download
+    if (cleanMsg.includes("LookupError") && cleanMsg.includes("Resource") && cleanMsg.includes("not found")) {
+      const rm = cleanMsg.match(/Resource\s+(\S+)\s+not found/);
+      const res = rm ? rm[1].replace(/[^a-z0-9_.-]/gi, "") : "the_corpus";
+      // Note: nltk.download() cannot work in browser WASM — don't suggest it.
+      const inCdnMap = !!NLTK_CORPUS_URLS[res];
+      const hint = [
+        pkgLog ? "Package Log:\n" + pkgLog + "\n\n" : "",
+        `\u26a0\ufe0f  NLTK Corpus Unavailable: '${res}'\n`,
+        "─".repeat(44) + "\n\n",
+        inCdnMap
+          ? `The corpus '${res}' failed to load from the CDN.\nThis is usually a temporary network issue — try running the code again.\n\n`
+          : `The corpus '${res}' is not available in the browser compiler.\nOnly a subset of NLTK corpora can be fetched in a WebAssembly environment.\n\n`,
+        `\ud83d\udca1 Available corpora: punkt, punkt_tab, stopwords, wordnet, omw-1.4,\n`,
+        `   vader_lexicon, averaged_perceptron_tagger, maxent_ne_chunker, words,\n`,
+        `   brown, reuters, movie_reviews, names, inaugural, gutenberg\n\n`,
+        `Note: nltk.download() does not work in the browser \u2014 corpora are loaded\n`,
+        `automatically via CDN. Remove any nltk.download() calls from your code.\n\n`,
+        "Original error:\n" + cleanMsg,
+      ].join("");
+      return { output: hint, figureDataUrls: [] };
+    }
+
+    // ModuleNotFoundError for packages we couldn't install
+    if (cleanMsg.includes("ModuleNotFoundError") || cleanMsg.includes("No module named")) {
+      const mm = cleanMsg.match(/No module named '([^']+)'/);
+      const modName = mm ? mm[1] : "the package";
+      const isUnsupported = WASM_UNSUPPORTED[modName.split(".")[0]];
+      if (isUnsupported) {
+        return { output: checkWasmUnsupported([modName.split(".")[0]]), figureDataUrls: [] };
+      }
+      const hint = (pkgLog ? "Package Log:\n" + pkgLog + "\n\n" : "")
+        + `Module '${modName}' could not be installed.\n`
+        + "This may be a package that requires native OS extensions (C/C++ compiled code)\n"
+        + "which are not available in the browser WebAssembly environment.\n\n"
+        + "Original error:\n" + cleanMsg;
+      return { output: hint, figureDataUrls: [] };
+    }
+
+    return {
+      output: (pkgLog ? "Package Log:\n" + pkgLog + "\n\n" : "") + "Error:\n" + cleanMsg,
+      figureDataUrls: [],
+    };
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   EMBEDDED PYTHON COMPILER — CodeEditor + OutputPane + EmbeddedCompiler
+   Replaces the basic textarea with a full-featured IDE panel
+═══════════════════════════════════════════════════════════════════ */
+
+// Syntax colour constants (no external dep)
+const _KW_RE  = /\b(import|from|as|def|class|return|if|elif|else|for|while|in|not|and|or|is|None|True|False|try|except|finally|raise|with|yield|lambda|pass|break|continue|del|global|nonlocal|assert|async|await)\b/g;
+const _STR_RE = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
+const _CMT_RE = /(#.*)/g;
+const _NUM_RE = /\b(\d+\.?\d*)\b/g;
+const _FN_RE  = /\b([a-zA-Z_]\w*)\s*(?=\()/g;
+const _DEC_RE = /(@\w+)/g;
+
+function pyHighlight(code) {
+  let h = code.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  h = h.replace(_STR_RE,'<span style="color:#98c379">$1</span>');
+  h = h.replace(_CMT_RE,'<span style="color:#7f848e;font-style:italic">$1</span>');
+  h = h.replace(_DEC_RE,'<span style="color:#e5c07b">$1</span>');
+  h = h.replace(_KW_RE, '<span style="color:#c678dd;font-weight:600">$1</span>');
+  h = h.replace(_NUM_RE,'<span style="color:#d19a66">$1</span>');
+  h = h.replace(_FN_RE, '<span style="color:#61afef">$&</span>');
+  return h;
+}
+
+// Code editor with line numbers + Tab key support
+function PyCodeEditor({ value, onChange, height = 380 }) {
+  const taRef = useRef(null);
+  const lnRef = useRef(null);
+  const onScroll = () => { if (lnRef.current && taRef.current) lnRef.current.scrollTop = taRef.current.scrollTop; };
+  const lines = value.split("\n").length;
+  const lineNums = Array.from({ length: Math.max(lines, 1) }, (_, i) => i + 1);
+  const onKey = (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const ta = e.target, start = ta.selectionStart, end = ta.selectionEnd;
+      const newVal = value.substring(0, start) + "    " + value.substring(end);
+      onChange(newVal);
+      setTimeout(() => { ta.selectionStart = ta.selectionEnd = start + 4; }, 0);
+    }
+  };
+  return (
+    <div style={{ display:"flex", height, border:"1.5px solid #e2e8f0", borderRadius:10,
+      overflow:"hidden", background:"#0d1117", fontFamily:"'JetBrains Mono','Fira Code','Consolas',monospace" }}>
+      <div ref={lnRef} style={{ width:44, background:"#161b22", borderRight:"1px solid #30363d",
+        overflowY:"hidden", padding:"12px 0", userSelect:"none", scrollbarWidth:"none" }}>
+        {lineNums.map(n => (
+          <div key={n} style={{ fontSize:11.5, lineHeight:"1.65em", color:"#484f58",
+            textAlign:"right", paddingRight:8, paddingLeft:4 }}>{n}</div>
+        ))}
+      </div>
+      <textarea
+        ref={taRef} value={value} onChange={e=>onChange(e.target.value)}
+        onScroll={onScroll} onKeyDown={onKey}
+        spellCheck={false} autoCapitalize="off" autoCorrect="off"
+        style={{ flex:1, resize:"none", border:"none", outline:"none", padding:"12px 14px",
+          fontSize:12.5, lineHeight:"1.65em", background:"#0d1117", color:"#e6edf3",
+          fontFamily:"inherit", overflowY:"auto" }}
+      />
+    </div>
+  );
+}
+
+// Output pane — shows text + optional matplotlib/seaborn PNG(s)
+function PyOutputPane({ output, figureDataUrls, figureDataUrl, statusMsg, running }) {
+  // Accept both old single-url and new array forms for backward-compat
+  const figs = Array.isArray(figureDataUrls)
+    ? figureDataUrls.filter(Boolean)
+    : (figureDataUrl ? [figureDataUrl] : []);
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+      {statusMsg && (
+        <div style={{ padding:"7px 12px", background:"#1f3a5f", border:"1px solid #1f6feb",
+          borderRadius:8, fontSize:12.5, color:"#79c0ff", display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ display:"inline-block", width:7, height:7, borderRadius:"50%",
+            background:"#1f6feb", animation:"lms-spin 1s linear infinite" }} />
+          {statusMsg}
+        </div>
+      )}
+      {figs.map((url, idx) => (
+        <div key={idx} style={{ background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:10, overflow:"hidden" }}>
+          <div style={{ padding:"6px 12px", fontSize:11.5, fontWeight:600, color:"#64748b",
+            borderBottom:"1px solid #e2e8f0", background:"#f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <span>📊 {figs.length > 1 ? `Figure ${idx + 1} of ${figs.length}` : "Plot Output"}</span>
+            <a href={url} download={`figure_${idx + 1}.png`}
+              style={{ fontSize:10.5, color:"#3b82f6", textDecoration:"none", fontWeight:500 }}>⬇ Save PNG</a>
+          </div>
+          <img src={url} alt={`Figure ${idx + 1}`} style={{ maxWidth:"100%", display:"block" }} />
+        </div>
+      ))}
+      <div className="lms-output" style={{ minHeight:240, maxHeight:360, overflowY:"auto",
+        fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12, lineHeight:1.7,
+        whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
+        {running && !output
+          ? <span style={{ color:"#94a3b8" }}>⟳ Running…</span>
+          : output || <span style={{ color:"#94a3b8" }}>▶ Run your code to see output here</span>}
+      </div>
+    </div>
+  );
+}
+
+// Snippet presets available in the compiler sidebar
+const COMPILER_SNIPPETS = [
+  { label:"Hello World",    code:`print("Hello, World!")\nimport sys\nprint(f"Python {sys.version.split()[0]}")` },
+  { label:"NumPy basics",   code:`import numpy as np\na = np.array([1,2,3,4,5])\nprint("mean:", np.mean(a))\nprint("std:", np.std(a))` },
+  { label:"Pandas DataFrame", code:`import pandas as pd\ndf = pd.DataFrame({"a":[1,2,3],"b":[4,5,6]})\nprint(df)\nprint(df.describe())` },
+  { label:"Matplotlib plot", code:`import matplotlib.pyplot as plt\nimport numpy as np\nx = np.linspace(0, 10, 200)\nplt.figure(figsize=(7,3))\nplt.plot(x, np.sin(x), label='sin')\nplt.plot(x, np.cos(x), label='cos')\nplt.title("Trig Functions")\nplt.legend()\nplt.tight_layout()\nplt.show()\nprint("Plot rendered above ↑")` },
+  { label:"Seaborn heatmap", code:`import seaborn as sns\nimport matplotlib.pyplot as plt\nimport numpy as np\ndata = np.random.rand(8, 8)\nplt.figure(figsize=(6,5))\nsns.heatmap(data, annot=True, fmt=".2f", cmap="Blues")\nplt.title("Seaborn Heatmap")\nplt.tight_layout()\nplt.show()\nprint("Heatmap rendered above ↑")` },
+  { label:"Multi-plot",     code:`import matplotlib.pyplot as plt\nimport numpy as np\nx = np.linspace(0, 10, 100)\nfig, axes = plt.subplots(1, 2, figsize=(10, 3))\naxes[0].plot(x, np.sin(x), color='steelblue')\naxes[0].set_title('Sine')\naxes[1].plot(x, x**2, color='coral')\naxes[1].set_title('Parabola')\nplt.tight_layout()\nplt.show()\nprint("Two plots rendered above ↑")` },
+  { label:"Sklearn RF",     code:`from sklearn.datasets import make_classification\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\nX, y = make_classification(n_samples=200, random_state=42)\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2)\nclf = RandomForestClassifier().fit(X_tr, y_tr)\nprint("Accuracy:", accuracy_score(y_te, clf.predict(X_te)))` },
+  { label:"NLTK stopwords", code:`import nltk\nfrom nltk.corpus import stopwords\nfrom nltk.tokenize import word_tokenize\n\ntext = "Natural language processing is a fascinating area of artificial intelligence"\ntokens = word_tokenize(text.lower())\nstop_words = set(stopwords.words('english'))\nfiltered = [w for w in tokens if w.isalpha() and w not in stop_words]\nprint("Original:", tokens)\nprint("Filtered:", filtered)` },
+  { label:"NLTK lemmatizer", code:`import nltk\nfrom nltk.stem import WordNetLemmatizer\nfrom nltk.corpus import wordnet\n\nlemmatizer = WordNetLemmatizer()\nwords = ["running", "flies", "better", "studies", "geese", "cached"]\nfor w in words:\n    print(f"{w:15} → {lemmatizer.lemmatize(w, pos=wordnet.VERB)}")` },
+  { label:"NLTK sentiment",  code:`import nltk\nfrom nltk.sentiment import SentimentIntensityAnalyzer\n\nsia = SentimentIntensityAnalyzer()\nsentences = [\n    "I absolutely love this! It's amazing.",\n    "This is okay, nothing special.",\n    "Terrible experience. I'm very disappointed.",\n]\nfor s in sentences:\n    scores = sia.polarity_scores(s)\n    label = "positive" if scores["compound"] > 0.05 else "negative" if scores["compound"] < -0.05 else "neutral"\n    print(f"[{label:8}] {s[:45]}")` },
+  { label:"TensorFlow note", code:`# TensorFlow / PyTorch / Keras cannot run in this\n# browser compiler because they require native C/CUDA\n# extensions not available in WebAssembly.\n#\n# ✅  Use these instead for ML in the browser:\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.datasets import make_moons\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\n\nX, y = make_moons(n_samples=300, noise=0.2, random_state=42)\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2)\nmlp = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=500, random_state=42)\nmlp.fit(X_tr, y_tr)\nprint(f"MLP Neural Net accuracy: {accuracy_score(y_te, mlp.predict(X_te)):.3f}")` },
+  { label:"XGBoost",         code:`import xgboost as xgb\nfrom sklearn.datasets import load_breast_cancer\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\n\ndata = load_breast_cancer()\nX_tr, X_te, y_tr, y_te = train_test_split(data.data, data.target, test_size=0.2, random_state=42)\nmodel = xgb.XGBClassifier(n_estimators=100, eval_metric='logloss')\nmodel.fit(X_tr, y_tr)\nprint("XGBoost accuracy:", accuracy_score(y_te, model.predict(X_te)))` },
+  { label:"scipy",          code:`import scipy\nprint(scipy.__version__)` },
+  { label:"nltk version",   code:`import nltk\nprint(nltk.__version__)` },
+];
+
+// Full embedded compiler component used inside DayPage compiler tab
+function EmbeddedCompiler({ initialCode = "", dayTopic = "", pyodideReady, pyodideLoading, onLoadPyodide, onCodeChange, trackActivity, dayKey }) {
+  const [tabs, setTabs] = useState([{ id:"main", name:"main.py", code: initialCode }]);
+  const [activeTab, setActiveTab]     = useState("main");
+  const [editingTabId, setEditingTabId] = useState(null);
+  const [tabNameDraft, setTabNameDraft] = useState("");
+
+  const activeCode = tabs.find(t => t.id === activeTab)?.code ?? "";
+  const setActiveCode = useCallback((code) => {
+    setTabs(prev => prev.map(t => t.id === activeTab ? { ...t, code } : t));
+    if (onCodeChange) onCodeChange(code);
+  }, [activeTab, onCodeChange]);
+
+  // Sync initialCode into main tab when it changes from outside (e.g. "Use Code" in notebook)
+  useEffect(() => {
+    if (initialCode && initialCode !== tabs.find(t => t.id === "main")?.code) {
+      setTabs(prev => prev.map(t => t.id === "main" ? { ...t, code: initialCode } : t));
+      setActiveTab("main");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCode]);
+
+  const [running, setRunning]         = useState(false);
+  const [output, setOutput]           = useState("");
+  const [statusMsg, setStatusMsg]     = useState(null);
+  const [figureDataUrls, setFigureDataUrls] = useState([]);
+  const [runCount, setRunCount]       = useState(0);
+  const [lastRunMs, setLastRunMs]     = useState(null);
+
+  const handleRun = useCallback(async () => {
+    if (running || !pyodideReady) return;
+    setRunning(true); setOutput(""); setFigureDataUrls([]); setStatusMsg("⟳ Starting…");
+    const t0 = performance.now();
+    try {
+      const { output: out, figureDataUrls: figs } = await runPythonReal(activeCode, setStatusMsg);
+      setOutput(out); setFigureDataUrls(figs || []);
+      setRunCount(c => c + 1); setLastRunMs(Math.round(performance.now() - t0));
+      if (trackActivity && dayKey) trackActivity("codeRun", dayKey, true);
+    } catch (e) { setOutput("Fatal error: " + e.message); }
+    setStatusMsg(null); setRunning(false);
+  }, [running, pyodideReady, activeCode, trackActivity, dayKey]);
+
+  // Ctrl/Cmd+Enter shortcut
+  useEffect(() => {
+    const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); handleRun(); } };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [handleRun]);
+
+  const addTab = () => {
+    const id = "tab_" + Date.now(), n = tabs.length + 1;
+    setTabs(prev => [...prev, { id, name:`script_${n}.py`, code:`# script_${n}.py\nprint("Hello from script ${n}")\n` }]);
+    setActiveTab(id);
+  };
+  const closeTab = (id) => {
+    if (tabs.length === 1) return;
+    const idx = tabs.findIndex(t => t.id === id);
+    const newTabs = tabs.filter(t => t.id !== id);
+    setTabs(newTabs);
+    if (activeTab === id) setActiveTab(newTabs[Math.max(0, idx - 1)].id);
+  };
+
+  const downloadPy = () => {
+    const tab = tabs.find(t => t.id === activeTab);
+    downloadBlob(tab.code, tab.name, "text/x-python");
+  };
+  const downloadOutput = () => { if (output) downloadBlob(output, "output.txt"); };
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+      {/* ── Pyodide status banner ── */}
+      {!pyodideReady ? (
+        <div style={{ background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:"#1e40af" }}>
+            <Ic n="zap" s={15} c="#3b82f6"/>
+            <div>
+              <strong>Real Python Execution available</strong> — load Pyodide (WASM) for actual code running
+              <div style={{ fontSize:11.5, color:"#3b82f6", marginTop:2 }}>
+                📦 pandas, numpy, scikit-learn, matplotlib &amp; 100+ packages auto-install on first use
+              </div>
+            </div>
+          </div>
+          <button className="lms-btn lms-btn-blue" disabled={pyodideLoading} onClick={onLoadPyodide} style={{ flexShrink:0 }}>
+            {pyodideLoading?<><Spin s={13}/>Loading Python...</>:<><Ic n="play" s={13}/>Load Real Python</>}
+          </button>
+        </div>
+      ) : (
+        <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"8px 16px", marginBottom:14, fontSize:13, color:"#15803d", fontWeight:600, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <Ic n="check" s={15} c="#22c55e"/>
+            Real Python · Pyodide WASM · auto-install ON
+            {lastRunMs && <span style={{ fontSize:11, fontWeight:400, color:"#16a34a" }}>· last run {lastRunMs}ms · {runCount} total</span>}
+          </div>
+          <span style={{ fontSize:11, fontWeight:400, color:"#16a34a" }}>Ctrl+Enter to run</span>
+        </div>
+      )}
+
+      <div style={{ display:"grid", gridTemplateColumns:"160px 1fr", gap:14, alignItems:"start" }}>
+        {/* ── Snippets sidebar ── */}
+        <div className="lms-card" style={{ padding:12 }}>
+          <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".08em", marginBottom:8 }}>Snippets</p>
+          <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+            {COMPILER_SNIPPETS.map((s, i) => (
+              <button key={i} onClick={() => { setActiveCode(s.code); setOutput(""); setFigureDataUrls([]); }}
+                style={{ width:"100%", textAlign:"left", background:"transparent", border:"none",
+                  padding:"5px 8px", fontSize:12, color:"#475569", cursor:"pointer", borderRadius:6,
+                  display:"flex", alignItems:"center", gap:6, transition:"background .1s" }}
+                onMouseEnter={e=>e.currentTarget.style.background="#f1f5f9"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <span style={{ width:6, height:6, borderRadius:"50%", background:"#3b82f6", flexShrink:0 }} />
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ height:1, background:"#e2e8f0", margin:"10px 0" }} />
+          <p style={{ fontSize:10, color:"#94a3b8", lineHeight:1.5 }}>Tab → 4 spaces<br/>Ctrl+↵ → Run</p>
+          <div style={{ height:1, background:"#e2e8f0", margin:"10px 0" }} />
+          <div style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:6, padding:8 }}>
+            <p style={{ fontSize:10.5, fontWeight:700, color:"#16a34a", margin:"0 0 3px" }}>📦 Auto-Install ON</p>
+            <p style={{ fontSize:10, color:"#64748b", margin:0, lineHeight:1.4 }}>Any import auto-installs. NLTK corpora auto-download. Plots render as images.</p>
+          </div>
+          <div style={{ height:1, background:"#e2e8f0", margin:"8px 0" }} />
+          <div style={{ background:"#fff7ed", border:"1px solid #fed7aa", borderRadius:6, padding:8 }}>
+            <p style={{ fontSize:10.5, fontWeight:700, color:"#c2410c", margin:"0 0 3px" }}>⚠️ WASM Limits</p>
+            <p style={{ fontSize:10, color:"#64748b", margin:0, lineHeight:1.4 }}>TensorFlow, PyTorch &amp; Keras need native GPU drivers — use scikit-learn or run locally.</p>
+          </div>
+        </div>
+
+        {/* ── Editor + Output ── */}
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          {/* File tabs */}
+          <div style={{ display:"flex", alignItems:"center", gap:2, borderBottom:"1.5px solid #e2e8f0", paddingBottom:0 }}>
+            {tabs.map(tab => (
+              <div key={tab.id}
+                style={{ display:"flex", alignItems:"center", gap:4, padding:"6px 12px 5px",
+                  background: tab.id===activeTab ? "#fff" : "transparent",
+                  borderBottom: tab.id===activeTab ? "2px solid #3b82f6" : "2px solid transparent",
+                  cursor:"pointer", borderRadius:"6px 6px 0 0" }}
+                onClick={() => setActiveTab(tab.id)}>
+                {editingTabId === tab.id ? (
+                  <input autoFocus value={tabNameDraft}
+                    onChange={e=>setTabNameDraft(e.target.value)}
+                    onBlur={()=>{ if(tabNameDraft.trim()) setTabs(p=>p.map(t=>t.id===tab.id?{...t,name:tabNameDraft.trim()}:t)); setEditingTabId(null); }}
+                    onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); if(e.key==="Escape") setEditingTabId(null); }}
+                    style={{ fontSize:12, border:"none", background:"transparent", color:"#0f172a",
+                      outline:"1px solid #3b82f6", borderRadius:3, width:90, fontFamily:"inherit" }} />
+                ) : (
+                  <span style={{ fontSize:12, color: tab.id===activeTab?"#0f172a":"#64748b" }}
+                    onDoubleClick={()=>{ setTabNameDraft(tab.name); setEditingTabId(tab.id); }}>
+                    📄 {tab.name}
+                  </span>
+                )}
+                {tabs.length > 1 && (
+                  <span onClick={e=>{ e.stopPropagation(); closeTab(tab.id); }}
+                    style={{ fontSize:13, color:"#94a3b8", lineHeight:1, cursor:"pointer", padding:"0 2px", borderRadius:3 }}>×</span>
+                )}
+              </div>
+            ))}
+            <button onClick={addTab}
+              style={{ padding:"4px 10px", background:"transparent", border:"none",
+                color:"#94a3b8", cursor:"pointer", fontSize:16, lineHeight:1, marginLeft:2 }}>+</button>
+            <div style={{ flex:1 }} />
+            <span style={{ fontSize:11, color:"#94a3b8", paddingBottom:6 }}>
+              {activeCode.split("\n").length} lines · {activeCode.length} chars
+            </span>
+          </div>
+
+          {/* Editor + Output grid */}
+          <div className="lms-compiler-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+            {/* Editor */}
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              <p style={{ fontWeight:700, fontSize:12.5, color:"#0f172a", margin:0 }}>
+                Editor{dayTopic ? ` — ${dayTopic}` : ""}
+              </p>
+              <PyCodeEditor value={activeCode} onChange={setActiveCode} height={360} />
+            </div>
+            {/* Output */}
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              <p style={{ fontWeight:700, fontSize:12.5, color:"#0f172a", margin:0 }}>
+                Output <span style={{ fontSize:11, color:"#94a3b8", fontWeight:400 }}>
+                  ({pyodideReady ? "Real Pyodide WASM" : "load Python above to run"})
+                </span>
+              </p>
+              <PyOutputPane output={output} figureDataUrls={figureDataUrls} statusMsg={statusMsg} running={running} />
+            </div>
+          </div>
+
+          {/* Action bar */}
+          <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+            <button className="lms-btn lms-btn-blue" disabled={running || !pyodideReady} onClick={handleRun}
+              style={{ padding:"8px 20px" }}>
+              {running ? <><Spin s={13}/>Running…</> : <><Ic n="play" s={13}/>Run Code</>}
+            </button>
+            <button className="lms-btn lms-btn-ghost" onClick={() => { setOutput(""); setFigureDataUrls([]); }}>
+              <Ic n="x" s={12}/>Clear Output
+            </button>
+            <button className="lms-btn lms-btn-ghost" onClick={downloadPy}>
+              <Ic n="download" s={12}/>Download .py
+            </button>
+            {output && (
+              <button className="lms-btn lms-btn-ghost" onClick={downloadOutput}>
+                <Ic n="download" s={12}/>Download Output
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2182,25 +2858,36 @@ function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
       // FIX #14: filter server-side by email — don't fetch all students
       const existingRows = await sb.select("lms_students", `email=eq.${encodeURIComponent(studentEmail.trim())}&limit=1`);
       if (existingRows && existingRows.length > 0) throw new Error("Email already registered");
-      // Use the first selected course's trainer as the primary trainer
+      // Use the first selected course's trainer as the primary trainer (trainer_id column)
+      // FIX: also collect ALL unique trainer IDs from selected courses so every trainer
+      // can see this student's request, not just the first-course trainer.
       const firstCourse = allCourses.find(c => c.id === studentCourseIds[0]);
       if (!firstCourse?.trainerId) throw new Error("Could not determine trainer for the selected course");
       const newId = generateId();
       // FIX #3: hash the password before storing
       const passwordHash = await hashPassword(studentPassword.trim(), newId);
+      // Build pendingCourseIds with trainer info embedded so each trainer's query
+      // can find this student even if trainer_id points to a different trainer.
       const pendingCourseIds = studentCourseIds.map(cid => {
         const course = allCourses.find(c => c.id === cid);
-        return { courseId: cid, courseName: course?.name || "", requestedAt: new Date().toISOString() };
+        return {
+          courseId: cid,
+          courseName: course?.name || "",
+          trainerId: course?.trainerId || "",
+          requestedAt: new Date().toISOString(),
+        };
       });
       const newStudent = {
         id: newId,
         name: studentName.trim(),
         email: studentEmail.trim(),
         passwordHash,
+        // trainer_id = primary trainer (first selected course) — used for indexed queries
         trainerId: firstCourse.trainerId,
         approved: false,
         pendingCourseIds,
         enrolledCourseIds: [],
+        // Keep legacy single-course fields so old code paths still work
         requestedCourseId: studentCourseIds[0],
         requestedCourseName: firstCourse?.name || "",
         requestedAt: new Date().toISOString(),
@@ -2828,7 +3515,7 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 
       {/* ── Page header ── */}
       <div style={{ background:"linear-gradient(135deg,#0f172a,#1e3a5f)", borderRadius:14, padding:"20px 24px", color:"#fff" }}>
-        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Student Performance</div>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Std Performance</div>
         <div style={{ fontSize:13, opacity:.7 }}>{students.length} enrolled student{students.length !== 1 ? "s" : ""} · {planDays.length} day course · Click any student to view their full dashboard</div>
       </div>
 
@@ -2924,23 +3611,56 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 /* ─── StudentsNavBtn (top-level to avoid remount on each render) ─── */
 function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen, collapsed }) {
   const [pendingCount, setPendingCount] = useState(0);
+
+  // FIX: fetch pending count on mount AND poll every 8s so the badge updates
+  // the moment a student sends a join request — no manual refresh needed.
+  // Also queries by courseId fallback to catch cross-trainer requests where
+  // trainer_id on the student row may point to a different trainer.
   useEffect(() => {
     if (!sb || !courseId) return;
-    // FIX: query all students for this trainer (indexed column), then filter in JS.
-    // This avoids fragile JSONB containment queries and catches both new-path
-    // (pending_course_ids array) and legacy-path (requested_course_id) students.
-    const filter = trainerId
-      ? `trainer_id=eq.${encodeURIComponent(trainerId)}&limit=500`
-      : `requested_course_id=eq.${encodeURIComponent(courseId)}&approved=eq.false&limit=200`;
-    sb.select("lms_students", filter).then(rows => {
-      const students = (rows || []).map(dbRowToStudent);
-      const count = students.filter(s => {
-        const inPending = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
-        const legacyPending = !s.approved && s.requestedCourseId === courseId;
-        return inPending || legacyPending;
-      }).length;
-      setPendingCount(count);
-    }).catch(() => {});
+
+    const fetchCount = () => {
+      // Primary query: students whose trainer_id matches this trainer
+      const byTrainer = trainerId
+        ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&limit=500`)
+        : Promise.resolve([]);
+
+      // Secondary query: students who requested this specific course but
+      // may have a different trainer_id (multi-trainer enrollment edge case)
+      const byCourse = sb.select(
+        "lms_students",
+        `requested_course_id=eq.${encodeURIComponent(courseId)}&approved=eq.false&limit=200`
+      );
+
+      Promise.all([byTrainer, byCourse])
+        .then(([trainerRows, courseRows]) => {
+          // Merge and deduplicate by student id
+          const seen = new Set();
+          const allRows = [...(trainerRows || []), ...(courseRows || [])].filter(r => {
+            if (seen.has(r.id)) return false;
+            seen.add(r.id);
+            return true;
+          });
+          const students = allRows.map(dbRowToStudent);
+          const count = students.filter(s => {
+            // new-path: pendingCourseIds array contains this courseId
+            const inPending = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
+            // legacy-path: single requestedCourseId field
+            const legacyPending = !s.approved && s.requestedCourseId === courseId;
+            // cross-trainer: student selected courses from multiple trainers; their trainer_id
+            // points elsewhere but this trainerId appears in a pendingCourseIds entry
+            const crossTrainer = trainerId && Array.isArray(s.pendingCourseIds) &&
+              s.pendingCourseIds.some(p => p.trainerId === trainerId && p.courseId === courseId);
+            return inPending || legacyPending || crossTrainer;
+          }).length;
+          setPendingCount(count);
+        })
+        .catch(() => {});
+    };
+
+    fetchCount(); // immediate on mount / when panel toggles
+    const interval = setInterval(fetchCount, 8000); // poll every 8 s
+    return () => clearInterval(interval);
   }, [studentsOpen, sb, courseId, trainerId]);
 
   return (
@@ -2959,24 +3679,56 @@ function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen
 /* ─── StudentsPanel (top-level to avoid remount on each render) ─── */
 function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) {
   const [list, setList] = useState([]);
-  useEffect(() => {
-    if (!sb) return;
-    // FIX: query all students for this trainer by trainer_id (indexed), filter in JS.
-    // Catches both new-path (pending_course_ids JSONB) and legacy-path students.
-    const filter = trainerId
-      ? `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500`
-      : `requested_course_id=eq.${encodeURIComponent(courseId)}&limit=300`;
-    sb.select("lms_students", filter).then(rows => {
-      const students = (rows || []).map(dbRowToStudent);
-      setList(students.filter(s => {
-        const inPending = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
-        const legacyPending = !s.approved && s.requestedCourseId === courseId && !Array.isArray(s.pendingCourseIds);
-        const inEnrolled = Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.some(e => e.courseId === courseId);
-        const legacyApproved = s.approved && s.requestedCourseId === courseId && !Array.isArray(s.enrolledCourseIds);
-        return inPending || legacyPending || inEnrolled || legacyApproved;
-      }));
-    }).catch(() => {});
+
+  // FIX: dual-query strategy so requests are never missed:
+  //   1. By trainer_id  — students whose primary trainer is this trainer
+  //   2. By requested_course_id — catches students who selected this course but
+  //      whose trainer_id points to a different trainer (multi-trainer enrollment)
+  // Results are merged + deduplicated, then filtered to this course only.
+  // Also polls every 8 s so new requests appear without a manual panel close/open.
+  const fetchList = useCallback(() => {
+    if (!sb || !courseId) return;
+
+    const byTrainer = trainerId
+      ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500`)
+      : Promise.resolve([]);
+
+    const byCourse = sb.select(
+      "lms_students",
+      `requested_course_id=eq.${encodeURIComponent(courseId)}&order=created_at.asc&limit=300`
+    );
+
+    Promise.all([byTrainer, byCourse])
+      .then(([trainerRows, courseRows]) => {
+        const seen = new Set();
+        const allRows = [...(trainerRows || []), ...(courseRows || [])].filter(r => {
+          if (seen.has(r.id)) return false;
+          seen.add(r.id);
+          return true;
+        });
+        const students = allRows.map(dbRowToStudent);
+        setList(students.filter(s => {
+          // new-path pending
+          const inPending      = Array.isArray(s.pendingCourseIds)  && s.pendingCourseIds.some(p => p.courseId === courseId);
+          // legacy pending (pre-JSONB path)
+          const legacyPending  = !s.approved && s.requestedCourseId === courseId && !Array.isArray(s.pendingCourseIds);
+          // cross-trainer: pending entry has trainerId matching this trainer
+          const crossTrainer   = trainerId && Array.isArray(s.pendingCourseIds) &&
+            s.pendingCourseIds.some(p => p.trainerId === trainerId && p.courseId === courseId);
+          // enrolled checks
+          const inEnrolled     = Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.some(e => e.courseId === courseId);
+          const legacyApproved = s.approved && s.requestedCourseId === courseId && !Array.isArray(s.enrolledCourseIds);
+          return inPending || legacyPending || crossTrainer || inEnrolled || legacyApproved;
+        }));
+      })
+      .catch(() => {});
   }, [sb, courseId, trainerId]);
+
+  useEffect(() => {
+    fetchList(); // load immediately on open
+    const interval = setInterval(fetchList, 8000); // auto-refresh every 8 s
+    return () => clearInterval(interval);
+  }, [fetchList]);
 
   const approved = list.filter(s => Array.isArray(s.enrolledCourseIds) ? s.enrolledCourseIds.some(e => e.courseId === courseId) : (s.approved && s.requestedCourseId === courseId));
   const pending  = list.filter(s => Array.isArray(s.pendingCourseIds) ? s.pendingCourseIds.some(p => p.courseId === courseId) : (!s.approved && s.requestedCourseId === courseId));
@@ -5980,7 +6732,7 @@ Hard rules:
     try {
       if (pyodideReady) {
         // Pass a status callback so the output panel shows "Installing pandas…" etc. in real time
-        const out = await runPythonReal(code, (msg) => {
+        const { output: out } = await runPythonReal(code, (msg) => {
           setCodeOutputs(p=>({...p,[k]: msg ? `⏳ ${msg}` : ""}));
         });
         setCodeOutputs(p=>({...p,[k]:"✓ REAL PYTHON OUTPUT:\n" + out}));
@@ -9207,73 +9959,19 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
         </div>
       )}
 
-      {/* ── COMPILER — FIX 1 + FIX 10 ── */}
+      {/* ── COMPILER — EmbeddedCompiler (full IDE with tabs, line numbers, matplotlib capture) ── */}
       {tab==="compiler" && (
         <div style={{ animation:"lms-in .2s ease" }}>
-          {/* Pyodide loader banner */}
-          {!pyodideReady && (
-            <div style={{ background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:"#1e40af" }}>
-                <Ic n="zap" s={15} c="#3b82f6"/>
-                <div>
-                  <strong>Real Python Execution available</strong> — load Pyodide (WASM) for actual code running
-                  <div style={{ fontSize:11.5, color:"#3b82f6", marginTop:2 }}>
-                    📦 pandas, numpy, scikit-learn, matplotlib &amp; 100+ packages auto-install on first use
-                  </div>
-                </div>
-              </div>
-              <button className="lms-btn lms-btn-blue" disabled={pyodideLoading} onClick={onLoadPyodide} style={{ flexShrink:0 }}>
-                {pyodideLoading?<><Spin s={13}/>Loading Python...</>:<><Ic n="play" s={13}/>Load Real Python</>}
-              </button>
-            </div>
-          )}
-          {pyodideReady && (
-            <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"8px 16px", marginBottom:14, fontSize:13, color:"#15803d", fontWeight:600, display:"flex", alignItems:"center", gap:8 }}>
-              <Ic n="check" s={15} c="#22c55e"/>
-              <div>
-                Real Python (Pyodide WASM) — actual execution, no simulation
-                <span style={{ fontSize:11, fontWeight:400, color:"#16a34a", marginLeft:8 }}>
-                  📦 import any package — it installs automatically on first use
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* FIX 10: responsive grid */}
-          <div className="lms-compiler-grid" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
-            <div className="lms-card" style={{ padding:16 }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10, flexWrap:"wrap", gap:8 }}>
-                <p style={{ fontWeight:700, fontSize:13, color:"#0f172a" }}>Code Editor — {day.topic}</p>
-                <button className="lms-btn lms-btn-blue" disabled={!!busy[`run-${k}`]} onClick={()=>onRunCode(codeEdit)} style={{ padding:"6px 14px" }}>
-                  {busy[`run-${k}`]?<><Spin s={13}/>Running...</>:<><Ic n="play" s={13}/>Run Code</>}
-                </button>
-              </div>
-              <textarea className="lms-input" value={codeEdit} onChange={e=>setCodeEdit(e.target.value)}
-                style={{ minHeight:360, fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12.5, lineHeight:1.65 }} />
-              <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
-                <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 10px" }}
-                  onClick={()=>downloadBlob(codeEdit, `Day${day.dayNum}_code.py`)}>
-                  <Ic n="download" s={12}/>Save .py
-                </button>
-                {(dayData.codeBlocks||[]).map((cb,i) => (
-                  <button key={i} className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"5px 10px" }} onClick={()=>setCodeEdit(cb)}>
-                    Example {i+1}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="lms-card" style={{ padding:16 }}>
-              <p style={{ fontWeight:700, fontSize:13, color:"#0f172a", marginBottom:10 }}>
-                Output{" "}
-                <span style={{ fontSize:11, color:"#94a3b8", fontWeight:400 }}>
-                  ({pyodideReady?"Real Pyodide WASM":"AI-simulated — load Real Python above"})
-                </span>
-              </p>
-              <div className="lms-output" style={{ minHeight:360, overflowY:"auto" }}>
-                {codeOutput || <span style={{ color:"#475569" }}>▶ Run your code to see output here</span>}
-              </div>
-            </div>
-          </div>
+          <EmbeddedCompiler
+            initialCode={codeEdit}
+            dayTopic={day.topic}
+            pyodideReady={pyodideReady}
+            pyodideLoading={pyodideLoading}
+            onLoadPyodide={onLoadPyodide}
+            onCodeChange={setCodeEdit}
+            trackActivity={trackActivity}
+            dayKey={k}
+          />
         </div>
       )}
 
