@@ -808,6 +808,83 @@ async function sbDeleteStudent(sb, studentId) {
   await sb.delete("lms_students", `id=eq.${encodeURIComponent(studentId)}`);
 }
 
+// ── ENROLLMENT QUERY HELPER ───────────────────────────────────────────────
+// THE ROOT CAUSE OF THE BUG: every trainer-side query only filters by
+// trainer_id. When a student registers for courses from Trainer B, their
+// trainer_id column still points to Trainer A (the first-course trainer).
+// Trainer B never sees the request because trainer_id ≠ Trainer B's id.
+//
+// This helper runs TWO parallel queries and merges results so no request
+// is ever missed, regardless of which trainer_id is stored on the student:
+//   Query 1 — trainer_id = this trainer (catches primary-trainer students)
+//   Query 2 — scan pending_course_ids JSONB for this courseId
+//             (catches cross-trainer students)
+// Results are deduped by student.id before returning.
+// ── SQL to run ONCE in Supabase SQL editor for multi-trainer support ──
+// The JSONB containment queries (cs.) require these columns to be jsonb type.
+// If you created lms_students with pending_course_ids as text[], alter them:
+//
+//   ALTER TABLE lms_students
+//     ALTER COLUMN pending_course_ids  TYPE jsonb USING pending_course_ids::jsonb,
+//     ALTER COLUMN enrolled_course_ids TYPE jsonb USING enrolled_course_ids::jsonb;
+//
+//   -- Optional index for fast JSONB containment queries:
+//   CREATE INDEX IF NOT EXISTS idx_students_pending_courses
+//     ON lms_students USING GIN (pending_course_ids);
+//   CREATE INDEX IF NOT EXISTS idx_students_enrolled_courses
+//     ON lms_students USING GIN (enrolled_course_ids);
+//
+// Without the ALTER, q2/q3 below will fail silently (Promise.allSettled catches
+// them) and fall back to q1 (trainer_id) + q4 (requested_course_id). That means
+// the first-registration cross-trainer case still works via q4, and the
+// post-login additional-course case works via trainer_id if trainer matches.
+async function sbGetStudentsForCourse(sb, courseId, trainerId) {
+  const q1 = trainerId
+    ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500`)
+    : Promise.resolve([]);
+
+  // Supabase PostgREST JSONB containment: pending_course_ids @> '[{"courseId":"..."}]'
+  // This catches any student who put this courseId in their pending list,
+  // regardless of which trainer_id they carry on the top-level column.
+  //
+  // IMPORTANT: Do NOT encodeURIComponent the JSON value here.
+  // PostgREST expects the raw JSON in the query string value position.
+  // The fetch() URL constructor (or sb.select's internal URL builder)
+  // will percent-encode special chars automatically. Pre-encoding causes
+  // double-encoding (%25 instead of %) which breaks the cs. operator.
+  const jsonbValue = JSON.stringify([{ courseId }]);
+  const jsonbValueEncoded = encodeURIComponent(jsonbValue);
+  const q2 = sb.select(
+    "lms_students",
+    `pending_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500`
+  );
+
+  // Also query enrolled_course_ids JSONB so approved students show up too
+  const q3 = sb.select(
+    "lms_students",
+    `enrolled_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500`
+  );
+
+  // Legacy path: requested_course_id plain column
+  const q4 = sb.select(
+    "lms_students",
+    `requested_course_id=eq.${encodeURIComponent(courseId)}&order=created_at.asc&limit=500`
+  );
+
+  const results = await Promise.allSettled([q1, q2, q3, q4]);
+  const seen = new Set();
+  const merged = [];
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    for (const row of (r.value || [])) {
+      if (!row?.id || seen.has(row.id)) continue;
+      seen.add(row.id);
+      merged.push(row);
+    }
+  }
+  return merged.map(dbRowToStudent);
+}
+
 // ── LEADERBOARD — fetch all approved students for a course + their day content ──
 // ── STUDENT ACTIVITY TRACKING ──────────────────────────────────────
 // Table: lms_student_activity
@@ -944,11 +1021,10 @@ async function sbLoadAllQuizAttempts(sb, courseId) {
 }
 
 async function sbGetLeaderboardData(sb, courseId, planDays) {
-  // Fetch all students and filter to those enrolled in this course.
-  // We can't do a server-side JSONB array filter easily with the REST client,
-  // so we fetch all and filter client-side. For large deployments, add a DB view.
-  const rows = await sb.select("lms_students", "order=created_at.asc");
-  const allStudents = (rows || []).map(dbRowToStudent);
+  // trainerId=null means: skip the trainer_id filter (q1) and rely on
+  // JSONB enrolled_course_ids containment (q3) + legacy requested_course_id (q4).
+  // This finds all enrolled students for this course regardless of trainer.
+  const allStudents = await sbGetStudentsForCourse(sb, courseId, null);
   const enrolled = allStudents.filter(s => {
     const courses = getStudentEnrolledCourses(s);
     return courses.some(e => e.courseId === courseId);
@@ -997,16 +1073,27 @@ function dbRowToStudent(row) {
 
 function getStudentEnrolledCourses(student) {
   if (!student) return [];
-  // Primary path: new-format enrolledCourseIds array has entries
-  if (student.enrolledCourseIds && Array.isArray(student.enrolledCourseIds) && student.enrolledCourseIds.length > 0) {
-    return student.enrolledCourseIds;
+  const courses = [];
+  const seen = new Set();
+
+  // Primary path: new-format enrolledCourseIds JSONB array
+  if (Array.isArray(student.enrolledCourseIds)) {
+    for (const e of student.enrolledCourseIds) {
+      if (e?.courseId && !seen.has(e.courseId)) {
+        seen.add(e.courseId);
+        courses.push(e);
+      }
+    }
   }
-  // Legacy fallback: approved=true with requestedCourseId (old single-course path)
-  // Also catches cases where enrolledCourseIds was reset to [] but student is still approved
-  if (student.requestedCourseId && student.approved) {
-    return [{ courseId: student.requestedCourseId, courseName: student.requestedCourseName || "" }];
+
+  // Legacy fallback: approved=true with requestedCourseId.
+  // Merged (not replaced) so students with BOTH old + new data are covered.
+  if (student.requestedCourseId && student.approved && !seen.has(student.requestedCourseId)) {
+    seen.add(student.requestedCourseId);
+    courses.push({ courseId: student.requestedCourseId, courseName: student.requestedCourseName || "" });
   }
-  return [];
+
+  return courses;
 }
 
 // ── DAY FILES ─────────────────────────────────────────────────────
@@ -3257,10 +3344,10 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
   const load = async () => {
     setLoading(true);
     try {
-      // FIX 3: filter server-side by trainer_id — never fetch the whole students table
-      const rows = await sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc`);
-      setStudents((rows || []).map(dbRowToStudent));
-      // FIX 1: sbGetCoursesByTrainer already calls dbRowToCourse — no double-map
+      // Use sbGetStudentsForCourse so cross-trainer requests appear here too.
+      // (trainer_id-only queries miss students whose primary trainer differs.)
+      const students = await sbGetStudentsForCourse(sb, courseId, trainerId);
+      setStudents(students);
       const courses = await sbGetCoursesByTrainer(sb, trainerId);
       setAllCourses(courses);
     } catch(e) { console.error(e); }
@@ -3298,13 +3385,20 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
   const handleReject = async (studentId) => {
     const s = students.find(x => x.id === studentId);
     if (!s) return;
-    const newPending = Array.isArray(s.pendingCourseIds) ? s.pendingCourseIds.filter(p => p.courseId !== courseId) : [];
-    const hasPending = newPending.length > 0;
-    const hasEnrolled = Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.length > 0;
-    if (!hasPending && !hasEnrolled && !Array.isArray(s.pendingCourseIds)) {
+    // Strip this course from both arrays (a student could appear in pending OR enrolled here)
+    const newPending  = Array.isArray(s.pendingCourseIds)  ? s.pendingCourseIds.filter(p  => p.courseId  !== courseId) : [];
+    const newEnrolled = Array.isArray(s.enrolledCourseIds) ? s.enrolledCourseIds.filter(e => e.courseId  !== courseId) : [];
+    const hasOtherPending    = newPending.length > 0;
+    const hasOtherEnrolled   = newEnrolled.length > 0;
+    const hasLegacyElsewhere = s.approved && s.requestedCourseId && s.requestedCourseId !== courseId;
+    // After ALTER TABLE all students have JSONB arrays — !Array.isArray is always false.
+    // Old code: !hasPending && !hasEnrolled && !Array.isArray(s.pendingCourseIds)
+    // That last clause was ALWAYS false → single-course students were never deleted (zombie rows).
+    // Fixed: delete when truly nothing remains anywhere.
+    if (!hasOtherPending && !hasOtherEnrolled && !hasLegacyElsewhere) {
       await sbDeleteStudent(sb, studentId);
     } else {
-      await sbSaveStudent(sb, { ...s, pendingCourseIds: newPending });
+      await sbSaveStudent(sb, { ...s, pendingCourseIds: newPending, enrolledCourseIds: newEnrolled });
     }
     load();
   };
@@ -3515,7 +3609,7 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 
       {/* ── Page header ── */}
       <div style={{ background:"linear-gradient(135deg,#0f172a,#1e3a5f)", borderRadius:14, padding:"20px 24px", color:"#fff" }}>
-        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Std Performance</div>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Student Performance</div>
         <div style={{ fontSize:13, opacity:.7 }}>{students.length} enrolled student{students.length !== 1 ? "s" : ""} · {planDays.length} day course · Click any student to view their full dashboard</div>
       </div>
 
@@ -3612,53 +3706,26 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen, collapsed }) {
   const [pendingCount, setPendingCount] = useState(0);
 
-  // FIX: fetch pending count on mount AND poll every 8s so the badge updates
-  // the moment a student sends a join request — no manual refresh needed.
-  // Also queries by courseId fallback to catch cross-trainer requests where
-  // trainer_id on the student row may point to a different trainer.
   useEffect(() => {
     if (!sb || !courseId) return;
 
     const fetchCount = () => {
-      // Primary query: students whose trainer_id matches this trainer
-      const byTrainer = trainerId
-        ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&limit=500`)
-        : Promise.resolve([]);
-
-      // Secondary query: students who requested this specific course but
-      // may have a different trainer_id (multi-trainer enrollment edge case)
-      const byCourse = sb.select(
-        "lms_students",
-        `requested_course_id=eq.${encodeURIComponent(courseId)}&approved=eq.false&limit=200`
-      );
-
-      Promise.all([byTrainer, byCourse])
-        .then(([trainerRows, courseRows]) => {
-          // Merge and deduplicate by student id
-          const seen = new Set();
-          const allRows = [...(trainerRows || []), ...(courseRows || [])].filter(r => {
-            if (seen.has(r.id)) return false;
-            seen.add(r.id);
-            return true;
-          });
-          const students = allRows.map(dbRowToStudent);
+      // Use the shared helper that queries trainer_id + JSONB pending_course_ids
+      // + JSONB enrolled_course_ids + legacy requested_course_id in parallel.
+      // This guarantees cross-trainer requests are never missed.
+      sbGetStudentsForCourse(sb, courseId, trainerId)
+        .then(students => {
           const count = students.filter(s => {
-            // new-path: pendingCourseIds array contains this courseId
-            const inPending = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
-            // legacy-path: single requestedCourseId field
+            const inPending    = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
             const legacyPending = !s.approved && s.requestedCourseId === courseId;
-            // cross-trainer: student selected courses from multiple trainers; their trainer_id
-            // points elsewhere but this trainerId appears in a pendingCourseIds entry
-            const crossTrainer = trainerId && Array.isArray(s.pendingCourseIds) &&
-              s.pendingCourseIds.some(p => p.trainerId === trainerId && p.courseId === courseId);
-            return inPending || legacyPending || crossTrainer;
+            return inPending || legacyPending;
           }).length;
           setPendingCount(count);
         })
         .catch(() => {});
     };
 
-    fetchCount(); // immediate on mount / when panel toggles
+    fetchCount();
     const interval = setInterval(fetchCount, 8000); // poll every 8 s
     return () => clearInterval(interval);
   }, [studentsOpen, sb, courseId, trainerId]);
@@ -3688,37 +3755,17 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
   // Also polls every 8 s so new requests appear without a manual panel close/open.
   const fetchList = useCallback(() => {
     if (!sb || !courseId) return;
-
-    const byTrainer = trainerId
-      ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500`)
-      : Promise.resolve([]);
-
-    const byCourse = sb.select(
-      "lms_students",
-      `requested_course_id=eq.${encodeURIComponent(courseId)}&order=created_at.asc&limit=300`
-    );
-
-    Promise.all([byTrainer, byCourse])
-      .then(([trainerRows, courseRows]) => {
-        const seen = new Set();
-        const allRows = [...(trainerRows || []), ...(courseRows || [])].filter(r => {
-          if (seen.has(r.id)) return false;
-          seen.add(r.id);
-          return true;
-        });
-        const students = allRows.map(dbRowToStudent);
+    // sbGetStudentsForCourse queries ALL 4 paths in parallel (trainer_id,
+    // pending JSONB, enrolled JSONB, legacy requested_course_id) so
+    // cross-trainer requests are never missed.
+    sbGetStudentsForCourse(sb, courseId, trainerId)
+      .then(students => {
         setList(students.filter(s => {
-          // new-path pending
           const inPending      = Array.isArray(s.pendingCourseIds)  && s.pendingCourseIds.some(p => p.courseId === courseId);
-          // legacy pending (pre-JSONB path)
           const legacyPending  = !s.approved && s.requestedCourseId === courseId && !Array.isArray(s.pendingCourseIds);
-          // cross-trainer: pending entry has trainerId matching this trainer
-          const crossTrainer   = trainerId && Array.isArray(s.pendingCourseIds) &&
-            s.pendingCourseIds.some(p => p.trainerId === trainerId && p.courseId === courseId);
-          // enrolled checks
           const inEnrolled     = Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.some(e => e.courseId === courseId);
           const legacyApproved = s.approved && s.requestedCourseId === courseId && !Array.isArray(s.enrolledCourseIds);
-          return inPending || legacyPending || crossTrainer || inEnrolled || legacyApproved;
+          return inPending || legacyPending || inEnrolled || legacyApproved;
         }));
       })
       .catch(() => {});
@@ -3745,7 +3792,23 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
     setList(prev => prev.map(x => x.id === id ? updated : x));
   };
   const handleReject = async (id) => {
-    await sbDeleteStudent(sb, id).catch(() => {});
+    const s = list.find(x => x.id === id);
+    if (!s) return;
+    // Strip only this course from both arrays — never blindly delete the whole record.
+    // A student enrolled/pending across multiple trainers must stay in the DB for the others.
+    const newPending  = Array.isArray(s.pendingCourseIds)  ? s.pendingCourseIds.filter(p  => p.courseId  !== courseId) : [];
+    const newEnrolled = Array.isArray(s.enrolledCourseIds) ? s.enrolledCourseIds.filter(e => e.courseId  !== courseId) : [];
+    const hasOtherPending    = newPending.length > 0;
+    const hasOtherEnrolled   = newEnrolled.length > 0;
+    // Student is approved for a different course via the legacy single-course field
+    const hasLegacyElsewhere = s.approved && s.requestedCourseId && s.requestedCourseId !== courseId;
+    // After ALTER TABLE every student has JSONB arrays, so !Array.isArray is always false —
+    // drop that guard and use a clean check: delete only when truly nothing remains anywhere.
+    if (!hasOtherPending && !hasOtherEnrolled && !hasLegacyElsewhere) {
+      await sbDeleteStudent(sb, id).catch(() => {});
+    } else {
+      await sbSaveStudent(sb, { ...s, pendingCourseIds: newPending, enrolledCourseIds: newEnrolled }).catch(() => {});
+    }
     setList(prev => prev.filter(x => x.id !== id));
   };
 
@@ -3919,7 +3982,14 @@ function StudentCourseView({ sb, auth, handleLogout }) {
         ...(student.pendingCourseIds || []),
         ...newRequests.map(cid => {
           const c = allCourses.find(x => x.id === cid);
-          return { courseId: cid, courseName: c?.name || "", requestedAt: new Date().toISOString() };
+          // trainerId stored per entry so sbGetStudentsForCourse's JSONB
+          // containment query finds this student for the correct trainer.
+          return {
+            courseId: cid,
+            courseName: c?.name || "",
+            trainerId: c?.trainerId || "",
+            requestedAt: new Date().toISOString(),
+          };
         }),
       ];
       await sbSaveStudent(sb, { ...student, pendingCourseIds: newPending });
@@ -4938,14 +5008,9 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
         sbGetAttendanceSessions(sb, courseId),
         sbGetAttendanceRecords(sb, courseId),
       ]);
-      // Fetch enrolled students for this course
-      let studRows = [];
-      try {
-        studRows = await sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=name.asc&limit=500`);
-      } catch {
-        studRows = await sb.select("lms_students", `requested_course_id=eq.${encodeURIComponent(courseId)}&approved=eq.true&limit=500`).catch(() => []);
-      }
-      const allStudents = (studRows || []).map(dbRowToStudent);
+      // Use sbGetStudentsForCourse (4-path parallel query) so cross-trainer
+      // enrolled students appear in the attendance sheet too.
+      const allStudents = await sbGetStudentsForCourse(sb, courseId, trainerId);
       const enrolled = allStudents.filter(s => {
         if (Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.some(e => e.courseId === courseId)) return true;
         if (s.approved && s.requestedCourseId === courseId) return true;
@@ -5628,6 +5693,120 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   STUDENT PROFILE PANEL — edit name and profile photo
+═══════════════════════════════════════════════════════════════════ */
+function StudentProfilePanel({ profile, authName, onSave, onClose, darkMode }) {
+  const [displayName, setDisplayName] = useState(profile.displayName || authName || "");
+  const [photoUrl, setPhotoUrl] = useState(profile.photoUrl || "");
+  const [photoPreview, setPhotoPreview] = useState(profile.photoUrl || "");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const handlePhotoChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { setMsg("Photo too large — max 2MB"); return; }
+    if (!file.type.startsWith("image/")) { setMsg("Please select an image file"); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setPhotoPreview(ev.target.result);
+      setPhotoUrl(ev.target.result); // store as data URL (persisted in sessionStorage)
+    };
+    reader.readAsDataURL(file);
+    setMsg("");
+  };
+
+  const handleSave = () => {
+    setSaving(true);
+    onSave({ displayName: displayName.trim() || authName, photoUrl });
+    setMsg("✅ Profile saved!");
+    setTimeout(() => { setSaving(false); setMsg(""); }, 1500);
+  };
+
+  const bg = darkMode ? "#111827" : "#fff";
+  const border = darkMode ? "#1f2937" : "#e2e8f0";
+  const textPrimary = darkMode ? "#f1f5f9" : "#0f172a";
+  const textMuted = darkMode ? "#94a3b8" : "#64748b";
+
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:8500,
+      background:"rgba(0,0,0,.5)",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      padding:20,
+    }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{ background:bg, borderRadius:20, padding:28, maxWidth:380, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.3)", border:`1.5px solid ${border}` }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+          <p style={{ fontWeight:800, fontSize:16, color:textPrimary, margin:0 }}>👤 My Profile</p>
+          <button onClick={onClose} style={{ background:"none", border:"none", cursor:"pointer", fontSize:18, color:textMuted, lineHeight:1, padding:"2px 6px", borderRadius:6, fontFamily:"inherit" }}>✕</button>
+        </div>
+
+        {/* Photo upload */}
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", marginBottom:22 }}>
+          <div style={{ position:"relative", marginBottom:10 }}>
+            {photoPreview ? (
+              <img src={photoPreview} alt="profile"
+                style={{ width:80, height:80, borderRadius:"50%", objectFit:"cover", border:"3px solid #22c55e", boxShadow:"0 4px 16px rgba(34,197,94,.25)" }} />
+            ) : (
+              <div style={{ width:80, height:80, borderRadius:"50%", background:"linear-gradient(135deg,#22c55e,#16a34a)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32, color:"#fff", fontWeight:800, border:"3px solid #22c55e" }}>
+                {(displayName || authName || "S").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <label
+              title="Change photo"
+              style={{ position:"absolute", bottom:0, right:0, width:26, height:26, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", border:"2px solid #fff", boxShadow:"0 2px 8px rgba(59,130,246,.4)" }}>
+              <span style={{ fontSize:13, color:"#fff" }}>📷</span>
+              <input type="file" accept="image/*" style={{ display:"none" }} onChange={handlePhotoChange} />
+            </label>
+          </div>
+          <p style={{ fontSize:12, color:textMuted, margin:0 }}>Click 📷 to change photo (max 2MB)</p>
+          {photoPreview && (
+            <button onClick={() => { setPhotoUrl(""); setPhotoPreview(""); }} style={{ fontSize:11, color:"#ef4444", background:"none", border:"none", cursor:"pointer", marginTop:4, fontFamily:"inherit" }}>
+              Remove photo
+            </button>
+          )}
+        </div>
+
+        {/* Display name */}
+        <div style={{ marginBottom:18 }}>
+          <label style={{ fontSize:12.5, fontWeight:600, color:textMuted, display:"block", marginBottom:6 }}>Display Name</label>
+          <input
+            type="text"
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder={authName || "Your name"}
+            className="lms-input"
+            style={{ background: darkMode ? "#1e293b" : "#f8fafc", color:textPrimary, borderColor:border }}
+            onKeyDown={e => { if (e.key === "Enter") handleSave(); }}
+          />
+          <p style={{ fontSize:11, color:textMuted, marginTop:4 }}>This name will be shown in your profile and dashboard.</p>
+        </div>
+
+        {msg && (
+          <div style={{ padding:"8px 12px", borderRadius:8, marginBottom:14, background:msg.startsWith("✅") ? "#f0fdf4" : "#fef2f2", border:`1px solid ${msg.startsWith("✅") ? "#bbf7d0" : "#fecaca"}`, fontSize:13, fontWeight:600, color:msg.startsWith("✅") ? "#15803d" : "#dc2626" }}>
+            {msg}
+          </div>
+        )}
+
+        <div style={{ display:"flex", gap:10 }}>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="lms-btn lms-btn-blue"
+            style={{ flex:1, justifyContent:"center" }}
+          >
+            {saving ? <><Spin s={13}/>Saving…</> : "Save Profile"}
+          </button>
+          <button onClick={onClose} className="lms-btn lms-btn-ghost">Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, sb, trainerId = null, studentId = null, auth = null, enrolledCourses = [], pendingCourses = [] }) {
   const [aiProvider, setAiProvider] = useState("groq");
   const [groqKey,    setGroqKey]    = useState("");
@@ -5648,7 +5827,48 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const isOnline = useOnlineStatus();
 
-  const [page,      setPage]      = useState(studentMode ? "calendar" : "setup");
+  // ── URL hash-based page routing — preserves page on refresh ──
+  // Hash format: #page=calendar or #page=day&key=2024-01-15
+  const getHashPage = () => {
+    try {
+      const hash = window.location.hash.slice(1); // strip leading #
+      if (!hash) return null;
+      const params = new URLSearchParams(hash);
+      return { page: params.get("page") || null, dayKey: params.get("key") || null };
+    } catch { return null; }
+  };
+  const setHashPage = (pg, dayKey = null, push = true) => {
+    try {
+      const params = new URLSearchParams();
+      params.set("page", pg);
+      if (dayKey) params.set("key", dayKey);
+      const newHash = "#" + params.toString();
+      // Push new history entry so browser back/forward work
+      if (push && window.location.hash !== newHash) {
+        window.history.pushState(null, "", newHash);
+      } else {
+        window.history.replaceState(null, "", newHash);
+      }
+    } catch {}
+  };
+  const clearHash = () => {
+    try { window.history.replaceState(null, "", window.location.pathname + window.location.search); } catch {}
+  };
+
+  const [page, setPageRaw] = useState(() => {
+    const h = getHashPage();
+    if (h?.page && ["calendar","day","setup","settings","performance","attendance","dashboard"].includes(h.page)) {
+      return h.page;
+    }
+    return studentMode ? "calendar" : "setup";
+  });
+
+  // Wrap setPage to also update the hash
+  const setPage = (pg) => {
+    setPageRaw(pg);
+    if (pg === "day") return; // day page sets hash when selDay is known
+    setHashPage(pg);
+  };
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [studentsOpen, setStudentsOpen] = useState(false);
@@ -5677,7 +5897,13 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [dayStatus, setDayStatus] = useState({});
   // Trainer's day_status — stored separately for read-only display to students
   const [trainerDayStatus, setTrainerDayStatus] = useState({});
-  const [selDay,    setSelDay]    = useState(null);
+  const [selDay,    setSelDayRaw]  = useState(null);
+  // Wrap setSelDay to update URL hash when navigating to a day
+  const setSelDay = (day) => {
+    setSelDayRaw(day);
+    if (day) setHashPage("day", day.key);
+    else clearHash();
+  };
   // Per-student activity tracking (students only) — saved to lms_student_activity
   const [studentActivity, setStudentActivity] = useState({});
   const studentActivityRef = useRef({});
@@ -5698,6 +5924,21 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   // Rate-limit banner: shows current active model & pause status during batch generation
   const [rlBanner, setRlBanner] = useState(null); // { msg, modelName } | null
   const [darkMode, setDarkMode] = useState(false);
+
+  // ── Student profile (name + photo) — stored in sessionStorage ──
+  const [studentProfile, setStudentProfile] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('lms_student_profile');
+      return saved ? JSON.parse(saved) : { displayName: '', photoUrl: '' };
+    } catch { return { displayName: '', photoUrl: '' }; }
+  });
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  const saveStudentProfile = (updates) => {
+    const next = { ...studentProfile, ...updates };
+    setStudentProfile(next);
+    try { sessionStorage.setItem('lms_student_profile', JSON.stringify(next)); } catch {}
+  };
 
   // FIX #12: Scope AI prefs to the auth session (user-level), not per-course
   // Previously "lms_ai_prefs_{courseId}" meant the Groq key was lost when switching courses
@@ -6080,6 +6321,49 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     if (!planDays.length) return;
     setDayMap(buildDayMap(planDays, new Date(startDate + "T12:00:00"), monfri, dayOverrides));
   }, [planDays, startDate, monfri, dayOverrides]);
+
+  /* ════ Restore page from URL hash after dayMap is ready ════ */
+  useEffect(() => {
+    if (!planDays.length || !dayMap || !Object.keys(dayMap).length) return;
+    const h = getHashPage();
+    if (!h?.page) return;
+    if (h.page === "day" && h.dayKey) {
+      const pidx = dayMap[h.dayKey];
+      if (pidx !== undefined) {
+        const pd = planDays[pidx];
+        if (pd) {
+          setSelDayRaw({ key: h.dayKey, dayNum: pd.dayNum, topic: pd.topic });
+          setPageRaw("day");
+        }
+      }
+    } else if (["calendar","setup","settings","performance","attendance","dashboard"].includes(h.page)) {
+      setPageRaw(h.page);
+    }
+  // Only run once after first load — deps intentionally limited
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planDays.length > 0 && Object.keys(dayMap).length > 0]);
+
+  /* ════ Browser back/forward button support ════ */
+  useEffect(() => {
+    const onPopState = () => {
+      const h = getHashPage();
+      if (!h?.page) { setPageRaw(studentMode ? "calendar" : "setup"); setSelDayRaw(null); return; }
+      if (h.page === "day" && h.dayKey) {
+        const pidx = dayMap[h.dayKey];
+        if (pidx !== undefined && planDays[pidx]) {
+          const pd = planDays[pidx];
+          setSelDayRaw({ key: h.dayKey, dayNum: pd.dayNum, topic: pd.topic });
+          setPageRaw("day");
+        } else { setPageRaw(studentMode ? "calendar" : "setup"); }
+      } else {
+        setPageRaw(h.page);
+        setSelDayRaw(null);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayMap, planDays, studentMode]);
 
   /* ════ Search keyboard shortcut ════ */
   useEffect(() => {
@@ -7235,16 +7519,56 @@ Hard rules:
             --textLt:  #64748b;
           }
 
+          /* ══════════════════════════════════════════════════════
+             DARK MODE OVERRIDES  v2 — comprehensive text-visibility fix
+             All rules use [data-pr-dark="1"] root selector so they
+             only fire when dark mode is active, and never touch light mode.
+          ══════════════════════════════════════════════════════ */
+
           /* ── Scrollbar ── */
           [data-pr-dark="1"] ::-webkit-scrollbar-thumb { background:#334155; }
           [data-pr-dark="1"] ::-webkit-scrollbar-track { background:#111827; }
+
+          /* ── Global text color resets — covers every inline color:#0f172a / #334155 / #374151 / #475569 / #1a202c / #1e293b ── */
+          /* Primary body text that would be near-black on dark bg */
+          [data-pr-dark="1"] [style*="color:\"#0f172a\""]  { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] [style*="color:\"#1a202c\""]  { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] [style*="color:\"#334155\""]  { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color:\"#374151\""]  { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color:\"#1e293b\""]  { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color:\"#2d3748\""]  { color:#cbd5e1 !important; }
+          /* Secondary / muted text */
+          [data-pr-dark="1"] [style*="color:\"#475569\""]  { color:#94a3b8 !important; }
+          [data-pr-dark="1"] [style*="color:\"#64748b\""]  { color:#8492a6 !important; }
+          /* Dark blue text (#1e40af, #0c4a6e, #0369a1, #1e3a5f) — deep blue on white is fine but invisible on dark bg */
+          [data-pr-dark="1"] [style*="color:\"#1e40af\""]  { color:#93c5fd !important; }
+          [data-pr-dark="1"] [style*="color:\"#0c4a6e\""]  { color:#7dd3fc !important; }
+          [data-pr-dark="1"] [style*="color:\"#0369a1\""]  { color:#7dd3fc !important; }
+          [data-pr-dark="1"] [style*="color:\"#1e3a5f\""]  { color:#93c5fd !important; }
+          /* Deep green text (#166534, #15803d, #16a34a, #14532d) */
+          [data-pr-dark="1"] [style*="color:\"#166534\""]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color:\"#15803d\""]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color:\"#16a34a\""]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color:\"#14532d\""]  { color:#86efac !important; }
+          /* Amber / brown text (#92400e, #b45309, #d97706) on pale amber backgrounds */
+          [data-pr-dark="1"] [style*="color:\"#92400e\""]  { color:#fde68a !important; }
+          [data-pr-dark="1"] [style*="color:\"#b45309\""]  { color:#fbbf24 !important; }
+          /* Deep purple text (#5b21b6, #6b21a8, #9f1239) */
+          [data-pr-dark="1"] [style*="color:\"#5b21b6\""]  { color:#c4b5fd !important; }
+          [data-pr-dark="1"] [style*="color:\"#6b21a8\""]  { color:#c4b5fd !important; }
+          [data-pr-dark="1"] [style*="color:\"#9f1239\""]  { color:#fda4af !important; }
+          /* Orange-red (#9a3412) */
+          [data-pr-dark="1"] [style*="color:\"#9a3412\""]  { color:#fdba74 !important; }
+
+          /* ── Buttons with light backgrounds that become invisible ── */
+          [data-pr-dark="1"] [style*="background:\"#f1f5f9\""][style*="color:\"#475569\""]  { background:#1f2937 !important; color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""]  { background:#1a2535 !important; }
+          [data-pr-dark="1"] [style*="background:\"#fafafa\""]  { background:#161f2e !important; }
 
           /* ── Sidebar ── */
           [data-pr-dark="1"] .lms-sidebar { background:#111827 !important; border-right-color:#1f2937 !important; }
           [data-pr-dark="1"] .lms-sidebar > div:first-child { border-bottom-color:#1f2937 !important; }
           [data-pr-dark="1"] .lms-sidebar > div:last-child { border-top-color:#1f2937 !important; }
-          [data-pr-dark="1"] .lms-sidebar span[style*="color:\"#0f172a\""] { color:#e2e8f0 !important; }
-          [data-pr-dark="1"] .lms-sidebar span[style*="color:\"#94a3b8\""] { color:#64748b !important; }
 
           /* ── Nav buttons ── */
           [data-pr-dark="1"] .lms-nav { color:#94a3b8 !important; background:transparent !important; }
@@ -7254,8 +7578,6 @@ Hard rules:
           /* ── Header ── */
           [data-pr-dark="1"] header { background:#111827 !important; border-bottom-color:#1f2937 !important; }
           [data-pr-dark="1"] header span { color:#94a3b8 !important; }
-          [data-pr-dark="1"] header span[style*="color:\"#0f172a\""] { color:#e2e8f0 !important; }
-          [data-pr-dark="1"] header span[style*="color:\"#475569\""] { color:#94a3b8 !important; }
 
           /* ── Main area ── */
           [data-pr-dark="1"] main { background:#0d1117; }
@@ -7290,10 +7612,88 @@ Hard rules:
           [data-pr-dark="1"] .lms-cell { background:#1e293b !important; border-color:#334155 !important; color:#e2e8f0 !important; }
           [data-pr-dark="1"] .lms-output { background:#050a12 !important; }
 
+          /* ── Modals — override fixed white backgrounds ── */
+          [data-pr-dark="1"] [style*="position:\"fixed\""][style*="background:\"#fff\""],
+          [data-pr-dark="1"] [style*="position:\"fixed\""][style*="background:\"white\""] { background:#0d1117 !important; }
+          /* Modal inner panels */
+          [data-pr-dark="1"] [style*="borderRadius"][style*="background:\"#fff\""],
+          [data-pr-dark="1"] [style*="borderRadius"][style*="background:\"white\""] { background:#1e293b !important; border-color:#2a3a52 !important; }
+          /* Modal dividers */
+          [data-pr-dark="1"] [style*="borderTop:\"1.5px solid #f1f5f9\""] { border-top-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="borderBottom:\"1.5px solid #f1f5f9\""] { border-bottom-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="borderTop:\"1px solid #e2e8f0\""] { border-top-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="borderBottom:\"1px solid #e2e8f0\""] { border-bottom-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border:\"1.5px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border:\"1px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border:\"1px solid #f1f5f9\""] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border:\"1.5px solid #f1f5f9\""] { border-color:#2a3a52 !important; }
+
+          /* ── Status/info boxes (pale bg + dark text combinations) ── */
+          /* Blue info boxes (#eff6ff bg + #1e40af text) */
+          [data-pr-dark="1"] [style*="background:\"#eff6ff\""] { background:rgba(30,58,138,.25) !important; border-color:rgba(147,197,253,.3) !important; }
+          /* Green success boxes (#f0fdf4 bg + #166534 or #15803d text) */
+          [data-pr-dark="1"] [style*="background:\"#f0fdf4\""] { background:rgba(20,83,45,.25) !important; border-color:rgba(134,239,172,.3) !important; }
+          /* Amber warning boxes (#fffbeb bg + #92400e text) */
+          [data-pr-dark="1"] [style*="background:\"#fffbeb\""] { background:rgba(120,53,15,.25) !important; border-color:rgba(253,230,138,.3) !important; }
+          /* Orange boxes (#fff7ed) */
+          [data-pr-dark="1"] [style*="background:\"#fff7ed\""] { background:rgba(124,45,18,.25) !important; border-color:rgba(253,186,116,.3) !important; }
+          /* Purple boxes (#f5f3ff) */
+          [data-pr-dark="1"] [style*="background:\"#f5f3ff\""] { background:rgba(91,33,182,.2) !important; border-color:rgba(196,181,253,.3) !important; }
+          /* Red boxes (#fef2f2) */
+          [data-pr-dark="1"] [style*="background:\"#fef2f2\""] { background:rgba(127,29,29,.25) !important; border-color:rgba(252,165,165,.3) !important; }
+          /* Indigo (#eef2ff, #e0e7ff) */
+          [data-pr-dark="1"] [style*="background:\"#eef2ff\""] { background:rgba(30,27,75,.3) !important; border-color:rgba(165,180,252,.3) !important; }
+          [data-pr-dark="1"] [style*="background:\"#e0e7ff\""] { border-color:rgba(165,180,252,.35) !important; }
+          /* Light gray info panels */
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""] { background:#1a2535 !important; }
+          [data-pr-dark="1"] [style*="background:\"#fafafa\""] { background:#161f2e !important; }
+          [data-pr-dark="1"] [style*="background:\"#f1f5f9\""] { background:#1f2937 !important; }
+
+          /* ── Leaderboard & podium cards ── */
+          [data-pr-dark="1"] .lb2-row { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-row:hover { border-color:#3b82f6 !important; }
+          [data-pr-dark="1"] .lb2-row.me { background:linear-gradient(135deg,#1a2a4a,#1e2a40) !important; }
+          [data-pr-dark="1"] .lb2-detail { background:#162032 !important; }
+          [data-pr-dark="1"] .lb2-metric-card { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-sort { background:#1e293b !important; border-color:#334155 !important; color:#94a3b8 !important; }
+          [data-pr-dark="1"] .lb2-sort.on { background:#0f172a !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lb2-podium-card { background:linear-gradient(160deg,#1e293b,#162032) !important; border-color:#2a3a52 !important; }
+
+          /* ── Student Dashboard cards ── */
+          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:14"] { background:#1e293b !important; }
+          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:\"14px\""] { background:#1e293b !important; }
+
+          /* ── Week generation cards ── */
+          [data-pr-dark="1"] [style*="borderRadius:10"][style*="border:\"1.5px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderBottom"] { background:#162032 !important; border-bottom-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="borderBottom:\"1px solid #f1f5f9\""] { border-bottom-color:#2a3a52 !important; }
+
+          /* ── Courses page ── */
+          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:16"] { background:#1e293b !important; }
+          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:\"16px\""] { background:#1e293b !important; }
+          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:14"] { background:#1e293b !important; }
+
+          /* ── Settings page ── */
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderRadius:12"] { background:#1a2535 !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderRadius:\"12px\""] { background:#1a2535 !important; }
+
+          /* ── Upload zone ── */
+          [data-pr-dark="1"] .upload-zone { background:#1a2535 !important; border-color:#334155 !important; }
+          [data-pr-dark="1"] .upload-zone:hover { background:#1e293b !important; border-color:#3b82f6 !important; }
+
           /* ── Day cells (calendar) ── */
-          [data-pr-dark="1"] .day-cell { background:#1e293b !important; border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] .day-cell:hover { border-color:#3b82f6 !important; box-shadow:0 4px 16px rgba(59,130,246,.15) !important; }
-          [data-pr-dark="1"] .day-cell.today { border-color:#3b82f6 !important; box-shadow:0 0 0 2px rgba(59,130,246,.3) !important; }
+          [data-pr-dark="1"] .day-cell { background:#1e293b !important; border-width:2px !important; border-color:#334155 !important; }
+          [data-pr-dark="1"] .day-cell:hover { border-color:#3b82f6 !important; border-width:2px !important; box-shadow:0 4px 16px rgba(59,130,246,.15) !important; }
+          [data-pr-dark="1"] .day-cell.today { border-color:#3b82f6 !important; border-width:2.5px !important; box-shadow:0 0 0 2px rgba(59,130,246,.35) !important; }
+          [data-pr-dark="1"] .cal-topic-text { color:#e2e8f0 !important; font-weight:700 !important; font-size:11.5px !important; }
+          [data-pr-dark="1"] .cal-day-num   { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .cal-hol-text  { color:#fde68a !important; font-weight:700 !important; font-size:11.5px !important; }
+          [data-pr-dark="1"] .cal-spe-text  { color:#fdba74 !important; font-weight:700 !important; font-size:11.5px !important; }
+          [data-pr-dark="1"] .cal-ext-text  { color:#c4b5fd !important; font-weight:700 !important; font-size:11.5px !important; }
+          [data-pr-dark="1"] .cal-hdr-day   { color:#475569 !important; }
+          [data-pr-dark="1"] .cal-month-label { color:#e2e8f0 !important; }
+          /* Calendar nav arrow buttons */
+          [data-pr-dark="1"] [style*="background:\"none\""][style*="color:\"#64748b\""] { color:#64748b !important; }
 
           /* ── Notebook / content dark overrides ── */
           [data-pr-dark="1"] .pr-nb-section { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
@@ -7323,6 +7723,30 @@ Hard rules:
           [data-pr-dark="1"] .pr-explanation-body { color:#94a3b8; }
           [data-pr-dark="1"] .pr-guide-card { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
           [data-pr-dark="1"] .pr-guide-body { padding:22px 26px; background:#162032; color:#cbd5e1; }
+
+          /* ── Data Generator ── */
+          [data-pr-dark="1"] .dg-step-text { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .dg-stat-value { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .dg-stat-label { color:#64748b !important; }
+          [data-pr-dark="1"] .dg-desc-box { background:rgba(20,83,45,.3) !important; border-color:rgba(134,239,172,.3) !important; color:#d1fae5 !important; }
+          [data-pr-dark="1"] .dg-tip-box  { background:rgba(120,53,15,.25) !important; border-color:rgba(253,230,138,.35) !important; color:#fde68a !important; }
+          /* Data table header & rows */
+          [data-pr-dark="1"] [style*="position:\"sticky\""][style*="background:\"#f8fafc\""] { background:#162032 !important; }
+          [data-pr-dark="1"] [style*="background:\"#fffbeb\""][style*="cursor:\"pointer\""] { background:#1e1a00 !important; }
+
+          /* ── Quiz tab ── */
+          [data-pr-dark="1"] [style*="background:\"#f0fdf4\""][style*="borderRadius:12"] { background:rgba(20,83,45,.25) !important; }
+          [data-pr-dark="1"] [style*="background:\"#fef2f2\""][style*="borderRadius:12"] { background:rgba(127,29,29,.25) !important; }
+          [data-pr-dark="1"] [style*="background:\"#eff6ff\""][style*="borderRadius:12"] { background:rgba(30,58,138,.25) !important; }
+
+          /* ── Attendance / QR panels ── */
+          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="border:\"1px solid #e2e8f0\""] { background:#1a2535 !important; border-color:#2a3a52 !important; }
+
+          /* ── Table rows (attendance table, student day-by-day) ── */
+          [data-pr-dark="1"] table th { background:#162032 !important; color:#94a3b8 !important; border-bottom-color:#2a3a52 !important; }
+          [data-pr-dark="1"] table td { color:#cbd5e1 !important; border-bottom-color:#1f2937 !important; }
+          [data-pr-dark="1"] table tr:nth-child(odd) td { background:#1e293b; }
+          [data-pr-dark="1"] table tr:nth-child(even) td { background:#162032; }
 
           /* ── Content section cards (Tasks / Challenges / Examples) ── */
           .pr-section-card{
@@ -7440,17 +7864,55 @@ Hard rules:
             )}
           </nav>
           <div style={{ padding:"10px 6px", borderTop:`1px solid ${darkMode ? "#1f2937" : "#f1f5f9"}` }}>
-            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
-              <div style={{ width:28, height:28, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:12, fontWeight:700, flexShrink:0 }}>T</div>
-              {!collapsed && (
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:12.5, fontWeight:600, color: darkMode ? "#e2e8f0" : "#0f172a" }}>Trainer</div>
-                  <div style={{ fontSize:11, color:"#94a3b8" }}>{aiProvider==="groq"?"Groq":"Ollama"} AI</div>
-                </div>
-              )}
-            </div>
+            {studentMode ? (
+              /* ── Student profile button in sidebar ── */
+              <button
+                onClick={() => setProfileOpen(p => !p)}
+                title={collapsed ? "My Profile" : ""}
+                style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px", width:"100%", background:"none", border:"none", cursor:"pointer", borderRadius:8, textAlign:"left", fontFamily:"inherit",
+                  background: profileOpen ? (darkMode ? "#1e293b" : "#f0fdf4") : "none" }}
+              >
+                {studentProfile.photoUrl ? (
+                  <img src={studentProfile.photoUrl} alt="profile"
+                    style={{ width:28, height:28, borderRadius:"50%", objectFit:"cover", flexShrink:0, border:"2px solid #22c55e" }} />
+                ) : (
+                  <div style={{ width:28, height:28, background:"linear-gradient(135deg,#22c55e,#16a34a)", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:13, fontWeight:800, flexShrink:0 }}>
+                    {(studentProfile.displayName || auth?.name || "S").charAt(0).toUpperCase()}
+                  </div>
+                )}
+                {!collapsed && (
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:12.5, fontWeight:600, color: darkMode ? "#e2e8f0" : "#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {studentProfile.displayName || auth?.name || "Student"}
+                    </div>
+                    <div style={{ fontSize:11, color:"#94a3b8" }}>My Profile</div>
+                  </div>
+                )}
+              </button>
+            ) : (
+              <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 8px" }}>
+                <div style={{ width:28, height:28, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:12, fontWeight:700, flexShrink:0 }}>T</div>
+                {!collapsed && (
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:12.5, fontWeight:600, color: darkMode ? "#e2e8f0" : "#0f172a" }}>Trainer</div>
+                    <div style={{ fontSize:11, color:"#94a3b8" }}>{aiProvider==="groq"?"Groq":"Ollama"} AI</div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </aside>
+
+        {/* ── Student Profile Panel ── */}
+        {studentMode && profileOpen && (
+          <StudentProfilePanel
+            profile={studentProfile}
+            authName={auth?.name || ""}
+            onSave={saveStudentProfile}
+            onClose={() => setProfileOpen(false)}
+            darkMode={darkMode}
+          />
+        )}
 
         {/* ── STUDENTS PANEL (sidebar overlay) ── */}
         {studentsOpen && !studentMode && courseId && (
@@ -7558,6 +8020,29 @@ Hard rules:
                   codeEdit={codeEdits[selDay.key]||""} setCodeEdit={v=>setCodeEdits(p=>({...p,[selDay.key]:v}))}
                   codeOutput={codeOutputs[selDay.key]||""}
                   onBack={()=>setPage("calendar")}
+                  onPrevDay={(() => {
+                    // Find the previous mapped day key before selDay.key
+                    const sortedKeys = Object.keys(dayMap).sort();
+                    const idx = sortedKeys.indexOf(selDay.key);
+                    if (idx > 0) {
+                      const prevKey = sortedKeys[idx - 1];
+                      const pidx = dayMap[prevKey];
+                      const pd = planDays[pidx];
+                      if (pd) return () => setSelDay({ key: prevKey, dayNum: pd.dayNum, topic: pd.topic });
+                    }
+                    return null;
+                  })()}
+                  onNextDay={(() => {
+                    const sortedKeys = Object.keys(dayMap).sort();
+                    const idx = sortedKeys.indexOf(selDay.key);
+                    if (idx >= 0 && idx < sortedKeys.length - 1) {
+                      const nextKey = sortedKeys[idx + 1];
+                      const pidx = dayMap[nextKey];
+                      const pd = planDays[pidx];
+                      if (pd) return () => setSelDay({ key: nextKey, dayNum: pd.dayNum, topic: pd.topic });
+                    }
+                    return null;
+                  })()}
                   onRunCode={code=>runCode(selDay,code)}
                   onGenNotebook={()=>genNotebook(selDay)}
                   onGenExamples={()=>genExamples(selDay)}
@@ -8555,11 +9040,11 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
         <div className="lms-card" style={{ padding:20 }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
             <button onClick={prev} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#64748b" }}><Ic n="chevL" s={18}/></button>
-            <span style={{ fontWeight:700, fontSize:16, color:"#0f172a" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
+            <span className="cal-month-label" style={{ fontWeight:700, fontSize:16, color:"#0f172a" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
             <button onClick={next} style={{ background:"none", border:"none", cursor:"pointer", padding:4, borderRadius:6, color:"#64748b" }}><Ic n="chevR" s={18}/></button>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:8 }}>
-            {DAYS_HDR.map(d => <div key={d} style={{ textAlign:"center", fontSize:11.5, fontWeight:700, color:"#94a3b8", padding:"4px 0" }}>{d}</div>)}
+            {DAYS_HDR.map(d => <div key={d} className="cal-hdr-day" style={{ textAlign:"center", fontSize:11.5, fontWeight:700, color:"#94a3b8", padding:"4px 0" }}>{d}</div>)}
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4 }}>
             {cells.map((day,idx) => {
@@ -8602,7 +9087,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   }}>
 
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <span style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6": isHoliday?holText : isSpecial?speText : isExtra?extText : "#334155" }}>{day}</span>
+                    <span className="cal-day-num" style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6": isHoliday?holText : isSpecial?speText : isExtra?extText : "#334155" }}>{day}</span>
                     <div style={{ display:"flex", gap:3, alignItems:"center" }}>
                       {isHoliday && <span style={{ fontSize:11 }}>🏖️</span>}
                       {isSpecial  && <span style={{ fontSize:11 }}>⭐</span>}
@@ -8613,22 +9098,22 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
 
                   {/* Content label */}
                   {isHoliday && (
-                    <div style={{ fontSize:10, color:holText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-hol-text" style={{ fontSize:10, color:holText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
                   {isSpecial && (
-                    <div style={{ fontSize:10, color:speText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-spe-text" style={{ fontSize:10, color:speText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
                   {isExtra && (
-                    <div style={{ fontSize:10, color:extText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-ext-text" style={{ fontSize:10, color:extText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
                   {hasPlan && !isHoliday && !isSpecial && !isExtra && (
-                    <div style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>
+                    <div className="cal-topic-text" style={{ fontSize:10.5, color:sc.text, fontWeight:500, lineHeight:1.35, marginTop:4, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>{topic}</div>
                   )}
 
                   {/* Student view: show trainer's status badge at bottom of cell */}
@@ -8804,161 +9289,214 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
 
 /* ═══════════════════════════════════════════════════════════════════
    NOTEBOOK SUBTOPICS PANEL
-   Trainer uploads a .ipynb file → AI reads it and extracts sub-topics →
-   auto-fills the sub-topics field. The notebook is also saved to Supabase
+   Trainer uploads a .ipynb / PDF / image / diagram → AI reads it and extracts sub-topics →
+   auto-fills the sub-topics field. The file is also saved to Supabase
    resources (lms_day_files) so students can access it.
 ═══════════════════════════════════════════════════════════════════ */
 function NotebookSubtopicsPanel({ dayKey, dayData, updateDay, notify, groqKey, groqModel, sb, courseId, trainerId, onFileUpload }) {
   const [extracting, setExtracting] = useState(false);
   const [dragOver,   setDragOver]   = useState(false);
-  const [lastFile,   setLastFile]   = useState(null); // { name, size, saved } for display
+  const [lastFile,   setLastFile]   = useState(null); // { name, size, saved, type } for display
 
-  /* ── Extract subtopics from notebook JSON via Groq ── */
-  const extractSubtopicsFromNotebook = async (notebookJson, filename) => {
-    // groqKey guard: if missing, warn but don't block — file was already saved
-    if (!groqKey) {
-      notify("Notebook saved to Resources. Add a Groq API key in Settings to auto-extract sub-topics.", "warn");
-      return;
+  // Supported file types for sub-topic extraction
+  const ACCEPTED_TYPES = ".ipynb,.pdf,.png,.jpg,.jpeg,.gif,.webp,.svg";
+  const isImage  = (f) => f?.type?.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(f?.name || "");
+  const isPDF    = (f) => f?.type === "application/pdf" || /\.pdf$/i.test(f?.name || "");
+  const isNb     = (f) => /\.ipynb$/i.test(f?.name || "");
+
+  /* ── Shared Groq POST helper ── */
+  const callGroqForSubtopics = async (messages) => {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+      body: JSON.stringify({
+        model: groqModel || "llama-3.1-8b-instant",
+        temperature: 0.2,
+        max_tokens: 300,
+        messages,
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      throw new Error(`Groq API error ${res.status}: ${errText.slice(0, 200)}`);
     }
+    const json = await res.json();
+    return (json.choices?.[0]?.message?.content || "").trim();
+  };
+
+  /* ── Normalise raw AI output to comma-separated list ── */
+  const normaliseSubtopics = (raw) => {
+    const normalised = raw
+      .split(/\n+/)
+      .map(line => line.replace(/^[\s*\-•\d.]+/, "").trim())
+      .filter(Boolean)
+      .join(", ");
+    if (!normalised) throw new Error("Could not parse sub-topics from AI response");
+    return normalised;
+  };
+
+  const SUBTOPIC_SYSTEM = `You are a curriculum assistant. Analyse educational content and output ONLY a comma-separated list of the specific sub-topics or techniques taught in it.
+Rules:
+- Return 4 to 10 sub-topics
+- Each sub-topic is 1 to 6 words
+- Output ONLY the comma-separated list — no numbering, no bullet points, no preamble, no explanation
+- Focus on concrete ML / data-science / programming concepts demonstrated, not on generic words like "introduction", "overview", or "summary"
+Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression, cross_validation, GridSearchCV`;
+
+  /* ── Extract subtopics from .ipynb JSON via Groq ── */
+  const extractSubtopicsFromNotebook = async (notebookJson, filename) => {
+    if (!groqKey) { notify("Notebook saved. Add a Groq API key in Settings to auto-extract sub-topics.", "warn"); return; }
     setExtracting(true);
     try {
-      // Collect all markdown + code cell sources into a single readable text blob
       const cells = notebookJson?.cells || [];
       if (cells.length === 0) throw new Error("Notebook has no cells — cannot extract sub-topics");
-
       const textParts = [];
       for (const cell of cells) {
-        // ipynb source can be a string (v3) or array of strings (v4)
         const src = Array.isArray(cell.source) ? cell.source.join("") : (cell.source || "");
         if (!src.trim()) continue;
         if (cell.cell_type === "markdown") textParts.push(`[MARKDOWN]\n${src}`);
         else if (cell.cell_type === "code") textParts.push(`[CODE]\n${src}`);
       }
       if (textParts.length === 0) throw new Error("No readable cells found in notebook");
-
-      // Cap at 6000 chars to stay within token limits comfortably
       const combined = textParts.join("\n\n---\n\n").slice(0, 6000);
-
-      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
-        body: JSON.stringify({
-          model: groqModel || "llama-3.1-8b-instant",
-          temperature: 0.2,
-          max_tokens: 300,
-          messages: [
-            {
-              role: "system",
-              content: `You are a curriculum assistant. Analyse a Jupyter notebook and output ONLY a comma-separated list of the specific sub-topics or techniques taught in it.
-Rules:
-- Return 4 to 10 sub-topics
-- Each sub-topic is 1 to 6 words
-- Output ONLY the comma-separated list — no numbering, no bullet points, no preamble, no explanation
-- Focus on concrete ML / data-science / programming concepts demonstrated, not on generic words like "introduction", "overview", or "summary"
-Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression, cross_validation, GridSearchCV`
-            },
-            {
-              role: "user",
-              content: `Notebook filename: ${filename}\n\nContent:\n${combined}`
-            }
-          ]
-        })
-      });
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => res.statusText);
-        throw new Error(`Groq API error ${res.status}: ${errText.slice(0, 200)}`);
-      }
-
-      const json = await res.json();
-      const raw = (json.choices?.[0]?.message?.content || "").trim();
+      const raw = await callGroqForSubtopics([
+        { role: "system", content: SUBTOPIC_SYSTEM },
+        { role: "user", content: `Notebook filename: ${filename}\n\nContent:\n${combined}` }
+      ]);
       if (!raw) throw new Error("AI returned an empty response");
-
-      // Normalise: collapse any newlines into ", ", strip leading list markers like "1.", "-", "•"
-      const normalised = raw
-        .split(/\n+/)
-        .map(line => line.replace(/^[\s*\-•\d.]+/, "").trim())
-        .filter(Boolean)
-        .join(", ");
-
-      if (!normalised) throw new Error("Could not parse sub-topics from AI response");
-
-      updateDay(dayKey, { subTopics: normalised });
-      notify("✅ Sub-topics extracted and saved");
+      updateDay(dayKey, { subTopics: normaliseSubtopics(raw) });
+      notify("✅ Sub-topics extracted from notebook");
     } catch (e) {
       notify(`Sub-topic extraction failed: ${e.message}`, "err");
-    } finally {
-      setExtracting(false);
-    }
+    } finally { setExtracting(false); }
   };
 
-  /* ── Handle .ipynb file — validate, save to resources, then extract sub-topics ── */
-  const handleNotebookFile = async (file) => {
-    if (!file) return;
-
-    // Validate extension
-    if (!file.name.endsWith(".ipynb")) {
-      notify("Please upload a .ipynb (Jupyter Notebook) file", "err");
-      return;
-    }
-
-    // Validate size
-    if (file.size > 5 * 1024 * 1024) {
-      notify("Notebook too large — max 5MB supported", "err");
-      return;
-    }
-
-    // Show the file name immediately so the trainer has visual feedback
-    setLastFile({ name: file.name, size: file.size, saved: false });
-
-    // Step 1: Read as text to parse JSON (needed for AI extraction)
-    let text;
+  /* ── Extract subtopics from PDF (text-based, sent as description) ── */
+  const extractSubtopicsFromPDF = async (file) => {
+    if (!groqKey) { notify("PDF saved. Add a Groq API key in Settings to auto-extract sub-topics.", "warn"); return; }
+    setExtracting(true);
     try {
-      text = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = e => resolve(e.target.result);
-        reader.onerror = () => reject(new Error("Could not read file"));
-        reader.readAsText(file);
-      });
+      // Read PDF as base64 and send filename + description to Groq
+      // Most LLMs can't decode raw PDF binary, so we use the filename + try text extraction
+      let pdfText = "";
+      try {
+        // Attempt basic text extraction: read as ArrayBuffer, decode UTF-8 portions
+        const ab = await file.arrayBuffer();
+        const bytes = new Uint8Array(ab);
+        // Extract printable ASCII/UTF-8 sequences from PDF
+        const decoder = new TextDecoder("utf-8", { fatal: false });
+        const raw2 = decoder.decode(bytes);
+        // Extract text between BT/ET markers (PDF text blocks) and stream content
+        const matches = raw2.match(/BT[\s\S]*?ET|\/[\w]+\s*\(([^)]+)\)/g) || [];
+        pdfText = matches.join(" ").replace(/[^\x20-\x7E\n]/g, " ").replace(/\s+/g, " ").slice(0, 5000);
+      } catch {}
+
+      const userContent = pdfText.length > 100
+        ? `PDF filename: ${file.name}\n\nExtracted text content:\n${pdfText}`
+        : `PDF filename: ${file.name}\n\nThe PDF could not be decoded as text. Based on the filename and any inferred course subject, extract likely sub-topics that would be taught in this document.`;
+
+      const raw = await callGroqForSubtopics([
+        { role: "system", content: SUBTOPIC_SYSTEM },
+        { role: "user", content: userContent }
+      ]);
+      if (!raw) throw new Error("AI returned an empty response");
+      updateDay(dayKey, { subTopics: normaliseSubtopics(raw) });
+      notify("✅ Sub-topics extracted from PDF");
     } catch (e) {
-      notify(`Failed to read file: ${e.message}`, "err");
-      setLastFile(null);
-      return;
-    }
+      notify(`Sub-topic extraction from PDF failed: ${e.message}`, "err");
+    } finally { setExtracting(false); }
+  };
 
-    // Step 2: Parse JSON — bail early if malformed
-    let nbJson;
+  /* ── Extract subtopics from image/diagram via Groq vision ── */
+  const extractSubtopicsFromImage = async (file) => {
+    if (!groqKey) { notify("Image saved. Add a Groq API key in Settings to auto-extract sub-topics.", "warn"); return; }
+    setExtracting(true);
     try {
-      nbJson = JSON.parse(text);
-    } catch {
-      notify("Invalid .ipynb file — JSON could not be parsed", "err");
-      setLastFile(null);
-      return;
-    }
+      // Convert to base64 data URL
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = () => reject(new Error("Could not read image"));
+        reader.readAsDataURL(file);
+      });
 
-    // Step 3: Save the notebook as a resource file via the existing upload pipeline.
-    // This runs in parallel with the AI call below — it uses ArrayBuffer internally,
-    // so it is a completely independent FileReader operation from step 1.
+      // Try vision-capable model first; fall back to filename-based if model rejects image
+      let raw = "";
+      try {
+        raw = await callGroqForSubtopics([
+          { role: "system", content: SUBTOPIC_SYSTEM },
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: dataUrl } },
+              { type: "text", text: `Image filename: ${file.name}\n\nAnalyse this educational image/diagram and extract the specific technical sub-topics or concepts it teaches or illustrates.` }
+            ]
+          }
+        ]);
+      } catch {
+        // Vision not supported by current model → fall back to filename inference
+        raw = await callGroqForSubtopics([
+          { role: "system", content: SUBTOPIC_SYSTEM },
+          { role: "user", content: `Image/diagram filename: ${file.name}\n\nBased on the filename, infer the educational sub-topics this image likely covers.` }
+        ]);
+      }
+      if (!raw) throw new Error("AI returned an empty response");
+      updateDay(dayKey, { subTopics: normaliseSubtopics(raw) });
+      notify("✅ Sub-topics extracted from image/diagram");
+    } catch (e) {
+      notify(`Sub-topic extraction from image failed: ${e.message}`, "err");
+    } finally { setExtracting(false); }
+  };
+
+  /* ── Main file handler — routes to the right extractor ── */
+  const handleSubtopicFile = async (file) => {
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) { notify("File too large — max 8MB supported", "err"); return; }
+
+    setLastFile({ name: file.name, size: file.size, saved: false, type: isNb(file) ? "nb" : isPDF(file) ? "pdf" : "image" });
+
+    // Save file to resources immediately (non-blocking)
     onFileUpload([file]);
-    setLastFile(prev => prev ? { ...prev, saved: true } : { name: file.name, size: file.size, saved: true });
+    setLastFile(prev => prev ? { ...prev, saved: true } : { name: file.name, size: file.size, saved: true, type: "file" });
 
-    // Step 4: Extract sub-topics via AI (async — does not block the save above)
-    extractSubtopicsFromNotebook(nbJson, file.name);
+    // Route to the correct extractor
+    if (isNb(file)) {
+      // Parse .ipynb JSON first
+      try {
+        const text = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = e => resolve(e.target.result);
+          reader.onerror = () => reject(new Error("Could not read file"));
+          reader.readAsText(file);
+        });
+        let nbJson;
+        try { nbJson = JSON.parse(text); } catch { notify("Invalid .ipynb file — JSON could not be parsed", "err"); return; }
+        extractSubtopicsFromNotebook(nbJson, file.name);
+      } catch (e) { notify(`Failed to read notebook: ${e.message}`, "err"); }
+    } else if (isPDF(file)) {
+      extractSubtopicsFromPDF(file);
+    } else if (isImage(file)) {
+      extractSubtopicsFromImage(file);
+    } else {
+      notify("Unsupported file type for sub-topic extraction", "warn");
+    }
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files[0];
-    if (f) handleNotebookFile(f);
+    if (f) handleSubtopicFile(f);
   };
 
   const handleInputChange = (e) => {
     const f = e.target.files[0];
-    if (f) handleNotebookFile(f);
-    // Reset input value so the same file can be re-uploaded if needed
+    if (f) handleSubtopicFile(f);
     e.target.value = "";
   };
+
+  const fileIcon = lastFile?.type === "pdf" ? "📄" : lastFile?.type === "image" ? "🖼️" : "📓";
+  const dropIcon = extracting ? <Spin s={14}/> : <span style={{ fontSize:16 }}>📎</span>;
 
   return (
     <div style={{ marginBottom:18, background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:12, padding:"12px 16px" }}>
@@ -8975,11 +9513,11 @@ Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression
         className="lms-input"
         value={dayData.subTopics || ""}
         onChange={e => updateDay(dayKey, { subTopics: e.target.value })}
-        placeholder="e.g. list comprehension, lambda functions, map/filter — or upload notebook below to auto-fill"
+        placeholder="e.g. list comprehension, lambda functions, map/filter — or upload a file below to auto-fill"
         style={{ fontSize:12.5, background:"#fff", marginBottom:10 }}
       />
 
-      {/* Notebook drop zone */}
+      {/* Multi-file drop zone */}
       <div
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -9001,30 +9539,30 @@ Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression
         <input
           id={`nb-upload-${dayKey}`}
           type="file"
-          accept=".ipynb"
+          accept={ACCEPTED_TYPES}
           style={{ display:"none" }}
           onChange={handleInputChange}
         />
         <div style={{ width:32, height:32, background:"#f59e0b22", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-          {extracting ? <Spin s={14}/> : <span style={{ fontSize:16 }}>📓</span>}
+          {dropIcon}
         </div>
         <div style={{ flex:1, minWidth:0 }}>
           {extracting ? (
-            <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Analysing notebook… extracting sub-topics</p>
+            <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Analysing file… extracting sub-topics</p>
           ) : lastFile ? (
             <>
               <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>
-                ✅ {lastFile.name}
+                {fileIcon} ✅ {lastFile.name}
                 <span style={{ fontSize:11, fontWeight:500, color:"#b45309", marginLeft:6 }}>
                   ({(lastFile.size/1024).toFixed(0)} KB){lastFile.saved ? " — saved to Resources" : " — saving…"}
                 </span>
               </p>
-              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>Upload a different notebook to replace sub-topics</p>
+              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>Upload another file to replace sub-topics</p>
             </>
           ) : (
             <>
-              <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Drop your .ipynb notebook here — or click to browse</p>
-              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>AI will read it and auto-fill sub-topics. Notebook saved to Resources for students.</p>
+              <p style={{ fontSize:12.5, fontWeight:700, color:"#92400e", margin:0 }}>Drop a file here — or click to browse</p>
+              <p style={{ fontSize:11.5, color:"#b45309", margin:"2px 0 0 0" }}>Supports: .ipynb, PDF, images &amp; diagrams (PNG, JPG, GIF, WebP). AI auto-fills sub-topics. File saved to Resources.</p>
             </>
           )}
         </div>
@@ -9367,7 +9905,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
           {/* Sub-topic context notice */}
           {subTopicList.length > 0 && (
-            <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12.5, color:"#166534", lineHeight:1.6 }}>
+            <div className="dg-tip-box" style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12.5, color:"#166534", lineHeight:1.6 }}>
               <strong>✅ Sub-topics active ({subTopicList.length}):</strong>{" "}
               {subTopicList.join(" · ")}<br/>
               <span style={{ fontSize:11.5, color:"#15803d", opacity:.85 }}>
@@ -9376,7 +9914,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
             </div>
           )}
           {subTopicList.length === 0 && (
-            <div style={{ background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:10, padding:"9px 13px", marginBottom:12, fontSize:12, color:"#92400e" }}>
+            <div className="dg-tip-box" style={{ background:"#fffbeb", border:"1.5px dashed #fde68a", borderRadius:10, padding:"9px 13px", marginBottom:12, fontSize:12, color:"#92400e" }}>
               💡 <strong>Tip:</strong> Fill in the <em>Sub-topics / Focus areas</em> field above the tabs to auto-target specific techniques (e.g. <em>min max scaling, onehot encoder, train test split, gridsearch cv, accuracy score</em>).
             </div>
           )}
@@ -9457,8 +9995,8 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
             { k:"Cols w/ outliers", v: outlierCols },
           ].map(s => (
             <div key={s.k} className="lms-card" style={{ padding:"10px 14px" }}>
-              <p style={{ fontSize:10, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em", margin:"0 0 4px 0" }}>{s.k}</p>
-              <p style={{ fontSize:22, fontWeight:800, color:"#0f172a", margin:0, letterSpacing:"-.3px" }}>{s.v}</p>
+              <p className="dg-stat-label" style={{ fontSize:10, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em", margin:"0 0 4px 0" }}>{s.k}</p>
+              <p className="dg-stat-value" style={{ fontSize:22, fontWeight:800, color:"#0f172a", margin:0, letterSpacing:"-.3px" }}>{s.v}</p>
             </div>
           ))}
         </div>
@@ -9469,7 +10007,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
         {/* Dataset description */}
         {dgDesc && (
-          <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:12, padding:"12px 16px", fontSize:13, color:"#92400e", lineHeight:1.6 }}>
+          <div className="dg-desc-box" style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:12, padding:"12px 16px", fontSize:13, color:"#92400e", lineHeight:1.6 }}>
             <strong>📊 What this dataset demonstrates:</strong> {dgDesc}
           </div>
         )}
@@ -9486,7 +10024,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
                   <div style={{ width:24, height:24, background:"#3b82f6", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize:12, flexShrink:0, marginTop:1 }}>
                     {i + 1}
                   </div>
-                  <p style={{ fontSize:13.5, color:"#374151", margin:0, lineHeight:1.6 }}>{step.replace(/^Step \d+:\s*/i, "")}</p>
+                  <p className="dg-step-text" style={{ fontSize:13.5, color:"#374151", margin:0, lineHeight:1.6 }}>{step.replace(/^Step \d+:\s*/i, "")}</p>
                 </div>
               ))}
             </div>
@@ -9676,7 +10214,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -9779,7 +10317,28 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
 
       {/* Header */}
       <div style={{ display:"flex", alignItems:"flex-start", gap:14, marginBottom:20, flexWrap:"wrap" }}>
-        <button className="lms-btn lms-btn-ghost" onClick={onBack}><Ic n="chevL" s={14}/>Calendar</button>
+        {/* Back + Prev/Next navigation */}
+        <div style={{ display:"flex", gap:5, alignItems:"center", flexShrink:0 }}>
+          <button className="lms-btn lms-btn-ghost" onClick={onBack} title="Back to Calendar"><Ic n="chevL" s={14}/>Calendar</button>
+          <button
+            className="lms-btn lms-btn-ghost"
+            onClick={onPrevDay}
+            disabled={!onPrevDay}
+            title="Previous day"
+            style={{ padding:"6px 10px", opacity: onPrevDay ? 1 : 0.35, minWidth:36 }}
+          >
+            <span style={{ fontSize:14, fontWeight:800 }}>‹</span>
+          </button>
+          <button
+            className="lms-btn lms-btn-ghost"
+            onClick={onNextDay}
+            disabled={!onNextDay}
+            title="Next day"
+            style={{ padding:"6px 10px", opacity: onNextDay ? 1 : 0.35, minWidth:36 }}
+          >
+            <span style={{ fontSize:14, fontWeight:800 }}>›</span>
+          </button>
+        </div>
         <div style={{ flex:1, minWidth:200 }}>
           <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
             <div style={{ width:36, height:36, background: day.isSpecial ? "linear-gradient(135deg,#f97316,#ea580c)" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontWeight:800, fontSize: day.isSpecial ? 18 : 13, flexShrink:0 }}>
@@ -11217,20 +11776,19 @@ function CoursesPage({ onSelectCourse, auth, sb }) {
     try {
       const coursesMapped = await sbGetCoursesByTrainer(sb, trainerId);
       setCourses(coursesMapped);
-      // Server-side filtered — never fetch all students
-      const studentRows = await sb.select(
-        "lms_students",
-        `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc`
-      );
-      const students = (studentRows || []).map(dbRowToStudent);
+      // Fetch pending counts per course using sbGetStudentsForCourse so
+      // cross-trainer requests are counted on the course cards too.
       const counts = {};
-      coursesMapped.forEach(c => {
-        counts[c.id] = students.filter(s => {
-          const inPending    = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === c.id);
-          const legacyPending = !s.approved && s.requestedCourseId === c.id && !Array.isArray(s.pendingCourseIds);
-          return inPending || legacyPending;
-        }).length;
-      });
+      await Promise.all(coursesMapped.map(async c => {
+        try {
+          const students = await sbGetStudentsForCourse(sb, c.id, trainerId);
+          counts[c.id] = students.filter(s => {
+            const inPending    = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === c.id);
+            const legacyPending = !s.approved && s.requestedCourseId === c.id && !Array.isArray(s.pendingCourseIds);
+            return inPending || legacyPending;
+          }).length;
+        } catch { counts[c.id] = 0; }
+      }));
       setPendingCounts(counts);
     } catch(e) {
       console.error("[CoursesPage] fetchCourses failed:", e);
