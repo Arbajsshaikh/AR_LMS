@@ -1680,12 +1680,35 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   FIX 7: RETRY LOGIC
-   - Only retries on transient errors (network, 429 rate limit, 5xx server errors)
-   - Respects Groq's retry-after header on 429
-   - Does NOT retry on permanent errors (401 bad key, 400 bad request, 404)
+   RATE-LIMIT RESILIENT RETRY ENGINE
+   ─ On 429: pause 5 s and retry on the same model
+   ─ On 2 consecutive 429s: auto-rotate to the next GROQ_MODELS entry
+   ─ Exhausts all models before giving up (never shows a pop-up mid-batch)
+   ─ Respects Retry-After header when present
+   ─ Does NOT retry permanent errors (401, 400, 404)
 ═══════════════════════════════════════════════════════════════════ */
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+// Shared mutable state so every concurrent call shares the same model index
+// (avoids all parallel calls hammering a rate-limited model simultaneously)
+const _rlState = {
+  currentModelIdx: 0,   // index into GROQ_MODELS
+  consecutiveRLs: 0,    // consecutive 429s on the SAME model
+  onModelSwitch: null,  // optional callback(newModel) for UI notification
+};
+
+function rlGetCurrentModel() {
+  return GROQ_MODELS[_rlState.currentModelIdx % GROQ_MODELS.length];
+}
+
+function rlRotateModel(notifyFn) {
+  const prev = rlGetCurrentModel();
+  _rlState.currentModelIdx = (_rlState.currentModelIdx + 1) % GROQ_MODELS.length;
+  _rlState.consecutiveRLs = 0;
+  const next = rlGetCurrentModel();
+  if (notifyFn) notifyFn(`⚠️ Rate limit — switched model: ${prev} → ${next}`, "warn");
+  return next;
+}
 
 async function withRetry(fn, maxAttempts = 3, baseDelayMs = 1500) {
   let lastErr;
@@ -1694,16 +1717,45 @@ async function withRetry(fn, maxAttempts = 3, baseDelayMs = 1500) {
       return await fn();
     } catch (e) {
       lastErr = e;
-      // Don't retry permanent failures
       if (e._httpStatus && !RETRYABLE_STATUSES.has(e._httpStatus)) throw e;
       if (i < maxAttempts - 1) {
-        // Respect retry-after if present (set by callGroq on 429)
         const waitMs = e._retryAfterMs ?? baseDelayMs * Math.pow(2, i);
         await new Promise(r => setTimeout(r, waitMs));
       }
     }
   }
   throw lastErr;
+}
+
+// ── Rate-limit-aware sequential runner ───────────────────────────
+// Used by genAllForDay and genWeek to guarantee completion.
+// pauseMs: how long to wait after a 429 before retrying
+// maxModelRotations: how many model switches before giving up entirely
+async function withRLResilience(fn, { pauseMs = 5000, maxModelRotations = GROQ_MODELS.length * 2, notifyFn = null } = {}) {
+  let rotations = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fn();
+    } catch (e) {
+      const isRL = e._httpStatus === 429 || (e.message || "").toLowerCase().includes("rate limit");
+      if (!isRL) throw e; // non-rate-limit errors bubble up immediately
+
+      _rlState.consecutiveRLs += 1;
+
+      if (_rlState.consecutiveRLs >= 2) {
+        // Two 429s in a row → rotate model
+        if (rotations >= maxModelRotations) throw new Error("All models rate-limited — please wait a minute and try again.");
+        rlRotateModel(notifyFn);
+        rotations++;
+      } else {
+        // First 429 → just pause 5 s
+        const waitMs = e._retryAfterMs ?? pauseMs;
+        if (notifyFn) notifyFn(`⏳ Rate limit hit — pausing ${Math.round(waitMs / 1000)}s then continuing…`, "warn");
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1829,7 +1881,71 @@ async function loadPyodide() {
   return pyodideLoadingPromise;
 }
 
-async function runPythonReal(code) {
+// Packages that are pre-bundled in Pyodide (no micropip needed, just loadPackage)
+const PYODIDE_BUILTIN_PKGS = new Set([
+  "numpy","pandas","scipy","matplotlib","scikit-learn","sklearn",
+  "statsmodels","pillow","PIL","requests","beautifulsoup4","bs4",
+  "lxml","openpyxl","xlrd","sympy","networkx","joblib","pytz",
+  "dateutil","six","packaging","pyparsing","cycler","kiwisolver",
+  "fonttools","contourpy","threadpoolctl","attrs","certifi",
+]);
+
+// Maps import name → pyodide package name when they differ
+const PYODIDE_PKG_MAP = {
+  "sklearn": "scikit-learn",
+  "PIL":     "pillow",
+  "bs4":     "beautifulsoup4",
+  "cv2":     "opencv-python",
+  "dateutil":"python-dateutil",
+};
+
+// Extract top-level import names from Python code
+function extractImports(code) {
+  const names = new Set();
+  const re = /^(?:import|from)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm;
+  let m;
+  while ((m = re.exec(code)) !== null) names.add(m[1]);
+  return [...names];
+}
+
+// Install all imported packages that aren't already loaded
+// Returns a log string of what was installed
+async function ensurePackages(py, code, onStatus) {
+  const imports = extractImports(code);
+  if (!imports.length) return "";
+
+  // Bootstrap micropip (needed for packages not in Pyodide's bundle)
+  await py.loadPackage("micropip");
+  const micropip = py.pyimport("micropip");
+
+  const log = [];
+  for (const name of imports) {
+    // Skip stdlib modules — they're always available
+    const stdlibCheck = await py.runPythonAsync(
+      `import importlib.util; importlib.util.find_spec("${name}") is not None`
+    ).catch(() => false);
+    if (stdlibCheck) continue;
+
+    const pkgName = PYODIDE_PKG_MAP[name] || name;
+    if (onStatus) onStatus(`Installing ${pkgName}…`);
+    try {
+      if (PYODIDE_BUILTIN_PKGS.has(name) || PYODIDE_BUILTIN_PKGS.has(pkgName)) {
+        await py.loadPackage(pkgName);
+      } else {
+        await micropip.install(pkgName);
+      }
+      log.push(`✓ ${pkgName}`);
+    } catch (_) {
+      log.push(`⚠ ${pkgName} not available (skipped)`);
+    }
+  }
+  return log.length ? `📦 Packages: ${log.join(", ")}\n` : "";
+}
+
+// Cache of already-installed packages so we don't re-install on every run
+const _installedPkgs = new Set();
+
+async function runPythonReal(code, onStatus) {
   const py = await loadPyodide();
   let stdout = "";
   let stderr = "";
@@ -1837,11 +1953,48 @@ async function runPythonReal(code) {
   py.setStdout({ batched: (text) => { stdout += text + "\n"; } });
   py.setStderr({ batched: (text) => { stderr += text + "\n"; } });
 
+  // Auto-install any imported packages not yet loaded in this session
+  const imports = extractImports(code);
+  const missing = imports.filter(n => !_installedPkgs.has(n));
+  let pkgLog = "";
+  if (missing.length) {
+    // Bootstrap micropip once
+    try { await py.loadPackage("micropip"); } catch(_) {}
+    const micropip = await py.pyimport("micropip");
+
+    for (const name of missing) {
+      // Check if already available in the Python environment
+      let alreadyOk = false;
+      try {
+        alreadyOk = await py.runPythonAsync(
+          `(lambda: (importlib := __import__('importlib'), importlib.util.find_spec('${name}') is not None))[1]`
+        );
+      } catch(_) {}
+      if (alreadyOk) { _installedPkgs.add(name); continue; }
+
+      const pkgName = PYODIDE_PKG_MAP[name] || name;
+      if (onStatus) onStatus(`📦 Installing ${pkgName}…`);
+      try {
+        if (PYODIDE_BUILTIN_PKGS.has(name) || PYODIDE_BUILTIN_PKGS.has(pkgName)) {
+          await py.loadPackage(pkgName);
+        } else {
+          await micropip.install(pkgName);
+        }
+        _installedPkgs.add(name);
+        pkgLog += `✓ installed ${pkgName}\n`;
+      } catch (installErr) {
+        pkgLog += `⚠ ${pkgName} not available — ${installErr.message}\n`;
+      }
+    }
+  }
+
+  if (onStatus) onStatus(null); // clear status
   try {
     await py.runPythonAsync(code);
-    return (stdout || "(no output)") + (stderr ? `\nSTDERR:\n${stderr}` : "");
+    const out = (pkgLog ? pkgLog + "\n" : "") + (stdout || "(no output)") + (stderr ? `\nSTDERR:\n${stderr}` : "");
+    return out;
   } catch (e) {
-    return `Error: ${e.message}`;
+    return (pkgLog ? pkgLog + "\n" : "") + `Error: ${e.message}`;
   }
 }
 
@@ -4727,6 +4880,17 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [aiProvider, setAiProvider] = useState("groq");
   const [groqKey,    setGroqKey]    = useState("");
   const [groqModel,  setGroqModel]  = useState(GROQ_MODELS[0]);
+  // Keep _rlState seeded to the trainer's chosen model so the resilience
+  // engine starts from the right model (not always index 0).
+  // If the trainer changes model mid-session, sync it immediately.
+  // We do this in a layout-effect so it runs before the next render.
+  useEffect(() => {
+    const idx = GROQ_MODELS.indexOf(groqModel);
+    if (idx !== -1) {
+      _rlState.currentModelIdx = idx;
+      _rlState.consecutiveRLs = 0;
+    }
+  }, [groqModel]);
   const [ollamaUrl,  setOllamaUrl]  = useState("http://localhost:11434");
   const [ollamaModel,setOllamaModel]= useState(OLLAMA_MODELS[0]);
 
@@ -4779,6 +4943,8 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const [busy,   setBusy]   = useState({});
   const [toasts, setToasts] = useState([]);
+  // Rate-limit banner: shows current active model & pause status during batch generation
+  const [rlBanner, setRlBanner] = useState(null); // { msg, modelName } | null
   const [darkMode, setDarkMode] = useState(false);
 
   // FIX #12: Scope AI prefs to the auth session (user-level), not per-course
@@ -5177,6 +5343,14 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     const id = Date.now();
     setToasts(p => [...p, { id, msg, type }]);
     setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 4000);
+    // Show a persistent banner for rate-limit events so they're visible during long batches
+    if (type === "warn" && (msg.includes("Rate limit") || msg.includes("rate limit") || msg.includes("pausing") || msg.includes("switched model"))) {
+      const modelName = rlGetCurrentModel();
+      setRlBanner({ msg, modelName });
+      // Auto-clear banner 8s after the last rate-limit event
+      clearTimeout(window.__rlBannerTimer);
+      window.__rlBannerTimer = setTimeout(() => setRlBanner(null), 8000);
+    }
   }, []);
 
   const setBusyKey = useCallback((k, v) => setBusy(p => {
@@ -5221,14 +5395,32 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   }, [studentMode, sb, courseId, trainerId, studentId]);
 
   /* ════ AI caller ════ */
+  // On first mount, sync _rlState model index to the trainer's chosen model
   const callAI = useCallback(async (messages) => {
     if (aiProvider === "groq") {
       if (!isOnline) throw new Error("You're offline — connect to the internet to use Groq");
       if (!groqKey) throw new Error("Enter Groq API key in Settings");
-      return withRetry(() => callGroq(groqKey, groqModel, messages));
+      // Use the resilience engine's current model (may have been auto-rotated after rate-limit)
+      const modelToUse = rlGetCurrentModel();
+      return withRetry(() => callGroq(groqKey, modelToUse, messages));
     }
     return withRetry(() => callOllama(ollamaUrl, ollamaModel, messages));
   }, [aiProvider, groqKey, groqModel, ollamaUrl, ollamaModel, isOnline]);
+
+  // ── Resilient AI caller for batch operations (genAll / genWeek) ──────────────────
+  // 429 → pauses 5s and retries; 2 consecutive 429s → auto-rotates to next model
+  // Never pops up an error toast during a batch — keeps going until done or truly fatal
+  const callAIResilient = useCallback(async (messages) => {
+    if (aiProvider === "groq") {
+      if (!isOnline) throw new Error("You're offline");
+      if (!groqKey) throw new Error("Enter Groq API key in Settings");
+      return withRLResilience(
+        () => callGroq(groqKey, rlGetCurrentModel(), messages),
+        { notifyFn: notify }
+      );
+    }
+    return withRetry(() => callOllama(ollamaUrl, ollamaModel, messages));
+  }, [aiProvider, groqKey, ollamaUrl, ollamaModel, isOnline, notify]);
 
   const genNotebook = async (day, opts={}) => {
     const k = day.key;
@@ -5732,22 +5924,40 @@ Hard rules:
   };
 
   const genAllForDay = async (day) => {
-    // FIX: run all 6 generators in parallel with Promise.allSettled — ~4x faster than sequential
-    notify(`Generating all content for Day ${day.dayNum} in parallel…`);
-    const results = await Promise.allSettled([
-      genNotebook(day, { silent: true }),
-      genExamples(day, { silent: true }),
-      genResources(day, { silent: true }),
-      genAssignment(day, { silent: true }),
-      genQuiz(day, { silent: true }),
-      genTeachingGuide(day, { silent: true }),
-    ]);
-    const labels = ["Notebook", "Examples", "Resources", "Assignment", "Quiz", "Teaching Guide"];
-    const failed = results
-      .map((r, i) => r.status === "rejected" ? `${labels[i]}: ${r.reason?.message || "failed"}` : null)
-      .filter(Boolean);
-    if (failed.length) notify(`Day ${day.dayNum}: ${failed.length} step(s) failed — ${failed[0]}`, "err");
-    else notify(`Day ${day.dayNum}: all content generated ✓`);
+    // Sequential (not parallel) to avoid hammering rate limits.
+    // Each step uses withRLResilience: 429 → pause 5s; 2×429 → auto-switch model.
+    // The process NEVER stops mid-way due to a rate-limit — it always finishes all 6 steps.
+    const steps = [
+      { label: "Notebook",       fn: () => genNotebook(day,      { silent: true }) },
+      { label: "Examples",       fn: () => genExamples(day,      { silent: true }) },
+      { label: "Resources",      fn: () => genResources(day,     { silent: true }) },
+      { label: "Assignment",     fn: () => genAssignment(day,    { silent: true }) },
+      { label: "Quiz",           fn: () => genQuiz(day,          { silent: true }) },
+      { label: "Teaching Guide", fn: () => genTeachingGuide(day, { silent: true }) },
+    ];
+    notify(`Generating all content for Day ${day.dayNum} (sequential, rate-limit-safe)…`);
+    // Reset consecutive-RL counter at the start of each batch
+    _rlState.consecutiveRLs = 0;
+    const failed = [];
+    for (let i = 0; i < steps.length; i++) {
+      const { label, fn } = steps[i];
+      try {
+        // withRLResilience wraps the individual gen call:
+        //   - 429 → 5s pause then retry
+        //   - 2 × 429 in a row → auto-rotate model, then retry
+        await withRLResilience(fn, { notifyFn: notify });
+        notify(`Day ${day.dayNum} [${i+1}/6]: ${label} ✓`);
+      } catch (e) {
+        // Only truly fatal errors (bad key, no internet) land here
+        failed.push(`${label}: ${e.message}`);
+        notify(`Day ${day.dayNum} ${label}: ${e.message}`, "err");
+      }
+    }
+    if (failed.length) {
+      notify(`Day ${day.dayNum}: ${failed.length} step(s) could not complete — ${failed[0]}`, "err");
+    } else {
+      notify(`Day ${day.dayNum}: all 6 sections generated ✓`);
+    }
   };
 
   /* ════ FIX 1: Real Python execution ════ */
@@ -5769,7 +5979,10 @@ Hard rules:
     if (studentMode) { trackActivity("codeRun", k, true); trackActivity("practical", k, true); }
     try {
       if (pyodideReady) {
-        const out = await runPythonReal(code);
+        // Pass a status callback so the output panel shows "Installing pandas…" etc. in real time
+        const out = await runPythonReal(code, (msg) => {
+          setCodeOutputs(p=>({...p,[k]: msg ? `⏳ ${msg}` : ""}));
+        });
         setCodeOutputs(p=>({...p,[k]:"✓ REAL PYTHON OUTPUT:\n" + out}));
       } else {
         if (!isOnline && aiProvider === "groq") throw new Error("Offline — load Real Python above, or switch to Ollama in Settings");
@@ -6432,7 +6645,7 @@ Hard rules:
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
@@ -6562,9 +6775,28 @@ Hard rules:
                 </div>
               )}
               {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} onGenWeek={async(days,onProgress)=>{
+                // Sequential, rate-limit-resilient week generation.
+                // 429 → pause 5s; 2×429 same model → auto-switch model; never aborts mid-batch.
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
                 let done=0; const total=days.length*gens.length; const failed=[];
-                for(const d of days){ for(const{fn,label}of gens){ try{await fn(d,{silent:true});}catch(e){failed.push(`Day ${d.dayNum} ${label}: ${e.message}`);} done++; onProgress&&onProgress(done,total); } }
+                // Reset RL state at the start of the week batch
+                _rlState.consecutiveRLs = 0;
+                for(const d of days){
+                  for(const{fn,label}of gens){
+                    try{
+                      await withRLResilience(
+                        () => fn(d,{silent:true}),
+                        { notifyFn: notify }
+                      );
+                    }catch(e){
+                      // Only fatal errors (bad key, offline) reach here
+                      failed.push(`Day ${d.dayNum} ${label}: ${e.message}`);
+                      notify(`Day ${d.dayNum} ${label} failed: ${e.message}`, "err");
+                    }
+                    done++;
+                    onProgress&&onProgress(done,total);
+                  }
+                }
                 if(failed.length) throw new Error(`${failed.length} step(s) failed:\n${failed.slice(0,3).join("\n")}${failed.length>3?"\n…and more":""}`);
               }} />}
               {!leaderboardOpen && page==="day" && selDay && (
@@ -6709,6 +6941,18 @@ Hard rules:
                 })()}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Rate-limit resilience banner — shown during batch gen when 429s occur */}
+        {rlBanner && (
+          <div style={{ position:"fixed", top:72, left:"50%", transform:"translateX(-50%)", zIndex:10000, background:"#1e293b", color:"#fbbf24", border:"1.5px solid #f59e0b", borderRadius:12, padding:"10px 20px", fontSize:13, fontWeight:700, display:"flex", alignItems:"center", gap:10, boxShadow:"0 8px 32px rgba(0,0,0,.25)", maxWidth:520, animation:"lms-in .2s ease" }}>
+            <span style={{ fontSize:18 }}>⚡</span>
+            <div>
+              <div>{rlBanner.msg}</div>
+              <div style={{ fontSize:11, color:"#94a3b8", fontWeight:500, marginTop:2 }}>Active model: <span style={{ color:"#a78bfa", fontWeight:700 }}>{rlBanner.modelName}</span> — generation will continue automatically</div>
+            </div>
+            <button onClick={()=>setRlBanner(null)} style={{ marginLeft:"auto", background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:18, lineHeight:1, padding:"0 2px" }}>×</button>
           </div>
         )}
 
@@ -8971,7 +9215,12 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
             <div style={{ background:"#eff6ff", border:"1.5px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
               <div style={{ display:"flex", alignItems:"center", gap:8, fontSize:13, color:"#1e40af" }}>
                 <Ic n="zap" s={15} c="#3b82f6"/>
-                <strong>Real Python Execution available</strong> — load Pyodide (WASM) for actual code running
+                <div>
+                  <strong>Real Python Execution available</strong> — load Pyodide (WASM) for actual code running
+                  <div style={{ fontSize:11.5, color:"#3b82f6", marginTop:2 }}>
+                    📦 pandas, numpy, scikit-learn, matplotlib &amp; 100+ packages auto-install on first use
+                  </div>
+                </div>
               </div>
               <button className="lms-btn lms-btn-blue" disabled={pyodideLoading} onClick={onLoadPyodide} style={{ flexShrink:0 }}>
                 {pyodideLoading?<><Spin s={13}/>Loading Python...</>:<><Ic n="play" s={13}/>Load Real Python</>}
@@ -8980,7 +9229,13 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           )}
           {pyodideReady && (
             <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:10, padding:"8px 16px", marginBottom:14, fontSize:13, color:"#15803d", fontWeight:600, display:"flex", alignItems:"center", gap:8 }}>
-              <Ic n="check" s={15} c="#22c55e"/> Real Python (Pyodide WASM) — actual execution, no simulation
+              <Ic n="check" s={15} c="#22c55e"/>
+              <div>
+                Real Python (Pyodide WASM) — actual execution, no simulation
+                <span style={{ fontSize:11, fontWeight:400, color:"#16a34a", marginLeft:8 }}>
+                  📦 import any package — it installs automatically on first use
+                </span>
+              </div>
             </div>
           )}
 
