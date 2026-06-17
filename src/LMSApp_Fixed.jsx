@@ -3609,7 +3609,7 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 
       {/* ── Page header ── */}
       <div style={{ background:"linear-gradient(135deg,#0f172a,#1e3a5f)", borderRadius:14, padding:"20px 24px", color:"#fff" }}>
-        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Std Performance</div>
+        <div style={{ fontSize:22, fontWeight:800, marginBottom:4 }}>👥 Student Performance</div>
         <div style={{ fontSize:13, opacity:.7 }}>{students.length} enrolled student{students.length !== 1 ? "s" : ""} · {planDays.length} day course · Click any student to view their full dashboard</div>
       </div>
 
@@ -7825,7 +7825,7 @@ Hard rules:
               ...(studentMode ? [{ id:"dashboard",  ic:"chart",    label:"My Dashboard"       }] : []),
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
-              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Student Performance" }]),
+              ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
