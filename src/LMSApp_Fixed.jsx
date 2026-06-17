@@ -4366,7 +4366,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
       <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:20 }}>
         <div style={{ width:46, height:46, background:"linear-gradient(135deg,#f59e0b,#f97316)", borderRadius:14, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0, boxShadow:"0 4px 14px rgba(245,158,11,.3)" }}>🏆</div>
         <div style={{ flex:1 }}>
-          <h1 style={{ fontSize:24, fontWeight:900, color:"#0f172a", margin:0, letterSpacing:"-.5px" }}>Leaderboard</h1>
+          <h1 style={{ fontSize:24, fontWeight:900, color:"#0f172a", margin:0, letterSpacing:"-.5px" }} className="lb2-title">Leaderboard</h1>
           <p style={{ fontSize:13, color:"#94a3b8", margin:0 }}>
             {studentMode
               ? myRank ? `You're ranked #${myRank} of ${ranked.length} students` : "Your performance vs peers"
@@ -4374,7 +4374,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
           </p>
         </div>
         <div style={{ textAlign:"right", fontSize:11.5, color:"#94a3b8", lineHeight:1.6 }}>
-          <div style={{ fontWeight:700, color:"#0f172a", fontSize:13 }}>{MAX_TOTAL.toLocaleString()} pts</div>
+          <div style={{ fontWeight:700, color:"#0f172a", fontSize:13 }} className="lb2-max-pts">{MAX_TOTAL.toLocaleString()} pts</div>
           <div>max possible</div>
         </div>
       </div>
@@ -4389,9 +4389,9 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
               <div style={{ width:48, height:48, borderRadius:"50%", background:"linear-gradient(135deg,#94a3b8,#475569)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:19, fontWeight:900, color:"#fff", margin:"0 auto 8px", boxShadow:"0 3px 10px rgba(148,163,184,.4)" }}>
                 {ranked[1].name.charAt(0).toUpperCase()}
               </div>
-              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[1].name}</div>
+              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} className="lb2-podium-name">{ranked[1].name}</div>
               <div style={{ fontSize:18, fontWeight:900, color:podiumScore[1], marginTop:3 }}>{ranked[1].score.toLocaleString()}</div>
-              <div style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>pts</div>
+              <div style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }} className="lb2-podium-pts">pts</div>
               <div style={{ marginTop:6 }}><span className="lb2-chip" style={{ background:getTier(ranked[1].score).bg, color:getTier(ranked[1].score).color }}>{getTier(ranked[1].score).label}</span></div>
               {currentStudentId === ranked[1].id && <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
             </div>
@@ -4403,9 +4403,9 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
               <div style={{ width:58, height:58, borderRadius:"50%", background:"linear-gradient(135deg,#f59e0b,#d97706)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:24, fontWeight:900, color:"#fff", margin:"0 auto 10px", boxShadow:"0 6px 20px rgba(245,158,11,.45)" }}>
                 {ranked[0].name.charAt(0).toUpperCase()}
               </div>
-              <div style={{ fontSize:15, fontWeight:900, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[0].name}</div>
+              <div style={{ fontSize:15, fontWeight:900, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} className="lb2-podium-name">{ranked[0].name}</div>
               <div style={{ fontSize:24, fontWeight:900, color:podiumScore[0], marginTop:4 }}>{ranked[0].score.toLocaleString()}</div>
-              <div style={{ fontSize:11, color:"#92400e", fontWeight:700 }}>pts</div>
+              <div style={{ fontSize:11, color:"#92400e", fontWeight:700 }} className="lb2-podium-pts">pts</div>
               <div style={{ marginTop:8 }}><span className="lb2-chip" style={{ background:getTier(ranked[0].score).bg, color:getTier(ranked[0].score).color }}>{getTier(ranked[0].score).label}</span></div>
               {currentStudentId === ranked[0].id && <div style={{ position:"absolute", top:10, right:10, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
             </div>
@@ -4417,9 +4417,9 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
               <div style={{ width:48, height:48, borderRadius:"50%", background:"linear-gradient(135deg,#f97316,#ea580c)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:19, fontWeight:900, color:"#fff", margin:"0 auto 8px", boxShadow:"0 3px 10px rgba(249,115,22,.4)" }}>
                 {ranked[2].name.charAt(0).toUpperCase()}
               </div>
-              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{ranked[2].name}</div>
+              <div style={{ fontSize:13, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} className="lb2-podium-name">{ranked[2].name}</div>
               <div style={{ fontSize:18, fontWeight:900, color:podiumScore[2], marginTop:3 }}>{ranked[2].score.toLocaleString()}</div>
-              <div style={{ fontSize:10, color:"#92400e", fontWeight:600 }}>pts</div>
+              <div style={{ fontSize:10, color:"#92400e", fontWeight:600 }} className="lb2-podium-pts">pts</div>
               <div style={{ marginTop:6 }}><span className="lb2-chip" style={{ background:getTier(ranked[2].score).bg, color:getTier(ranked[2].score).color }}>{getTier(ranked[2].score).label}</span></div>
               {currentStudentId === ranked[2].id && <div style={{ position:"absolute", top:8, right:8, background:"#6366f1", color:"#fff", fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:99 }}>YOU</div>}
             </div>
@@ -4457,7 +4457,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
               {/* Main row */}
               <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                 {/* Rank */}
-                <div style={{ width:36, height:36, borderRadius:10, background:i<3?"transparent":"#f8fafc", border:i<3?"none":"1.5px solid #e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:i<3?22:13, fontWeight:800, color:"#94a3b8" }}>
+                <div style={{ width:36, height:36, borderRadius:10, background:i<3?"transparent":"#f8fafc", border:i<3?"none":"1.5px solid #e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:i<3?22:13, fontWeight:800, color:"#94a3b8" }} className="lb2-rank-badge">
                   {i<3 ? medals[i] : `#${i+1}`}
                 </div>
 
@@ -4469,7 +4469,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
                 {/* Name + bar */}
                 <div style={{ flex:1, minWidth:0 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5, flexWrap:"wrap" }}>
-                    <span style={{ fontSize:14, fontWeight:800, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</span>
+                    <span style={{ fontSize:14, fontWeight:800, color:"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} className="lb2-name">{s.name}</span>
                     {isMe && <span className="lb2-chip" style={{ background:"#eef2ff", color:"#6366f1" }}>YOU</span>}
                     <span className="lb2-chip" style={{ background:tier.bg, color:tier.color }}>{tier.label}</span>
                     {s.streak > 0 && <span className="lb2-chip" style={{ background:"#fff7ed", color:"#f59e0b" }}>🔥 {s.streak}d</span>}
@@ -4484,7 +4484,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
 
                 {/* Score + progress chips */}
                 <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4, flexShrink:0 }}>
-                  <span style={{ fontSize:18, fontWeight:900, color:i===0?"#f59e0b":i===1?"#64748b":i===2?"#b45309":isMe?"#6366f1":"#0f172a", letterSpacing:"-.5px" }}>
+                  <span style={{ fontSize:18, fontWeight:900, color:i===0?"#f59e0b":i===1?"#64748b":i===2?"#b45309":isMe?"#6366f1":"#0f172a", letterSpacing:"-.5px" }} className="lb2-score">
                     {s.score.toLocaleString()}
                   </span>
                   <span style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>pts</span>
@@ -4502,7 +4502,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
                     <div key={m.label} className="lb2-metric-card">
                       <div style={{ width:32, height:32, borderRadius:8, background:m.color+"18", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>{m.icon}</div>
                       <div style={{ minWidth:0 }}>
-                        <div style={{ fontSize:11, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{m.label}</div>
+                        <div style={{ fontSize:11, fontWeight:800, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }} className="lb2-metric-label">{m.label}</div>
                         <div style={{ display:"flex", alignItems:"baseline", gap:4, marginTop:1 }}>
                           <span style={{ fontSize:15, fontWeight:900, color:m.color }}>{m.pts}</span>
                           <span style={{ fontSize:10, color:"#94a3b8", fontWeight:600 }}>/ {m.max}</span>
@@ -4522,8 +4522,8 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
       </div>
 
       {/* ── Scoring guide ── */}
-      <div style={{ marginTop:28, padding:"18px 20px", background:"#f8fafc", borderRadius:16, border:"1.5px solid #e8edf3" }}>
-        <p style={{ fontSize:11, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".08em", marginBottom:12 }}>Score Breakdown (max {MAX_TOTAL.toLocaleString()} pts)</p>
+      <div style={{ marginTop:28, padding:"18px 20px", background:"#f8fafc", borderRadius:16, border:"1.5px solid #e8edf3" }} className="lb2-guide-wrap">
+        <p style={{ fontSize:11, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".08em", marginBottom:12 }} className="lb2-guide-title">Score Breakdown (max {MAX_TOTAL.toLocaleString()} pts)</p>
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))", gap:8 }}>
           {[
             { icon:"📅", label:"Days Completed",      max:300, note:"280 × completion rate + in-progress bonus" },
@@ -4536,14 +4536,14 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
             { icon:"🗃️", label:"Datasets Used",        max:80,  note:"20 pts per Data Generator dataset" },
             { icon:"⚡", label:"Examples Explored",    max:70,  note:"10 pts per day's examples viewed" },
           ].map(m => (
-            <div key={m.label} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", background:"#fff", borderRadius:10, border:"1px solid #f1f5f9" }}>
+            <div key={m.label} style={{ display:"flex", gap:10, alignItems:"flex-start", padding:"10px 12px", background:"#fff", borderRadius:10, border:"1px solid #f1f5f9" }} className="lb2-guide-card">
               <span style={{ fontSize:18, flexShrink:0 }}>{m.icon}</span>
               <div>
                 <div style={{ display:"flex", gap:6, alignItems:"baseline", flexWrap:"wrap" }}>
-                  <span style={{ fontSize:12, fontWeight:700, color:"#0f172a" }}>{m.label}</span>
+                  <span style={{ fontSize:12, fontWeight:700, color:"#0f172a" }} className="lb2-guide-label">{m.label}</span>
                   <span style={{ fontSize:10, color:"#94a3b8", fontWeight:700 }}>max {m.max}</span>
                 </div>
-                <div style={{ fontSize:11, color:"#64748b", lineHeight:1.45, marginTop:2 }}>{m.note}</div>
+                <div style={{ fontSize:11, color:"#64748b", lineHeight:1.45, marginTop:2 }} className="lb2-guide-note">{m.note}</div>
               </div>
             </div>
           ))}
@@ -7529,41 +7529,66 @@ Hard rules:
           [data-pr-dark="1"] ::-webkit-scrollbar-thumb { background:#334155; }
           [data-pr-dark="1"] ::-webkit-scrollbar-track { background:#111827; }
 
-          /* ── Global text color resets — covers every inline color:#0f172a / #334155 / #374151 / #475569 / #1a202c / #1e293b ── */
-          /* Primary body text that would be near-black on dark bg */
-          [data-pr-dark="1"] [style*="color:\"#0f172a\""]  { color:#e2e8f0 !important; }
-          [data-pr-dark="1"] [style*="color:\"#1a202c\""]  { color:#e2e8f0 !important; }
-          [data-pr-dark="1"] [style*="color:\"#334155\""]  { color:#cbd5e1 !important; }
-          [data-pr-dark="1"] [style*="color:\"#374151\""]  { color:#cbd5e1 !important; }
-          [data-pr-dark="1"] [style*="color:\"#1e293b\""]  { color:#cbd5e1 !important; }
-          [data-pr-dark="1"] [style*="color:\"#2d3748\""]  { color:#cbd5e1 !important; }
+          /* ── Global text color resets ──
+             NOTE: React serializes inline style={{color:"#0f172a"}} to the DOM as
+             style="color: rgb(15, 23, 42)" — so selectors MUST match the rgb() form,
+             not the JSX hex string, or they silently match nothing. ── */
+          [data-pr-dark="1"] [style*="color: rgb(15, 23, 42)"]   { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(26, 32, 44)"]   { color:#e2e8f0 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(51, 65, 85)"]   { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(55, 65, 81)"]   { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(30, 41, 59)"]   { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(45, 55, 72)"]   { color:#cbd5e1 !important; }
           /* Secondary / muted text */
-          [data-pr-dark="1"] [style*="color:\"#475569\""]  { color:#94a3b8 !important; }
-          [data-pr-dark="1"] [style*="color:\"#64748b\""]  { color:#8492a6 !important; }
-          /* Dark blue text (#1e40af, #0c4a6e, #0369a1, #1e3a5f) — deep blue on white is fine but invisible on dark bg */
-          [data-pr-dark="1"] [style*="color:\"#1e40af\""]  { color:#93c5fd !important; }
-          [data-pr-dark="1"] [style*="color:\"#0c4a6e\""]  { color:#7dd3fc !important; }
-          [data-pr-dark="1"] [style*="color:\"#0369a1\""]  { color:#7dd3fc !important; }
-          [data-pr-dark="1"] [style*="color:\"#1e3a5f\""]  { color:#93c5fd !important; }
-          /* Deep green text (#166534, #15803d, #16a34a, #14532d) */
-          [data-pr-dark="1"] [style*="color:\"#166534\""]  { color:#86efac !important; }
-          [data-pr-dark="1"] [style*="color:\"#15803d\""]  { color:#86efac !important; }
-          [data-pr-dark="1"] [style*="color:\"#16a34a\""]  { color:#86efac !important; }
-          [data-pr-dark="1"] [style*="color:\"#14532d\""]  { color:#86efac !important; }
-          /* Amber / brown text (#92400e, #b45309, #d97706) on pale amber backgrounds */
-          [data-pr-dark="1"] [style*="color:\"#92400e\""]  { color:#fde68a !important; }
-          [data-pr-dark="1"] [style*="color:\"#b45309\""]  { color:#fbbf24 !important; }
-          /* Deep purple text (#5b21b6, #6b21a8, #9f1239) */
-          [data-pr-dark="1"] [style*="color:\"#5b21b6\""]  { color:#c4b5fd !important; }
-          [data-pr-dark="1"] [style*="color:\"#6b21a8\""]  { color:#c4b5fd !important; }
-          [data-pr-dark="1"] [style*="color:\"#9f1239\""]  { color:#fda4af !important; }
-          /* Orange-red (#9a3412) */
-          [data-pr-dark="1"] [style*="color:\"#9a3412\""]  { color:#fdba74 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(71, 85, 105)"]  { color:#94a3b8 !important; }
+          [data-pr-dark="1"] [style*="color: rgb(100, 116, 139)"]{ color:#8492a6 !important; }
+          /* Dark blue text on what were pale-blue boxes */
+          [data-pr-dark="1"] [style*="color: rgb(30, 64, 175)"]  { color:#93c5fd !important; }
+          [data-pr-dark="1"] [style*="color: rgb(12, 74, 110)"]  { color:#7dd3fc !important; }
+          [data-pr-dark="1"] [style*="color: rgb(3, 105, 161)"]  { color:#7dd3fc !important; }
+          [data-pr-dark="1"] [style*="color: rgb(30, 58, 95)"]   { color:#93c5fd !important; }
+          /* Deep green text on what were pale-green boxes */
+          [data-pr-dark="1"] [style*="color: rgb(22, 101, 52)"]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color: rgb(21, 128, 61)"]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color: rgb(22, 163, 74)"]  { color:#86efac !important; }
+          [data-pr-dark="1"] [style*="color: rgb(20, 83, 45)"]   { color:#86efac !important; }
+          /* Amber / brown text on what were pale-amber boxes */
+          [data-pr-dark="1"] [style*="color: rgb(146, 64, 14)"]  { color:#fde68a !important; }
+          [data-pr-dark="1"] [style*="color: rgb(180, 83, 9)"]   { color:#fbbf24 !important; }
+          /* Deep purple / rose text */
+          [data-pr-dark="1"] [style*="color: rgb(91, 33, 182)"]  { color:#c4b5fd !important; }
+          [data-pr-dark="1"] [style*="color: rgb(107, 33, 168)"] { color:#c4b5fd !important; }
+          [data-pr-dark="1"] [style*="color: rgb(159, 18, 57)"]  { color:#fda4af !important; }
+          /* Orange-red */
+          [data-pr-dark="1"] [style*="color: rgb(154, 52, 18)"]  { color:#fdba74 !important; }
 
-          /* ── Buttons with light backgrounds that become invisible ── */
-          [data-pr-dark="1"] [style*="background:\"#f1f5f9\""][style*="color:\"#475569\""]  { background:#1f2937 !important; color:#cbd5e1 !important; }
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""]  { background:#1a2535 !important; }
-          [data-pr-dark="1"] [style*="background:\"#fafafa\""]  { background:#161f2e !important; }
+          /* ── Pale tinted background boxes → low-opacity dark equivalents (rgb-based, matches real DOM) ── */
+          [data-pr-dark="1"] [style*="background: rgb(239, 246, 255)"] { background:rgba(30,58,138,.25) !important; border-color:rgba(147,197,253,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(240, 253, 244)"] { background:rgba(20,83,45,.25) !important; border-color:rgba(134,239,172,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(255, 251, 235)"] { background:rgba(120,53,15,.25) !important; border-color:rgba(253,230,138,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(255, 247, 237)"] { background:rgba(124,45,18,.25) !important; border-color:rgba(253,186,116,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(245, 243, 255)"] { background:rgba(91,33,182,.2) !important; border-color:rgba(196,181,253,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(254, 242, 242)"] { background:rgba(127,29,29,.25) !important; border-color:rgba(252,165,165,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(255, 241, 242)"] { background:rgba(127,29,49,.25) !important; border-color:rgba(253,164,175,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(238, 242, 255)"] { background:rgba(30,27,75,.3) !important; border-color:rgba(165,180,252,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(253, 242, 248)"] { background:rgba(112,26,79,.25) !important; border-color:rgba(249,168,212,.3) !important; }
+          [data-pr-dark="1"] [style*="background: rgb(240, 249, 255)"] { background:rgba(8,77,107,.25) !important; border-color:rgba(125,211,252,.3) !important; }
+          /* Light gray neutral panels */
+          [data-pr-dark="1"] [style*="background: rgb(248, 250, 252)"] { background:#1a2535 !important; }
+          [data-pr-dark="1"] [style*="background: rgb(250, 250, 250)"] { background:#161f2e !important; }
+          [data-pr-dark="1"] [style*="background: rgb(241, 245, 249)"] { background:#1f2937 !important; }
+          /* Plain white panels/cards/modals */
+          [data-pr-dark="1"] [style*="background: rgb(255, 255, 255)"] { background:#1e293b !important; }
+          [data-pr-dark="1"] [style*="background: white"]              { background:#1e293b !important; }
+
+          /* ── Borders that were pale-on-white, now invisible on dark ── */
+          [data-pr-dark="1"] [style*="border-color: rgb(226, 232, 240)"] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-color: rgb(232, 237, 243)"] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-color: rgb(241, 245, 249)"] { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-top-color: rgb(241, 245, 249)"] { border-top-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-bottom-color: rgb(241, 245, 249)"] { border-bottom-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-top-color: rgb(226, 232, 240)"] { border-top-color:#2a3a52 !important; }
+          [data-pr-dark="1"] [style*="border-bottom-color: rgb(226, 232, 240)"] { border-bottom-color:#2a3a52 !important; }
 
           /* ── Sidebar ── */
           [data-pr-dark="1"] .lms-sidebar { background:#111827 !important; border-right-color:#1f2937 !important; }
@@ -7612,74 +7637,9 @@ Hard rules:
           [data-pr-dark="1"] .lms-cell { background:#1e293b !important; border-color:#334155 !important; color:#e2e8f0 !important; }
           [data-pr-dark="1"] .lms-output { background:#050a12 !important; }
 
-          /* ── Modals — override fixed white backgrounds ── */
-          [data-pr-dark="1"] [style*="position:\"fixed\""][style*="background:\"#fff\""],
-          [data-pr-dark="1"] [style*="position:\"fixed\""][style*="background:\"white\""] { background:#0d1117 !important; }
-          /* Modal inner panels */
-          [data-pr-dark="1"] [style*="borderRadius"][style*="background:\"#fff\""],
-          [data-pr-dark="1"] [style*="borderRadius"][style*="background:\"white\""] { background:#1e293b !important; border-color:#2a3a52 !important; }
-          /* Modal dividers */
-          [data-pr-dark="1"] [style*="borderTop:\"1.5px solid #f1f5f9\""] { border-top-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="borderBottom:\"1.5px solid #f1f5f9\""] { border-bottom-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="borderTop:\"1px solid #e2e8f0\""] { border-top-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="borderBottom:\"1px solid #e2e8f0\""] { border-bottom-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="border:\"1.5px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="border:\"1px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="border:\"1px solid #f1f5f9\""] { border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="border:\"1.5px solid #f1f5f9\""] { border-color:#2a3a52 !important; }
-
-          /* ── Status/info boxes (pale bg + dark text combinations) ── */
-          /* Blue info boxes (#eff6ff bg + #1e40af text) */
-          [data-pr-dark="1"] [style*="background:\"#eff6ff\""] { background:rgba(30,58,138,.25) !important; border-color:rgba(147,197,253,.3) !important; }
-          /* Green success boxes (#f0fdf4 bg + #166534 or #15803d text) */
-          [data-pr-dark="1"] [style*="background:\"#f0fdf4\""] { background:rgba(20,83,45,.25) !important; border-color:rgba(134,239,172,.3) !important; }
-          /* Amber warning boxes (#fffbeb bg + #92400e text) */
-          [data-pr-dark="1"] [style*="background:\"#fffbeb\""] { background:rgba(120,53,15,.25) !important; border-color:rgba(253,230,138,.3) !important; }
-          /* Orange boxes (#fff7ed) */
-          [data-pr-dark="1"] [style*="background:\"#fff7ed\""] { background:rgba(124,45,18,.25) !important; border-color:rgba(253,186,116,.3) !important; }
-          /* Purple boxes (#f5f3ff) */
-          [data-pr-dark="1"] [style*="background:\"#f5f3ff\""] { background:rgba(91,33,182,.2) !important; border-color:rgba(196,181,253,.3) !important; }
-          /* Red boxes (#fef2f2) */
-          [data-pr-dark="1"] [style*="background:\"#fef2f2\""] { background:rgba(127,29,29,.25) !important; border-color:rgba(252,165,165,.3) !important; }
-          /* Indigo (#eef2ff, #e0e7ff) */
-          [data-pr-dark="1"] [style*="background:\"#eef2ff\""] { background:rgba(30,27,75,.3) !important; border-color:rgba(165,180,252,.3) !important; }
-          [data-pr-dark="1"] [style*="background:\"#e0e7ff\""] { border-color:rgba(165,180,252,.35) !important; }
-          /* Light gray info panels */
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""] { background:#1a2535 !important; }
-          [data-pr-dark="1"] [style*="background:\"#fafafa\""] { background:#161f2e !important; }
-          [data-pr-dark="1"] [style*="background:\"#f1f5f9\""] { background:#1f2937 !important; }
-
-          /* ── Leaderboard & podium cards ── */
-          [data-pr-dark="1"] .lb2-row { background:#1e293b !important; border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] .lb2-row:hover { border-color:#3b82f6 !important; }
-          [data-pr-dark="1"] .lb2-row.me { background:linear-gradient(135deg,#1a2a4a,#1e2a40) !important; }
-          [data-pr-dark="1"] .lb2-detail { background:#162032 !important; }
-          [data-pr-dark="1"] .lb2-metric-card { background:#1e293b !important; border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] .lb2-sort { background:#1e293b !important; border-color:#334155 !important; color:#94a3b8 !important; }
-          [data-pr-dark="1"] .lb2-sort.on { background:#0f172a !important; color:#e2e8f0 !important; }
-          [data-pr-dark="1"] .lb2-podium-card { background:linear-gradient(160deg,#1e293b,#162032) !important; border-color:#2a3a52 !important; }
-
-          /* ── Student Dashboard cards ── */
-          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:14"] { background:#1e293b !important; }
-          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:\"14px\""] { background:#1e293b !important; }
-
-          /* ── Week generation cards ── */
-          [data-pr-dark="1"] [style*="borderRadius:10"][style*="border:\"1.5px solid #e2e8f0\""] { border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderBottom"] { background:#162032 !important; border-bottom-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="borderBottom:\"1px solid #f1f5f9\""] { border-bottom-color:#2a3a52 !important; }
-
-          /* ── Courses page ── */
-          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:16"] { background:#1e293b !important; }
-          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:\"16px\""] { background:#1e293b !important; }
-          [data-pr-dark="1"] [style*="background:\"#fff\""][style*="borderRadius:14"] { background:#1e293b !important; }
-
-          /* ── Settings page ── */
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderRadius:12"] { background:#1a2535 !important; border-color:#2a3a52 !important; }
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="borderRadius:\"12px\""] { background:#1a2535 !important; }
-
-          /* ── Upload zone ── */
-          [data-pr-dark="1"] .upload-zone { background:#1a2535 !important; border-color:#334155 !important; }
-          [data-pr-dark="1"] .upload-zone:hover { background:#1e293b !important; border-color:#3b82f6 !important; }
+          /* ── Modals — fixed-position white overlays & inner panels ── */
+          [data-pr-dark="1"] [style*="position: fixed"][style*="background: rgb(255, 255, 255)"],
+          [data-pr-dark="1"] [style*="position: fixed"][style*="background: white"] { background:#0d1117 !important; }
 
           /* ── Day cells (calendar) ── */
           [data-pr-dark="1"] .day-cell { background:#1e293b !important; border-width:2px !important; border-color:#334155 !important; }
@@ -7692,8 +7652,6 @@ Hard rules:
           [data-pr-dark="1"] .cal-ext-text  { color:#c4b5fd !important; font-weight:700 !important; font-size:11.5px !important; }
           [data-pr-dark="1"] .cal-hdr-day   { color:#475569 !important; }
           [data-pr-dark="1"] .cal-month-label { color:#e2e8f0 !important; }
-          /* Calendar nav arrow buttons */
-          [data-pr-dark="1"] [style*="background:\"none\""][style*="color:\"#64748b\""] { color:#64748b !important; }
 
           /* ── Notebook / content dark overrides ── */
           [data-pr-dark="1"] .pr-nb-section { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
@@ -7702,6 +7660,7 @@ Hard rules:
           [data-pr-dark="1"] .pr-h1, [data-pr-dark="1"] .pr-h2, [data-pr-dark="1"] .pr-h3 { color:#f1f5f9; }
           [data-pr-dark="1"] .pr-nb-head { border-bottom-color:#2a3a52; }
           [data-pr-dark="1"] .pr-nb-head p { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .pr-nb-number { background:linear-gradient(145deg,#1e293b,#162032) !important; box-shadow:6px 6px 14px #0a0f1a,-4px -4px 10px #243349 !important; }
           [data-pr-dark="1"] .pr-oli { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; color:#cbd5e1; }
           [data-pr-dark="1"] .pr-oli:hover { background:linear-gradient(145deg,#243249,#1a2a40); }
           [data-pr-dark="1"] .pr-ul { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
@@ -7716,13 +7675,17 @@ Hard rules:
           [data-pr-dark="1"] .pr-callout { box-shadow:0 8px 32px rgba(0,0,0,.4); }
           [data-pr-dark="1"] .pr-hr { background:linear-gradient(90deg,transparent,#2a3a52 30%,#2a3a52 70%,transparent); }
           [data-pr-dark="1"] .pr-codelinks { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
-          [data-pr-dark="1"] .pr-section-card { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
+          /* Content cards (Tasks/Challenges/Examples) — the body panel under the gradient header strip */
+          [data-pr-dark="1"] .pr-section-card { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .pr-content-card-body { background:linear-gradient(145deg,#1e293b,#162032) !important; }
+          [data-pr-dark="1"] .pr-section-card > div:last-child { background:linear-gradient(145deg,#1e293b,#162032) !important; }
           [data-pr-dark="1"] .pr-section-body { background:#162032; color:#cbd5e1; }
           [data-pr-dark="1"] .pr-section-body p, [data-pr-dark="1"] .pr-section-body li { color:#cbd5e1; }
           [data-pr-dark="1"] .pr-explanation { background:linear-gradient(140deg,rgba(59,130,246,.12),rgba(139,92,246,.08)); border-color:rgba(99,102,241,.3); }
           [data-pr-dark="1"] .pr-explanation-body { color:#94a3b8; }
-          [data-pr-dark="1"] .pr-guide-card { background:linear-gradient(145deg,#1e293b,#162032); border-color:#2a3a52; }
-          [data-pr-dark="1"] .pr-guide-body { padding:22px 26px; background:#162032; color:#cbd5e1; }
+          /* Teaching guide cards — body panel + strip background */
+          [data-pr-dark="1"] .pr-guide-card { border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .pr-guide-body { background:#162032 !important; color:#cbd5e1 !important; }
 
           /* ── Data Generator ── */
           [data-pr-dark="1"] .dg-step-text { color:#e2e8f0 !important; }
@@ -7730,23 +7693,64 @@ Hard rules:
           [data-pr-dark="1"] .dg-stat-label { color:#64748b !important; }
           [data-pr-dark="1"] .dg-desc-box { background:rgba(20,83,45,.3) !important; border-color:rgba(134,239,172,.3) !important; color:#d1fae5 !important; }
           [data-pr-dark="1"] .dg-tip-box  { background:rgba(120,53,15,.25) !important; border-color:rgba(253,230,138,.35) !important; color:#fde68a !important; }
-          /* Data table header & rows */
-          [data-pr-dark="1"] [style*="position:\"sticky\""][style*="background:\"#f8fafc\""] { background:#162032 !important; }
-          [data-pr-dark="1"] [style*="background:\"#fffbeb\""][style*="cursor:\"pointer\""] { background:#1e1a00 !important; }
 
-          /* ── Quiz tab ── */
-          [data-pr-dark="1"] [style*="background:\"#f0fdf4\""][style*="borderRadius:12"] { background:rgba(20,83,45,.25) !important; }
-          [data-pr-dark="1"] [style*="background:\"#fef2f2\""][style*="borderRadius:12"] { background:rgba(127,29,29,.25) !important; }
-          [data-pr-dark="1"] [style*="background:\"#eff6ff\""][style*="borderRadius:12"] { background:rgba(30,58,138,.25) !important; }
+          /* ── Quiz question cards ── */
+          [data-pr-dark="1"] .qz-card { background:linear-gradient(145deg,#1e293b,#162032) !important; box-shadow:12px 12px 28px #0a0f1a,-8px -8px 20px #243349 !important; }
+          [data-pr-dark="1"] .qz-card-head { background:linear-gradient(145deg,#243249,#1a2535) !important; }
+          [data-pr-dark="1"] .qz-question-text { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .qz-option-neutral { background:linear-gradient(145deg,#1e293b,#162032) !important; color:#cbd5e1 !important; box-shadow:6px 6px 14px #0a0f1a,-4px -4px 10px #243349 !important; }
 
-          /* ── Attendance / QR panels ── */
-          [data-pr-dark="1"] [style*="background:\"#f8fafc\""][style*="border:\"1px solid #e2e8f0\""] { background:#1a2535 !important; border-color:#2a3a52 !important; }
-
-          /* ── Table rows (attendance table, student day-by-day) ── */
+          /* ── Table rows (attendance table, student day-by-day, data preview) ── */
           [data-pr-dark="1"] table th { background:#162032 !important; color:#94a3b8 !important; border-bottom-color:#2a3a52 !important; }
           [data-pr-dark="1"] table td { color:#cbd5e1 !important; border-bottom-color:#1f2937 !important; }
           [data-pr-dark="1"] table tr:nth-child(odd) td { background:#1e293b; }
           [data-pr-dark="1"] table tr:nth-child(even) td { background:#162032; }
+
+          /* ── Upload zone ── */
+          [data-pr-dark="1"] .upload-zone { background:#1a2535 !important; border-color:#334155 !important; }
+          [data-pr-dark="1"] .upload-zone:hover { background:#1e293b !important; border-color:#3b82f6 !important; }
+
+          /* ── LEADERBOARD — header, podium, scoring guide ── */
+          [data-pr-dark="1"] .lb2-title       { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-max-pts     { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-row         { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-row:hover   { border-color:#3b82f6 !important; }
+          [data-pr-dark="1"] .lb2-row.me      { background:linear-gradient(135deg,#1a2a4a,#1e2a40) !important; }
+          [data-pr-dark="1"] .lb2-name        { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-score       { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-rank-badge  { background:#162032 !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-detail      { background:#162032 !important; }
+          [data-pr-dark="1"] .lb2-metric-card { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-metric-label{ color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-sort        { background:#1e293b !important; border-color:#334155 !important; color:#94a3b8 !important; }
+          [data-pr-dark="1"] .lb2-sort.on     { background:#0f172a !important; color:#e2e8f0 !important; }
+          [data-pr-dark="1"] .lb2-podium-card { background:linear-gradient(160deg,#1e293b,#162032) !important; }
+          [data-pr-dark="1"] .lb2-podium-name { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-podium-pts  { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .lb2-guide-title { color:#94a3b8 !important; }
+          [data-pr-dark="1"] .lb2-guide-card  { background:#1e293b !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .lb2-guide-label { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .lb2-guide-note  { color:#94a3b8 !important; }
+          [data-pr-dark="1"] .lb2-guide-wrap  { background:#162032 !important; border-color:#2a3a52 !important; }
+
+          /* ── SETUP PAGE — header, brochure card, plan list ── */
+          [data-pr-dark="1"] .stp-title      { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .stp-sub        { color:#94a3b8 !important; }
+          [data-pr-dark="1"] .stp-brochure-card { background:linear-gradient(135deg,#1a2236,#15192b) !important; border-color:#2a3a52 !important; }
+          [data-pr-dark="1"] .stp-brochure-title { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .stp-upload-zone { background:#1a2535 !important; border-color:#334155 !important; }
+          [data-pr-dark="1"] .stp-upload-zone.active { background:#1e2a4a !important; border-color:#6366f1 !important; }
+          [data-pr-dark="1"] .stp-upload-zone.dragover { background:#1e2a4a !important; border-color:#6366f1 !important; }
+          [data-pr-dark="1"] .stp-upload-text { color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .stp-filename    { color:#f1f5f9 !important; }
+          [data-pr-dark="1"] .stp-result-box  { background:rgba(20,83,45,.25) !important; border-color:rgba(134,239,172,.3) !important; }
+          [data-pr-dark="1"] .stp-result-title{ color:#86efac !important; }
+          [data-pr-dark="1"] .stp-result-sub  { color:#86efac !important; }
+          [data-pr-dark="1"] .stp-result-summary { color:#cbd5e1 !important; border-top-color:rgba(134,239,172,.25) !important; }
+          [data-pr-dark="1"] .stp-error-box   { background:rgba(127,29,29,.25) !important; border-color:rgba(252,165,165,.3) !important; }
+          [data-pr-dark="1"] .stp-preview-box { background:#162032 !important; border-color:#2a3a52 !important; color:#cbd5e1 !important; }
+          [data-pr-dark="1"] .stp-day-row     { border-bottom-color:#1f2937 !important; }
+          [data-pr-dark="1"] .stp-day-topic   { color:#cbd5e1 !important; }
 
           /* ── Content section cards (Tasks / Challenges / Examples) ── */
           .pr-section-card{
@@ -8445,18 +8449,18 @@ Day 2: [Topic]
   return (
     <div style={{ width:"100%", animation:"lms-in .3s ease", paddingBottom:60 }}>
       <div style={{ marginBottom:28 }}>
-        <h1 style={{ fontSize:26, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }}>Setup Your Course Plan</h1>
-        <p style={{ color:"#64748b", fontSize:14, marginTop:5 }}>Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
+        <h1 style={{ fontSize:26, fontWeight:800, color:"#0f172a", letterSpacing:"-.5px" }} className="stp-title">Setup Your Course Plan</h1>
+        <p style={{ color:"#64748b", fontSize:14, marginTop:5 }} className="stp-sub">Paste a plan manually, upload a .txt file, or generate one automatically from a course brochure (PDF or image).</p>
       </div>
 
       {/* ══ BROCHURE PLAN GENERATOR ══ */}
-      <div className="lms-card" style={{ padding:22, marginBottom:20, border:"1.5px solid #e0e7ff", background:"linear-gradient(135deg,#f8f9ff 0%,#f0f4ff 100%)" }}>
+      <div className="lms-card stp-brochure-card" style={{ padding:22, marginBottom:20, border:"1.5px solid #e0e7ff", background:"linear-gradient(135deg,#f8f9ff 0%,#f0f4ff 100%)" }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
           <div style={{ width:32, height:32, background:"linear-gradient(135deg,#6366f1,#8b5cf6)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
             <Ic n="brain" s={17} c="#fff"/>
           </div>
           <div>
-            <p style={{ fontWeight:800, fontSize:15, color:"#0f172a" }}>AI Plan Generator from Brochure</p>
+            <p style={{ fontWeight:800, fontSize:15, color:"#0f172a" }} className="stp-brochure-title">AI Plan Generator from Brochure</p>
             <p style={{ fontSize:12.5, color:"#6366f1", fontWeight:500 }}>Upload a course brochure (PDF or image) → AI reads it → generates a day-wise teaching plan</p>
           </div>
         </div>
@@ -8467,7 +8471,7 @@ Day 2: [Topic]
           <div>
             <p className="lms-section-label" style={{ marginBottom:8 }}>Step 1 — Upload Brochure</p>
             <div
-              className="upload-zone"
+              className={`upload-zone stp-upload-zone${brochureFile?" active":""}${brochureDragOver?" dragover":""}`}
               style={{
                 borderColor: brochureDragOver ? "#6366f1" : brochureFile ? "#6366f1" : "#c7d2fe",
                 background:  brochureDragOver ? "#eef2ff" : brochureFile ? "#f5f3ff" : "#f8fafc",
@@ -8487,7 +8491,7 @@ Day 2: [Topic]
                       <Ic n="file" s={26} c="#ef4444"/>
                     </div>
                   )}
-                  <p style={{ fontSize:13, fontWeight:700, color:"#0f172a", textAlign:"center", wordBreak:"break-all" }}>{brochureFile.name}</p>
+                  <p style={{ fontSize:13, fontWeight:700, color:"#0f172a", textAlign:"center", wordBreak:"break-all" }} className="stp-filename">{brochureFile.name}</p>
                   <p style={{ fontSize:11.5, color:"#6366f1", fontWeight:600 }}>✓ Ready to analyze</p>
                   <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"4px 10px" }}
                     onClick={()=>{ setBrochureFile(null); setBrochureResult(null); setBrochureError(""); }}>
@@ -8497,7 +8501,7 @@ Day 2: [Topic]
               ) : (
                 <>
                   <Ic n="upload" s={26} c="#a5b4fc"/>
-                  <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#475569" }}>Drop brochure here or click to browse</p>
+                  <p style={{ marginTop:10, fontSize:13.5, fontWeight:600, color:"#475569" }} className="stp-upload-text">Drop brochure here or click to browse</p>
                   <p style={{ fontSize:12, color:"#94a3b8", marginTop:4 }}>PDF, PNG, JPG, WEBP — max 8MB</p>
                 </>
               )}
@@ -8541,19 +8545,19 @@ Day 2: [Topic]
             </button>
 
             {brochureError && (
-              <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#dc2626" }}>
+              <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#dc2626" }} className="stp-error-box">
                 ❌ {brochureError}
               </div>
             )}
 
             {brochureResult && (
-              <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:9, padding:"12px 14px", display:"flex", flexDirection:"column", gap:8 }}>
+              <div style={{ background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:9, padding:"12px 14px", display:"flex", flexDirection:"column", gap:8 }} className="stp-result-box">
                 <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                   <span style={{ fontSize:18 }}>✅</span>
                   <div>
-                    <p style={{ fontWeight:700, fontSize:13, color:"#15803d" }}>{brochureResult.lineCount} days generated</p>
+                    <p style={{ fontWeight:700, fontSize:13, color:"#15803d" }} className="stp-result-title">{brochureResult.lineCount} days generated</p>
                     {brochureResult.suggestedDays && (
-                      <p style={{ fontSize:12, color:"#16a34a" }}>
+                      <p style={{ fontSize:12, color:"#16a34a" }} className="stp-result-sub">
                         AI recommendation: <strong>{brochureResult.suggestedDays} days</strong>
                         {parseInt(brochureDays) > 0 && parseInt(brochureDays) !== brochureResult.suggestedDays
                           ? ` (you set ${brochureDays})`
@@ -8563,7 +8567,7 @@ Day 2: [Topic]
                   </div>
                 </div>
                 {brochureResult.summary && (
-                  <p style={{ fontSize:12.5, color:"#374151", lineHeight:1.55, borderTop:"1px solid #bbf7d0", paddingTop:8 }}>
+                  <p style={{ fontSize:12.5, color:"#374151", lineHeight:1.55, borderTop:"1px solid #bbf7d0", paddingTop:8 }} className="stp-result-summary">
                     {brochureResult.summary}
                   </p>
                 )}
@@ -8586,7 +8590,7 @@ Day 2: [Topic]
         {brochureResult?.plan && (
           <div style={{ marginTop:16 }}>
             <p className="lms-section-label" style={{ marginBottom:8 }}>Generated Plan Preview</p>
-            <div style={{ background:"#fff", border:"1.5px solid #e0e7ff", borderRadius:10, padding:"12px 14px", maxHeight:200, overflowY:"auto", fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12, lineHeight:1.7, color:"#1e293b", whiteSpace:"pre-wrap" }}>
+            <div style={{ background:"#fff", border:"1.5px solid #e0e7ff", borderRadius:10, padding:"12px 14px", maxHeight:200, overflowY:"auto", fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:12, lineHeight:1.7, color:"#1e293b", whiteSpace:"pre-wrap" }} className="stp-preview-box">
               {brochureResult.plan}
             </div>
           </div>
@@ -8628,9 +8632,9 @@ Day 2: [Topic]
               <p className="lms-section-label">{planDays.length} Days Parsed</p>
               <div style={{ maxHeight:200, overflowY:"auto", display:"flex", flexDirection:"column", gap:5 }}>
                 {planDays.map((d,i) => (
-                  <div key={i} style={{ display:"flex", gap:10, fontSize:12.5, padding:"5px 0", borderBottom:"1px solid #f8fafc" }}>
+                  <div key={i} style={{ display:"flex", gap:10, fontSize:12.5, padding:"5px 0", borderBottom:"1px solid #f8fafc" }} className="stp-day-row">
                     <span style={{ color:"#3b82f6", fontWeight:700, minWidth:48, flexShrink:0 }}>Day {d.dayNum}</span>
-                    <span style={{ color:"#374151" }}>{d.topic}</span>
+                    <span style={{ color:"#374151" }} className="stp-day-topic">{d.topic}</span>
                   </div>
                 ))}
               </div>
@@ -11153,7 +11157,7 @@ function ContentRenderer({ content, onUseCode }) {
                       <span className="pr-section-badge" style={{ background:"rgba(255,255,255,.2)", color:"#fff", border:"1px solid rgba(255,255,255,.3)" }}>{pal.badge}</span>
                     </div>
                   </div>
-                  <div style={{ padding:"22px 26px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
+                  <div className="pr-content-card-body" style={{ padding:"22px 26px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
                     <MdRenderer text={body}/>
                   </div>
                 </div>
@@ -11388,15 +11392,15 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
               const statusColor = submitted ? (isCorrect ? "#16a34a" : isWrong ? "#dc2626" : "#94a3b8") : null;
 
               return (
-                <div key={qi} style={{ borderRadius:20, border:`1.5px solid ${cardBorder}`, background:submitted?(isCorrect?"rgba(20,184,166,.06)":isWrong?"rgba(232,121,249,.06)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)"):"linear-gradient(145deg,#EDF1F7,#E4E9F2)", overflow:"hidden", boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #FFF", transition:"all .2s" }}>
+                <div key={qi} className="qz-card" style={{ borderRadius:20, border:`1.5px solid ${cardBorder}`, background:submitted?(isCorrect?"rgba(20,184,166,.06)":isWrong?"rgba(232,121,249,.06)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)"):"linear-gradient(145deg,#EDF1F7,#E4E9F2)", overflow:"hidden", boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #FFF", transition:"all .2s" }}>
                   {/* Question header */}
-                  <div style={{ padding:"14px 18px", borderBottom:`1px solid ${cardBorder}`, display:"flex", alignItems:"flex-start", gap:12,
+                  <div className="qz-card-head" style={{ padding:"14px 18px", borderBottom:`1px solid ${cardBorder}`, display:"flex", alignItems:"flex-start", gap:12,
                     background: submitted ? (isCorrect ? "linear-gradient(140deg,rgba(20,184,166,.14),rgba(94,234,212,.07))" : isWrong ? "linear-gradient(140deg,rgba(232,121,249,.13),rgba(248,113,113,.07))" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)") : "linear-gradient(145deg,#E4E9F2,#EDF1F7)" }}>
                     <div style={{ width:30, height:30, borderRadius:9, background: submitted ? (isCorrect?"#22c55e":isWrong?"#ef4444":"#e2e8f0") : "linear-gradient(135deg,#3b82f6,#6366f1)",
                       display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, boxShadow:"0 2px 6px rgba(0,0,0,.12)" }}>
                       <span style={{ fontSize:12, fontWeight:900, color:"#fff" }}>{submitted ? statusIcon : `Q${qi+1}`}</span>
                     </div>
-                    <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a", margin:0, lineHeight:1.6, flex:1 }}>{q.q}</p>
+                    <p className="qz-question-text" style={{ fontWeight:700, fontSize:14.5, color:"#0f172a", margin:0, lineHeight:1.6, flex:1 }}>{q.q}</p>
                   </div>
 
                   {/* Options */}
@@ -11410,8 +11414,9 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
                       if (isCorrectOpt) { bg="#f0fdf4"; border="#22c55e"; color="#15803d"; labelBg="#22c55e"; labelColor="#fff"; }
                       if (isWrongOpt)   { bg="#fef2f2"; border="#ef4444"; color="#dc2626"; labelBg="#ef4444"; labelColor="#fff"; }
                       const letters = ["A","B","C","D"];
+                      const isNeutralOpt = !isChosenOpt && !isCorrectOpt && !isWrongOpt;
                       return (
-                        <button key={oi} disabled={submitted}
+                        <button key={oi} disabled={submitted} className={isNeutralOpt ? "qz-option-neutral" : ""}
                           onClick={() => !submitted && setAnswers(p => ({...p, [qi]: oi}))}
                           style={{ textAlign:"left", padding:"11px 14px", borderRadius:13, border:`1.5px solid ${border}`, background: isChosenOpt&&!submitted ? "linear-gradient(140deg,rgba(139,92,246,.13),rgba(167,139,250,.07))" : isCorrectOpt ? "linear-gradient(140deg,rgba(20,184,166,.13),rgba(94,234,212,.07))" : isWrongOpt ? "linear-gradient(140deg,rgba(232,121,249,.13),rgba(248,113,113,.07))" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", color, cursor:submitted?"default":"pointer", fontSize:14, fontFamily:"inherit", fontWeight: isChosenOpt||isCorrectOpt ? 700 : 400, display:"flex", alignItems:"center", gap:12, transition:"all .15s", width:"100%", boxShadow: isChosenOpt||isCorrectOpt ? "none" : "6px 6px 14px #C4CDD9,-4px -4px 10px #FFF" }}>
                           <span style={{ width:26, height:26, borderRadius:8, background:labelBg, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:12, fontWeight:800, color:labelColor, boxShadow:"0 1px 3px rgba(0,0,0,.12)" }}>
