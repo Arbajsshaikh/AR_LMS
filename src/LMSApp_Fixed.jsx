@@ -6419,7 +6419,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -6808,6 +6808,212 @@ HARD REQUIREMENTS:
 
 
 
+  const genFormulaSheet = async (day, opts={}) => {
+    const k = day.key;
+    const busyKey = `fm-${k}`;
+    setBusyKey(busyKey, true);
+    setPendingGen(p => ({ ...p, [busyKey]: { type: "formulaSheet", topic: day.topic, startedAt: Date.now() } }));
+    try {
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const subTopicList = subTopics
+        ? subTopics.split("\n").map(s => s.trim()).filter(Boolean)
+        : [];
+      const subTopicsSection = subTopicList.length > 0
+        ? `\n\nSub-topics to cover in full mathematical depth:\n${subTopicList.map((s, i) => `${i + 1}. ${s}`).join("\n")}\n`
+        : "";
+
+      const text = await callAI([
+        { role:"system", content:`You are a world-class mathematics educator and data science professor who explains every concept with COMPLETE mathematical rigour, worked examples, diagrams (using ASCII/Unicode art), step-by-step derivations, intuitive explanations, and visual flows. Your explanations are simultaneously mathematically precise AND beginner-friendly. You NEVER skip steps. You ALWAYS show the full calculation on a concrete example, then generalise. You use tables, arrows, boxes, and structured layouts to make abstract maths visible.` },
+        { role:"user", content:`Create a COMPLETE Mathematical Formula Sheet & Visual Explainer for: "${day.topic}".${subTopicsSection}
+
+Your output must be the most thorough, visually rich mathematical explanation possible — treat this like a university lecture notes document combined with a visual textbook. Follow EVERY instruction below exactly.
+
+---
+
+## 🎯 SECTION 1: TOPIC OVERVIEW & MATHEMATICAL INTUITION
+Write 3 paragraphs:
+1. What problem does this topic solve? What real-world scenario motivates it? Give a CONCRETE example with real numbers.
+2. The core mathematical idea — explain the intuition BEFORE any formula. Use an analogy. 
+3. How ALL the sub-topics relate to each other — draw this as an ASCII hierarchy or flow.
+
+---
+
+## 🔢 SECTION 2: COMPLETE FORMULA REFERENCE
+For EVERY formula related to the topic and each sub-topic:
+
+### Formula Name
+**Formula:**  
+\`\`\`
+[Write the full mathematical formula using proper notation — e.g. TF(t,d) = f(t,d) / Σ f(t',d)]
+\`\`\`
+
+**What each symbol means:**
+| Symbol | Meaning | Example value |
+|--------|---------|---------------|
+| [sym1] | [plain English meaning] | [concrete number] |
+| [sym2] | [plain English meaning] | [concrete number] |
+
+**Intuition:** [ONE sentence — what is this formula actually measuring or doing?]
+
+**When to use it:** [describe the scenario]
+
+**Step-by-step worked example:**
+Given: [concrete input — real words, real numbers, real data]
+Step 1: [calculation]
+Step 2: [calculation]  
+Step 3: [calculation]
+Result: [final answer with units/interpretation]
+
+---
+
+## 📊 SECTION 3: END-TO-END WORKED EXAMPLE WITH REAL DATA
+Choose ONE concrete, realistic mini-dataset and walk through EVERY formula on it. Use real English sentences (not placeholders).
+
+Example format for NLP: Use sentences like "the cat sat on the mat" and "the cat is fat".
+Example format for Neural Networks: Use input [0.5, 0.8] with real weights.
+
+**The Data:**
+[Show the raw input clearly — sentences, numbers, vectors, whatever is appropriate]
+
+**Step 1: [Sub-topic 1 name]**
+[Perform the full calculation on the real data. Show every arithmetic step. Use a table for the result.]
+
+| [col1] | [col2] | [col3] |
+|--------|--------|--------|
+| [val]  | [val]  | [val]  |
+
+**Step 2: [Sub-topic 2 name]**
+[Continue the calculation, referencing values from Step 1. Show every step.]
+
+[Continue for ALL sub-topics in sequence — never skip a sub-topic]
+
+**Final Result & Interpretation:**
+[What do the numbers mean? What decision would we make based on them?]
+
+---
+
+## 🔄 SECTION 4: VISUAL FLOWS & ARCHITECTURE DIAGRAMS
+For each sub-topic, draw the computation as an ASCII diagram showing the flow:
+
+\`\`\`
+[Example for BoW:]
+Raw Text → Tokenise → Vocabulary → Count Matrix → Bag of Words Vector
+  "the cat"    [the,cat]  [cat,is,    [[2,1,0,1],   [2,1,0,1]
+  "cat is big"            big,the]     [1,1,1,0]]
+
+[Example for Neural Network:]
+Input Layer        Hidden Layer       Output Layer
+  x₁ = 0.5  ──w₁₁=0.8──→  h₁ = σ(0.5×0.8 + 0.3×0.6) = σ(0.58) = 0.641
+  x₂ = 0.3  ──w₂₁=0.6──↗  
+             ──w₁₂=0.4──→  h₂ = σ(...)
+             ──w₂₂=0.9──↗                              ŷ = σ(...)
+\`\`\`
+
+Draw a separate diagram for EACH sub-topic showing:
+- The mathematical transformation at each step  
+- Actual computed values from Section 3
+- The direction of data flow with arrows
+
+---
+
+## 📐 SECTION 5: MATHEMATICAL DERIVATIONS (Show the Math Behind the Formula)
+For each major formula:
+1. Start from FIRST PRINCIPLES — why does this formula make sense?
+2. Show the algebraic derivation step by step
+3. Explain the intuition of each step in plain English
+4. Show what happens at edge cases (zero division, infinity, etc.)
+
+---
+
+## 🧮 SECTION 6: NUMERICAL SENSITIVITY ANALYSIS
+Pick 2–3 key formulas. Show what happens to the output when you:
+- Increase one input variable while holding others constant (with a mini-table)
+- Change the scale of the data
+- Hit boundary conditions
+
+\`\`\`
+Effect of vocabulary size on BoW sparsity:
+Vocab size │ Sentence length │ Non-zero % │ Memory impact
+     10    │       5         │    50%     │ low
+    100    │       5         │     5%     │ medium  
+  10,000   │       5         │   0.05%   │ high (sparse)
+\`\`\`
+
+---
+
+## 📈 SECTION 7: GRAPHS & PLOTS (described with ASCII art)
+For each sub-topic, draw or describe:
+- The shape of the mathematical function (sigmoid curve, convergence curve, etc.)
+- A convergence/loss plot for iterative methods
+- A 2D scatter plot if relevant
+- Before/after transformation plots
+
+\`\`\`
+[Example loss curve:]
+Loss
+ 1.0 │╲
+ 0.8 │ ╲
+ 0.6 │  ╲
+ 0.4 │   ╲___
+ 0.2 │       ─────────────  ← convergence
+ 0.0 └──────────────────────────────── Epochs
+      0  5  10  15  20  25  30
+\`\`\`
+
+---
+
+## 🔗 SECTION 8: FORMULA COMPARISON TABLE
+Create a master comparison table showing ALL formulas side by side:
+
+| Formula | What it computes | Input | Output | Range | When to prefer |
+|---------|-----------------|-------|--------|-------|---------------|
+| [name]  | [description]   | [type]| [type] | [e.g. 0–1] | [scenario] |
+
+---
+
+## ⚡ SECTION 9: QUICK REFERENCE CHEAT SHEET
+A scannable one-page summary:
+
+**[Sub-topic 1]**
+• Formula: \`[compact formula]\`
+• Input: [type] → Output: [type]  
+• Key insight: [one sentence]
+• Watch out for: [one gotcha]
+
+[Repeat for every sub-topic]
+
+---
+
+## 🧠 SECTION 10: MATHEMATICAL INTUITION BUILDER
+For each formula, answer:
+1. **"Why this formula and not something simpler?"** — what property does this formula have that makes it the right choice?
+2. **"What does a high/low value mean?"** — interpret the output in plain English
+3. **"What real decision does this enable?"** — how does a human/system act on this number?
+
+---
+
+HARD REQUIREMENTS — violating any is an error:
+- Every formula MUST have a complete worked example with REAL NUMBERS (not placeholders like "x₁")  
+- Every sub-topic listed must have: its own formula(s), its own worked example, its own ASCII diagram
+- Section 3 must use ONE CONSISTENT dataset throughout — the same input flows through ALL sub-topic calculations
+- All formulas must use proper mathematical notation with superscripts/subscripts using Unicode (₁ ₂ ₃ ⁻¹ etc.)
+- Tables must be properly formatted markdown
+- ASCII diagrams must be inside fenced code blocks
+- Never truncate or abbreviate — complete every section fully
+- If the topic is a neural network: show forward pass with actual numbers, backpropagation chain rule steps, gradient descent update, loss function calculation, and a convergence plot
+- If the topic is NLP/text vectorisation: use 2–3 real English sentences throughout, show the complete vocabulary, the full matrix, and all derived scores` }
+      ]);
+      updateDay(k, { formulaSheet: text, generatedForTopic: day.topic });
+      if (!opts.silent) notify("✅ Formula Sheet generated!");
+    } catch(e) {
+      if (!opts.silent) notify(`Formula Sheet: ${e.message}`, "err");
+      else throw e;
+    } finally {
+      setBusyKey(busyKey, false);
+      setPendingGen(p => { const n={...p}; delete n[busyKey]; return n; });
+    }
+  };
+
   const genTeachingGuide = async (day, opts={}) => {
     const k = day.key;
     const busyKey = `tg-${k}`;
@@ -6991,6 +7197,7 @@ Hard rules:
       { label: "Examples",       fn: () => genExamples(day,      { silent: true }) },
       { label: "Resources",      fn: () => genResources(day,     { silent: true }) },
       { label: "Assignment",     fn: () => genAssignment(day,    { silent: true }) },
+      { label: "Formula Sheet",  fn: () => genFormulaSheet(day,  { silent: true }) },
       { label: "Quiz",           fn: () => genQuiz(day,          { silent: true }) },
       { label: "Teaching Guide", fn: () => genTeachingGuide(day, { silent: true }) },
     ];
@@ -7005,7 +7212,7 @@ Hard rules:
         //   - 429 → 5s pause then retry
         //   - 2 × 429 in a row → auto-rotate model, then retry
         await withRLResilience(fn, { notifyFn: notify });
-        notify(`Day ${day.dayNum} [${i+1}/6]: ${label} ✓`);
+        notify(`Day ${day.dayNum} [${i+1}/7]: ${label} ✓`);
       } catch (e) {
         // Only truly fatal errors (bad key, no internet) land here
         failed.push(`${label}: ${e.message}`);
@@ -7015,7 +7222,7 @@ Hard rules:
     if (failed.length) {
       notify(`Day ${day.dayNum}: ${failed.length} step(s) could not complete — ${failed[0]}`, "err");
     } else {
-      notify(`Day ${day.dayNum}: all 6 sections generated ✓`);
+      notify(`Day ${day.dayNum}: all 7 sections generated ✓`);
     }
   };
 
@@ -8045,7 +8252,7 @@ Hard rules:
                   </div>
                 </div>
               )}
-              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} darkMode={darkMode} onGenWeek={async(days,onProgress)=>{
+              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} onGenWeek={async(days,onProgress)=>{
                 // Sequential, rate-limit-resilient week generation.
                 // 429 → pause 5s; 2×429 same model → auto-switch model; never aborts mid-batch.
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
@@ -8105,6 +8312,7 @@ Hard rules:
                   onGenExamples={()=>genExamples(selDay)}
                   onGenResources={()=>genResources(selDay)}
                   onGenAssignment={()=>genAssignment(selDay)}
+                  onGenFormulaSheet={()=>genFormulaSheet(selDay)}
                   onGenTeachingGuide={()=>genTeachingGuide(selDay)}
                   onGenQuiz={()=>genQuiz(selDay)}
                   onGenAll={()=>genAllForDay(selDay)}
@@ -8702,42 +8910,8 @@ Day 2: [Topic]
 /* ═══════════════════════════════════════════════════════════════════
    CALENDAR PAGE — FIX 10: responsive layout
 ═══════════════════════════════════════════════════════════════════ */
-function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides, onDeleteDay, darkMode = false }) {
+function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides, onDeleteDay }) {
   const todayK = todayKey();
-
-  // ── Dark-mode color tokens ───────────────────────────────────────
-  const D = {
-    card:       darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)",
-    cardFlat:   darkMode ? "#1e293b"  : "#EDF1F7",
-    inset:      darkMode ? "linear-gradient(145deg,#162032,#1e293b)" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)",
-    modalBg:    darkMode ? "linear-gradient(145deg,#1a2433,#111827)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)",
-    nonPlanDay: darkMode ? "#1a2234" : "#fafafa",
-    border:     darkMode ? "#2a3a52" : "#fff",
-    borderMid:  darkMode ? "#334155" : "#C4CDD9",
-    shadow:     darkMode ? "20px 20px 48px #0a0f1a,-12px -12px 32px #243349" : "20px 20px 48px #C4CDD9,-12px -12px 32px #fff",
-    shadowSm:   darkMode ? "6px 6px 14px #0a0f1a,-4px -4px 10px #243349"   : "6px 6px 14px #C4CDD9,-4px -4px 10px #fff",
-    shadowInset:darkMode ? "inset 3px 3px 8px #0a0f1a,inset -2px -2px 6px #243349" : "inset 3px 3px 8px #C4CDD9,inset -2px -2px 6px #fff",
-    shadowBtn:  darkMode ? "4px 4px 10px #0a0f1a,-3px -3px 8px #243349"    : "4px 4px 10px #C4CDD9,-3px -3px 8px #fff",
-    textPrimary:darkMode ? "#e2e8f0" : "#0f172a",
-    textMuted:  darkMode ? "#94a3b8" : "#475569",
-    textFaint:  darkMode ? "#64748b" : "#64748B",
-    textSubtle: darkMode ? "#64748b" : "#94a3b8",
-    holBg:      darkMode ? "rgba(251,191,36,.1)"   : "#fffbeb",
-    holBorder:  darkMode ? "rgba(251,191,36,.35)"  : "#fde68a",
-    holText:    darkMode ? "#fde68a" : "#92400e",
-    speBg:      darkMode ? "rgba(249,115,22,.1)"   : "#fff7ed",
-    speBorder:  darkMode ? "rgba(249,115,22,.35)"  : "#fed7aa",
-    speText:    darkMode ? "#fdba74" : "#9a3412",
-    extBg:      darkMode ? "rgba(139,92,246,.12)"  : "#f5f3ff",
-    extBorder:  darkMode ? "rgba(139,92,246,.4)"   : "#ddd6fe",
-    extText:    darkMode ? "#c4b5fd" : "#5b21b6",
-    weekRowBg:    darkMode ? "#1e293b" : "#f8fafc",
-    weekRowBorder:darkMode ? "#334155" : "#f1f5f9",
-    weekRowText:  darkMode ? "#94a3b8" : "#475569",
-    weekHdrBg:    darkMode ? "linear-gradient(145deg,#1e3a5f,#1e293b)" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)",
-    weekHdrBorder:darkMode ? "#2a3a52" : "#C4CDD9",
-    weekHdrText:  darkMode ? "#e2e8f0" : "#334155",
-  };
   const dim = daysInMonth(calYear, calMonth);
   const fw  = firstWeekday(calYear, calMonth);
   const cells = [...Array(fw).fill(null), ...Array.from({length:dim},(_,i)=>i+1)];
@@ -8894,15 +9068,15 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       {/* Inline confirm dialog — replaces window.confirm which is blocked in sandboxed iframes */}
       {confirmWeek && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,.65)", zIndex:9000, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div style={{ background:D.modalBg, borderRadius:24, padding:28, maxWidth:420, width:"100%", boxShadow:D.shadow, border:`1px solid ${D.border}` }}>
-            <p style={{ fontWeight:800, fontSize:16, color:D.textPrimary, marginBottom:10 }}>Generate Full Week?</p>
-            <p style={{ fontSize:13.5, color:D.textMuted, lineHeight:1.6, marginBottom:8 }}>
+          <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:28, maxWidth:420, width:"100%", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", border:"1px solid #fff" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:10 }}>Generate Full Week?</p>
+            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.6, marginBottom:8 }}>
               <strong>Mon {confirmWeek.monday.getDate()} – Fri {confirmWeek.endFri.getDate()}</strong> · {confirmWeek.weekDays.length} day(s)
             </p>
-            <div style={{ background:D.inset, border:`1px solid ${D.border}`, borderRadius:12, padding:"12px 16px", marginBottom:16, boxShadow:D.shadowInset, fontSize:12.5, color:D.textFaint, lineHeight:1.6 }}>
+            <div style={{ background:"linear-gradient(145deg,#E4E9F2,#EDF1F7)", border:"1px solid #fff", borderRadius:12, padding:"12px 16px", marginBottom:16, boxShadow:"inset 3px 3px 8px #C4CDD9,inset -2px -2px 6px #fff", fontSize:12.5, color:"#64748B", lineHeight:1.6 }}>
               {confirmWeek.weekDays.map(d => <div key={d.key}>Day {d.dayNum}: {d.topic}</div>)}
             </div>
-            <p style={{ fontSize:12.5, color:D.textSubtle, marginBottom:18 }}>
+            <p style={{ fontSize:12.5, color:"#94a3b8", marginBottom:18 }}>
               This will make {confirmWeek.weekDays.length * 6} sequential AI calls. It may take several minutes.
             </p>
             <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
@@ -8918,12 +9092,12 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       {/* ── Delete Day Confirm Dialog ── */}
       {confirmDeleteDay && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,.65)", zIndex:9200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div style={{ background:D.modalBg, borderRadius:24, padding:28, maxWidth:440, width:"100%", boxShadow:D.shadow, border:`1px solid ${D.border}` }}>
+          <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:28, maxWidth:440, width:"100%", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", border:"1px solid #fff" }}>
             <div style={{ width:42, height:42, background:"#fef2f2", borderRadius:11, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:14 }}>
               <Ic n="trash" s={20} c="#ef4444"/>
             </div>
-            <p style={{ fontWeight:800, fontSize:16, color:D.textPrimary, marginBottom:8 }}>Delete Day {confirmDeleteDay.dayNum}?</p>
-            <p style={{ fontSize:13.5, color:D.textMuted, lineHeight:1.65, marginBottom:8 }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:8 }}>Delete Day {confirmDeleteDay.dayNum}?</p>
+            <p style={{ fontSize:13.5, color:"#475569", lineHeight:1.65, marginBottom:8 }}>
               <strong>{confirmDeleteDay.topic}</strong>
             </p>
             <div style={{ background:"#fef2f2", border:"1px solid #fecaca", borderRadius:9, padding:"10px 14px", fontSize:13, color:"#dc2626", marginBottom:18, lineHeight:1.6 }}>
@@ -8947,37 +9121,37 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       {overrideModal && (
         <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,.65)", zIndex:9100, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}
           onClick={e=>{ if(e.target===e.currentTarget){ setOverrideModal(null); setOverrideLabel(""); } }}>
-          <div style={{ background:D.modalBg, borderRadius:24, padding:28, maxWidth:420, width:"100%", boxShadow:D.shadow, border:`1px solid ${D.border}` }}>
-            <p style={{ fontWeight:800, fontSize:16, color:D.textPrimary, marginBottom:4 }}>
+          <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:28, maxWidth:420, width:"100%", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", border:"1px solid #fff" }}>
+            <p style={{ fontWeight:800, fontSize:16, color:"#0f172a", marginBottom:4 }}>
               {overrideModal.mode === "edit" ? "Edit Day Override" : "Mark Day"}
             </p>
-            <p style={{ fontSize:12.5, color:D.textSubtle, marginBottom:18 }}>{overrideModal.dateKey}</p>
+            <p style={{ fontSize:12.5, color:"#94a3b8", marginBottom:18 }}>{overrideModal.dateKey}</p>
 
             {/* Type selector */}
             <div style={{ display:"flex", gap:8, marginBottom:16 }}>
               <button
                 onClick={()=>setOverrideType("holiday")}
-                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="holiday"?D.holBorder:D.borderMid}`, background:overrideType==="holiday"?D.holBg:(darkMode?"#1e293b":"#f8fafc"), color:overrideType==="holiday"?D.holText:D.textFaint, fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="holiday"?"#f59e0b":"#e2e8f0"}`, background:overrideType==="holiday"?"#fffbeb":"#f8fafc", color:overrideType==="holiday"?"#92400e":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
                 🏖️ Holiday
               </button>
               <button
                 onClick={()=>setOverrideType("special")}
-                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="special"?D.speBorder:D.borderMid}`, background:overrideType==="special"?D.speBg:(darkMode?"#1e293b":"#f8fafc"), color:overrideType==="special"?D.speText:D.textFaint, fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="special"?"#f97316":"#e2e8f0"}`, background:overrideType==="special"?"#fff7ed":"#f8fafc", color:overrideType==="special"?"#9a3412":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
                 ⭐ Special Day
               </button>
               <button
                 onClick={()=>setOverrideType("extra")}
-                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="extra"?D.extBorder:D.borderMid}`, background:overrideType==="extra"?D.extBg:(darkMode?"#1e293b":"#f8fafc"), color:overrideType==="extra"?D.extText:D.textFaint, fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+                style={{ flex:1, padding:"10px 0", borderRadius:10, border:`2px solid ${overrideType==="extra"?"#8b5cf6":"#e2e8f0"}`, background:overrideType==="extra"?"#f5f3ff":"#f8fafc", color:overrideType==="extra"?"#5b21b6":"#64748b", fontWeight:700, fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
                 📌 Extra
               </button>
             </div>
 
             {/* Type explanation */}
             <div style={{
-              background: overrideType==="holiday"?D.holBg: overrideType==="special"?D.speBg:D.extBg,
-              border:`1px solid ${overrideType==="holiday"?D.holBorder: overrideType==="special"?D.speBorder:D.extBorder}`,
+              background: overrideType==="holiday"?"#fffbeb": overrideType==="special"?"#fff7ed":"#f5f3ff",
+              border:`1px solid ${overrideType==="holiday"?"#fde68a": overrideType==="special"?"#fed7aa":"#ddd6fe"}`,
               borderRadius:9, padding:"9px 12px", marginBottom:14, fontSize:12.5,
-              color: overrideType==="holiday"?D.holText: overrideType==="special"?D.speText:D.extText,
+              color: overrideType==="holiday"?"#92400e": overrideType==="special"?"#9a3412":"#5b21b6",
               lineHeight:1.55
             }}>
               {overrideType==="holiday"
@@ -8987,7 +9161,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                 : "⤷ Adds a custom label on this date without consuming a plan slot. The plan is not shifted. Use for revision, mock tests, or ad-hoc sessions."}
             </div>
 
-            <label style={{ fontSize:12.5, fontWeight:600, color:D.textMuted, display:"block", marginBottom:6 }}>
+            <label style={{ fontSize:12.5, fontWeight:600, color:"#475569", display:"block", marginBottom:6 }}>
               {overrideType==="holiday" ? "Holiday / Break Name" : overrideType==="special" ? "Special Day Title" : "Extra Content Label"}
             </label>
             <input
@@ -9025,20 +9199,20 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:12 }}>
         <div>
           <h1 style={{ fontSize:26, fontWeight:800, background:"linear-gradient(135deg,#8B5CF6,#6366F1)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", letterSpacing:"-.5px" }}>Learning Calendar</h1>
-          <p style={{ color:D.textFaint, fontSize:13.5, marginTop:4 }}>
+          <p style={{ color:"#64748b", fontSize:13.5, marginTop:4 }}>
             Click any lesson day to open the full workspace
             {!studentMode && Object.keys(dayOverrides).length > 0 && (
               <span style={{ marginLeft:10 }}>
                 {Object.values(dayOverrides).filter(o=>o.type==="holiday").length > 0 &&
-                  <span style={{ background:D.holBg, color:D.holText, border:`1px solid ${D.holBorder}`, borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
+                  <span style={{ background:"#fffbeb", color:"#92400e", border:"1px solid #fde68a", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
                     🏖️ {Object.values(dayOverrides).filter(o=>o.type==="holiday").length} holiday{Object.values(dayOverrides).filter(o=>o.type==="holiday").length!==1?"s":""}
                   </span>}
                 {Object.values(dayOverrides).filter(o=>o.type==="special").length > 0 &&
-                  <span style={{ background:D.speBg, color:D.speText, border:`1px solid ${D.speBorder}`, borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
+                  <span style={{ background:"#fff7ed", color:"#9a3412", border:"1px solid #fed7aa", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px", marginRight:4 }}>
                     ⭐ {Object.values(dayOverrides).filter(o=>o.type==="special").length} special
                   </span>}
                 {Object.values(dayOverrides).filter(o=>o.type==="extra").length > 0 &&
-                  <span style={{ background:D.extBg, color:D.extText, border:`1px solid ${D.extBorder}`, borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px" }}>
+                  <span style={{ background:"#f5f3ff", color:"#5b21b6", border:"1px solid #ddd6fe", borderRadius:99, fontSize:11, fontWeight:700, padding:"1px 8px" }}>
                     📌 {Object.values(dayOverrides).filter(o=>o.type==="extra").length} extra
                   </span>}
               </span>
@@ -9071,7 +9245,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
           <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:12 }}>
             <div style={{ width:52, height:52, position:"relative", flexShrink:0 }}>
               <svg viewBox="0 0 36 36" width="52" height="52">
-                <circle cx="18" cy="18" r="15.9" fill="none" stroke={darkMode?"#1e293b":"#f1f5f9"} strokeWidth="3.5"/>
+                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#f1f5f9" strokeWidth="3.5"/>
                 <circle cx="18" cy="18" r="15.9" fill="none" stroke="#3b82f6" strokeWidth="3.5"
                   strokeDasharray={`${pct} ${100-pct}`} strokeDashoffset="25" strokeLinecap="round"
                   style={{ transition:"stroke-dasharray .5s ease" }}/>
@@ -9080,13 +9254,13 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
             </div>
             <div>
               <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Progress</p>
-              <p style={{ fontSize:16, fontWeight:800, color:D.textPrimary, lineHeight:1 }}>{completed}<span style={{ fontSize:12, color:"#94a3b8", fontWeight:500 }}>/{total}</span></p>
-              <p style={{ fontSize:11, color:D.textFaint, marginTop:2 }}>days done</p>
+              <p style={{ fontSize:16, fontWeight:800, color:"#0f172a", lineHeight:1 }}>{completed}<span style={{ fontSize:12, color:"#94a3b8", fontWeight:500 }}>/{total}</span></p>
+              <p style={{ fontSize:11, color:"#64748b", marginTop:2 }}>days done</p>
             </div>
           </div>
           {/* Streak */}
           <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:10 }}>
-            <div style={{ width:36, height:36, background: streak>0?(darkMode?"rgba(251,191,36,.12)":"#fffbeb"):(darkMode?"#1e293b":"#f8fafc"), borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>{streak>0?"🔥":"💤"}</div>
+            <div style={{ width:36, height:36, background: streak>0?"#fffbeb":"#f8fafc", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20 }}>{streak>0?"🔥":"💤"}</div>
             <div>
               <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Streak</p>
               <p style={{ fontSize:16, fontWeight:800, color: streak>0?"#f59e0b":"#94a3b8", lineHeight:1 }}>{streak} <span style={{ fontSize:11, fontWeight:500, color:"#94a3b8" }}>day{streak!==1?"s":""}</span></p>
@@ -9095,7 +9269,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
           {/* In Progress */}
           {inProgress > 0 && (
             <div className="lms-card" style={{ padding:"12px 16px", display:"flex", alignItems:"center", gap:10 }}>
-              <div style={{ width:36, height:36, background:darkMode?"rgba(251,191,36,.12)":"#fffbeb", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <div style={{ width:36, height:36, background:"#fffbeb", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center" }}>
                 <Ic n="zap" s={18} c="#f59e0b"/>
               </div>
               <div>
@@ -9112,7 +9286,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
               </div>
               <div>
                 <p style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".06em" }}>Est. Finish</p>
-                <p style={{ fontSize:13, fontWeight:700, color:darkMode?"#4ade80":"#15803d", lineHeight:1.2 }}>{estFinish}</p>
+                <p style={{ fontSize:13, fontWeight:700, color:"#15803d", lineHeight:1.2 }}>{estFinish}</p>
               </div>
             </div>
           )}
@@ -9122,7 +9296,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       {/* Month tabs — scrollable on mobile */}
       <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, WebkitOverflowScrolling:"touch", flexShrink:0 }}>
         {MONTHS_SHORT.map((m,i) => (
-          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"6px 16px", borderRadius:99, border:`1.5px solid ${calMonth===i?"transparent":D.borderMid}`, fontSize:12.5, fontWeight:700, cursor:"pointer", transition:"all .18s", flexShrink:0, background:calMonth===i?"linear-gradient(135deg,#8B5CF6,#6366F1)":D.card, color:calMonth===i?"#fff":D.textFaint, boxShadow:calMonth===i?"0 4px 14px rgba(99,102,241,.35),inset 0 1px 0 rgba(255,255,255,.2)":D.shadowSm, fontFamily:"inherit" }}>{m}</button>
+          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"6px 16px", borderRadius:99, border:`1.5px solid ${calMonth===i?"transparent":"#C4CDD9"}`, fontSize:12.5, fontWeight:700, cursor:"pointer", transition:"all .18s", flexShrink:0, background:calMonth===i?"linear-gradient(135deg,#8B5CF6,#6366F1)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)", color:calMonth===i?"#fff":"#64748B", boxShadow:calMonth===i?"0 4px 14px rgba(99,102,241,.35),inset 0 1px 0 rgba(255,255,255,.2)":"6px 6px 14px #C4CDD9,-4px -4px 10px #fff", fontFamily:"inherit" }}>{m}</button>
         ))}
       </div>
 
@@ -9130,9 +9304,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       <div className="lms-cal-grid" style={{ display:"grid", gridTemplateColumns:"1fr 270px", gap:18, alignItems:"start" }}>
         <div className="lms-card" style={{ padding:20 }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-            <button onClick={prev} style={{ background:D.card, border:`1px solid ${D.border}`, cursor:"pointer", padding:"6px 8px", borderRadius:10, color:D.textFaint, boxShadow:D.shadowBtn }}><Ic n="chevL" s={18}/></button>
-            <span className="cal-month-label" style={{ fontWeight:700, fontSize:16, color:D.textPrimary }}>{MONTHS_FULL[calMonth]} {calYear}</span>
-            <button onClick={next} style={{ background:D.card, border:`1px solid ${D.border}`, cursor:"pointer", padding:"6px 8px", borderRadius:10, color:D.textFaint, boxShadow:D.shadowBtn }}><Ic n="chevR" s={18}/></button>
+            <button onClick={prev} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevL" s={18}/></button>
+            <span className="cal-month-label" style={{ fontWeight:700, fontSize:16, color:"#0f172a" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
+            <button onClick={next} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevR" s={18}/></button>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:8 }}>
             {DAYS_HDR.map(d => <div key={d} className="cal-hdr-day" style={{ textAlign:"center", fontSize:11.5, fontWeight:800, color:"#8B5CF6", padding:"4px 0" }}>{d}</div>)}
@@ -9156,17 +9330,16 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
               const tsc = trainerStatus ? STATUS_CFG[trainerStatus] : null;
 
               // Visual config for overrides
-              // Override colours come from D tokens (dark-mode aware)
-              const holBg=D.holBg, holBorder=D.holBorder, holText=D.holText;
-              const extBg=D.extBg, extBorder=D.extBorder, extText=D.extText;
-              const speBg=D.speBg, speBorder=D.speBorder, speText=D.speText;
+              const holBg="#fffbeb", holBorder="#fde68a", holText="#92400e";
+              const extBg="#f5f3ff", extBorder="#ddd6fe", extText="#5b21b6";
+              const speBg="#fff7ed", speBorder="#fed7aa", speText="#9a3412";
 
               return (
                 <div key={idx}
                   className={`day-cell${isToday?" today":""}${hasPlan&&!isHoliday&&!isSpecial?" has-plan":""}`}
                   style={{
-                    background: isHoliday ? D.holBg : isSpecial ? D.speBg : isExtra ? D.extBg : hasPlan ? sc.bg : D.nonPlanDay,
-                    borderColor: isHoliday ? D.holBorder : isSpecial ? D.speBorder : isExtra ? D.extBorder : hasPlan ? sc.border : D.borderMid,
+                    background: isHoliday ? holBg : isSpecial ? speBg : isExtra ? extBg : hasPlan ? sc.bg : "#fafafa",
+                    borderColor: isHoliday ? holBorder : isSpecial ? speBorder : isExtra ? extBorder : hasPlan ? sc.border : "#f1f5f9",
                     cursor: (hasPlan && !isHoliday && !isSpecial) || isExtra || isSpecial ? "pointer" : "default",
                     position:"relative",
                   }}
@@ -9179,7 +9352,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   }}>
 
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <span className="cal-day-num" style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6": isHoliday?D.holText : isSpecial?D.speText : isExtra?D.extText : D.textMuted }}>{day}</span>
+                    <span className="cal-day-num" style={{ fontSize:13, fontWeight: isToday?800:600, color: isToday?"#3b82f6": isHoliday?holText : isSpecial?speText : isExtra?extText : "#334155" }}>{day}</span>
                     <div style={{ display:"flex", gap:3, alignItems:"center" }}>
                       {isHoliday && <span style={{ fontSize:11 }}>🏖️</span>}
                       {isSpecial  && <span style={{ fontSize:11 }}>⭐</span>}
@@ -9190,17 +9363,17 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
 
                   {/* Content label */}
                   {isHoliday && (
-                    <div className="cal-hol-text" style={{ fontSize:10, color:D.holText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-hol-text" style={{ fontSize:10, color:holText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
                   {isSpecial && (
-                    <div className="cal-spe-text" style={{ fontSize:10, color:D.speText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-spe-text" style={{ fontSize:10, color:speText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
                   {isExtra && (
-                    <div className="cal-ext-text" style={{ fontSize:10, color:D.extText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
+                    <div className="cal-ext-text" style={{ fontSize:10, color:extText, fontWeight:600, lineHeight:1.3, marginTop:3, overflow:"hidden", display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical" }}>
                       {override.label}
                     </div>
                   )}
@@ -9223,7 +9396,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                     <button
                       title={override ? "Edit override" : "Add holiday or extra content"}
                       onClick={e=>{ e.stopPropagation(); openOverrideModal(k); }}
-                      style={{ position:"absolute", bottom:4, right:4, width:16, height:16, borderRadius:4, background: override?"#f59e0b":(darkMode?"#334155":"#e2e8f0"), border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, color: override?"#fff":"#94a3b8", opacity:0, transition:"opacity .15s", fontFamily:"inherit", lineHeight:1 }}
+                      style={{ position:"absolute", bottom:4, right:4, width:16, height:16, borderRadius:4, background: override?"#f59e0b":"#e2e8f0", border:"none", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, color: override?"#fff":"#94a3b8", opacity:0, transition:"opacity .15s", fontFamily:"inherit", lineHeight:1 }}
                       className="day-override-btn"
                     >
                       {override ? "✎" : "+"}
@@ -9252,7 +9425,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
             {Object.entries(STATUS_CFG).map(([s,sc]) => (
               <div key={s} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7 }}>
                 <span style={{ width:9, height:9, borderRadius:"50%", background:sc.dot, flexShrink:0 }}/>
-                <span style={{ fontSize:12.5, color:D.textMuted, fontWeight:500 }}>{sc.label}</span>
+                <span style={{ fontSize:12.5, color:"#475569", fontWeight:500 }}>{sc.label}</span>
                 <span style={{ marginLeft:"auto", fontWeight:700, fontSize:12, color:"#94a3b8" }}>{Object.values(dayStatus).filter(v=>v===s).length}</span>
               </div>
             ))}
@@ -9270,11 +9443,11 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   const isHol = ov.type==="holiday";
                   const isSpe = ov.type==="special";
                   return (
-                    <div key={k} style={{ padding:"9px 12px", borderRadius:10, background:isHol?D.holBg:isSpe?D.speBg:D.extBg, border:`1.5px solid ${isHol?D.holBorder:isSpe?D.speBorder:D.extBorder}`, cursor:!studentMode?"pointer":"default", display:"flex", justifyContent:"space-between", alignItems:"center" }}
+                    <div key={k} style={{ padding:"9px 12px", borderRadius:10, background:isHol?"#fffbeb":isSpe?"#fff7ed":"#f5f3ff", border:`1.5px solid ${isHol?"#fde68a":isSpe?"#fed7aa":"#ddd6fe"}`, cursor:!studentMode?"pointer":"default", display:"flex", justifyContent:"space-between", alignItems:"center" }}
                       onClick={()=>{ if(!studentMode) openOverrideModal(k); }}>
                       <div>
-                        <div style={{ fontSize:11, fontWeight:700, color:isHol?D.holText:isSpe?D.speText:D.extText }}>{isHol?"🏖️":isSpe?"⭐":"📌"} {MONTHS_SHORT[calMonth]} {d}</div>
-                        <div style={{ fontSize:12, color:isHol?D.holText:isSpe?D.speText:D.extText, fontWeight:500, marginTop:1 }}>{ov.label}</div>
+                        <div style={{ fontSize:11, fontWeight:700, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6" }}>{isHol?"🏖️":isSpe?"⭐":"📌"} {MONTHS_SHORT[calMonth]} {d}</div>
+                        <div style={{ fontSize:12, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6", fontWeight:500, marginTop:1 }}>{ov.label}</div>
                       </div>
                       {!studentMode && <Ic n="settings" s={12} c={isHol?"#f59e0b":isSpe?"#f97316":"#8b5cf6"}/>}
                     </div>
@@ -9329,9 +9502,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
               const monLabel = `${MONTHS_SHORT[week.monday.getMonth()]} ${week.monday.getDate()}`;
               const friLabel = `${MONTHS_SHORT[week.endFri.getMonth()]} ${week.endFri.getDate()}`;
               return (
-                <div key={week.weekKey} className="lms-card" style={{ borderRadius:10, border:`1.5px solid ${D.borderMid}`, overflow:"hidden", display:"flex", flexDirection:"column", padding:0 }}>
-                  <div style={{ padding:"10px 14px", background:D.weekHdrBg, borderBottom:`1px solid ${D.weekHdrBorder}`, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                    <span style={{ fontSize:12, fontWeight:700, color:D.weekHdrText }}>
+                <div key={week.weekKey} className="lms-card" style={{ borderRadius:10, border:"1.5px solid #e2e8f0", overflow:"hidden", display:"flex", flexDirection:"column", padding:0 }}>
+                  <div style={{ padding:"10px 14px", background:"linear-gradient(145deg,#E4E9F2,#EDF1F7)", borderBottom:"1px solid #C4CDD9", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontSize:12, fontWeight:700, color:"#334155" }}>
                       {monLabel} – {friLabel}
                     </span>
                     <span style={{ fontSize:11, color:"#94a3b8", fontWeight:500 }}>
@@ -9340,7 +9513,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   </div>
                   <div style={{ padding:"6px 12px 4px", flex:1 }}>
                     {week.weekDays.map(d => (
-                      <div key={d.key} style={{ fontSize:11.5, color:D.weekRowText, padding:"3px 0", borderBottom:`1px solid ${D.weekRowBorder}`, display:"flex", gap:6, alignItems:"center" }}>
+                      <div key={d.key} style={{ fontSize:11.5, color:"#475569", padding:"3px 0", borderBottom:"1px solid #f1f5f9", display:"flex", gap:6, alignItems:"center" }}>
                         <span style={{ color:"#3b82f6", fontWeight:700, minWidth:40, flexShrink:0 }}>Day {d.dayNum}</span>
                         <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.topic}</span>
                       </div>
@@ -9349,11 +9522,11 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   <div style={{ padding:"8px 12px" }}>
                     {isGenerating && weekProgress && (
                       <div style={{ marginBottom:8 }}>
-                        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:D.textFaint, marginBottom:4 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#64748b", marginBottom:4 }}>
                           <span>Generating… {weekProgress.done}/{weekProgress.total} steps</span>
                           <span>{Math.round(weekProgress.done/weekProgress.total*100)}%</span>
                         </div>
-                        <div style={{ height:5, borderRadius:99, background:D.borderMid, overflow:"hidden" }}>
+                        <div style={{ height:5, borderRadius:99, background:"#e2e8f0", overflow:"hidden" }}>
                           <div style={{ height:"100%", borderRadius:99, background:"#3b82f6", width:`${Math.round(weekProgress.done/weekProgress.total*100)}%`, transition:"width .3s ease" }}/>
                         </div>
                       </div>
@@ -10306,7 +10479,519 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
+/* ═══════════════════════════════════════════════════════════════════
+   FORMULA SHEET TAB  — Mathematical Formula & Visual Explainer
+═══════════════════════════════════════════════════════════════════ */
+function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId }) {
+  const k = day.key;
+  const content = dayData?.formulaSheet;
+  const [copied, setCopied] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+
+  // Track student view
+  useEffect(() => {
+    if (studentMode && trackActivity && content) {
+      trackActivity("formulaView", k, true);
+    }
+  }, [content, k, studentMode]);
+
+  const handleCopy = () => {
+    if (!content) return;
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleDownload = () => {
+    if (!content) return;
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Day${day.dayNum}_FormulaSheet_${(day.topic || "formulas").replace(/[^a-z0-9]/gi, "_")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    if (trackActivity && studentMode) trackActivity("formulaDownload", k, true);
+  };
+
+  // Parse content into sections for accordion display
+  const sections = content ? (() => {
+    const lines = content.split("\n");
+    const sectionList = [];
+    let current = null;
+    for (const line of lines) {
+      const m = line.match(/^## (.+)/);
+      if (m) {
+        if (current) sectionList.push(current);
+        current = { title: m[1], lines: [] };
+      } else if (current) {
+        current.lines.push(line);
+      }
+    }
+    if (current) sectionList.push(current);
+    return sectionList;
+  })() : [];
+
+  const filteredSections = searchQ.trim()
+    ? sections.filter(s =>
+        s.title.toLowerCase().includes(searchQ.toLowerCase()) ||
+        s.lines.join("\n").toLowerCase().includes(searchQ.toLowerCase())
+      )
+    : sections;
+
+  // Accent colors for sections
+  const SECTION_COLORS = [
+    { bar:"#8B5CF6", bg:"rgba(139,92,246,0.07)", icon:"🎯", badge:"#8B5CF6" },
+    { bar:"#6366F1", bg:"rgba(99,102,241,0.07)",  icon:"🔢", badge:"#6366F1" },
+    { bar:"#14B8A6", bg:"rgba(20,184,166,0.07)",  icon:"📊", badge:"#14B8A6" },
+    { bar:"#f59e0b", bg:"rgba(245,158,11,0.07)",  icon:"🔄", badge:"#f59e0b" },
+    { bar:"#ec4899", bg:"rgba(236,72,153,0.07)",  icon:"📐", badge:"#ec4899" },
+    { bar:"#22c55e", bg:"rgba(34,197,94,0.07)",   icon:"🧮", badge:"#22c55e" },
+    { bar:"#3b82f6", bg:"rgba(59,130,246,0.07)",  icon:"📈", badge:"#3b82f6" },
+    { bar:"#f97316", bg:"rgba(249,115,22,0.07)",  icon:"🔗", badge:"#f97316" },
+    { bar:"#a855f7", bg:"rgba(168,85,247,0.07)",  icon:"⚡", badge:"#a855f7" },
+    { bar:"#06b6d4", bg:"rgba(6,182,212,0.07)",   icon:"🧠", badge:"#06b6d4" },
+  ];
+
+  const [openSections, setOpenSections] = useState({});
+  const toggleSection = (i) => setOpenSections(p => ({ ...p, [i]: !p[i] }));
+  const expandAll = () => {
+    const all = {};
+    filteredSections.forEach((_, i) => { all[i] = true; });
+    setOpenSections(all);
+  };
+  const collapseAll = () => setOpenSections({});
+
+  // Render formula content (handles tables, code blocks, math)
+  const renderFormulaContent = (rawText) => {
+    if (!rawText?.trim()) return null;
+    const parts = rawText.split(/(```[\s\S]*?```)/g);
+    return parts.map((part, pi) => {
+      // Code block
+      const codeMatch = part.match(/^```(\w*)\n([\s\S]*?)```$/);
+      if (codeMatch) {
+        const lang = codeMatch[1] || "text";
+        const code = codeMatch[2];
+        const isAscii = lang === "" || lang === "text" || lang === "ascii";
+        return (
+          <div key={pi} style={{
+            borderRadius: 12,
+            overflow: "hidden",
+            margin: "14px 0",
+            boxShadow: "8px 8px 20px #C4CDD9,-5px -5px 14px #fff",
+            border: "1px solid rgba(255,255,255,0.05)",
+          }}>
+            <div style={{
+              background: isAscii ? "linear-gradient(135deg,#1e293b,#0f172a)" : "#141518",
+              padding: "8px 14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              borderBottom: "1px solid rgba(255,255,255,0.07)",
+            }}>
+              <div style={{ display:"flex", gap:6 }}>
+                <div style={{ width:10, height:10, borderRadius:"50%", background:"#FF5F57" }}/>
+                <div style={{ width:10, height:10, borderRadius:"50%", background:"#FEBC2E" }}/>
+                <div style={{ width:10, height:10, borderRadius:"50%", background:"#28C840" }}/>
+              </div>
+              <span style={{ fontSize:10, fontWeight:700, color:"#64748b", textTransform:"uppercase", letterSpacing:".08em" }}>
+                {isAscii ? "Diagram / ASCII Art" : lang}
+              </span>
+            </div>
+            <pre style={{
+              background: isAscii ? "linear-gradient(135deg,#0f172a,#1a2332)" : "#0d1117",
+              margin: 0,
+              padding: "14px 16px",
+              fontSize: 13,
+              lineHeight: 1.75,
+              color: isAscii ? "#7dd3fc" : "#e9e0cf",
+              overflowX: "auto",
+              fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
+              whiteSpace: "pre",
+            }}>{code}</pre>
+          </div>
+        );
+      }
+
+      // Table detection
+      if (part.includes("|") && part.split("\n").some(l => l.trim().startsWith("|"))) {
+        const tableLines = part.split("\n").filter(l => l.trim().startsWith("|"));
+        if (tableLines.length >= 2) {
+          const headerCells = tableLines[0].split("|").map(c => c.trim()).filter(Boolean);
+          const bodyRows = tableLines.slice(2).map(l =>
+            l.split("|").map(c => c.trim()).filter(Boolean)
+          ).filter(r => r.length > 0);
+          const nonTableText = part.split("\n").filter(l => !l.trim().startsWith("|")).join("\n");
+          return (
+            <div key={pi}>
+              {nonTableText.trim() && <MdRenderer text={nonTableText} />}
+              <div style={{ overflowX:"auto", margin:"14px 0", borderRadius:14, boxShadow:"8px 8px 20px #C4CDD9,-5px -5px 14px #fff", border:"1px solid #fff" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13.5 }}>
+                  <thead>
+                    <tr style={{ background:"linear-gradient(135deg,#8B5CF6,#6366F1)" }}>
+                      {headerCells.map((h, hi) => (
+                        <th key={hi} style={{
+                          padding:"10px 14px", textAlign:"left", fontWeight:800,
+                          color:"#fff", fontSize:12, letterSpacing:".05em",
+                          textTransform:"uppercase", whiteSpace:"nowrap",
+                          borderRight: hi < headerCells.length - 1 ? "1px solid rgba(255,255,255,0.2)" : "none",
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bodyRows.map((row, ri) => (
+                      <tr key={ri} style={{
+                        background: ri % 2 === 0 ? "linear-gradient(145deg,#EDF1F7,#E4E9F2)" : "linear-gradient(145deg,#E8EDF4,#DDE3EE)",
+                        transition:"background .15s",
+                      }}
+                        onMouseEnter={e => e.currentTarget.style.background = "rgba(139,92,246,0.08)"}
+                        onMouseLeave={e => e.currentTarget.style.background = ri % 2 === 0 ? "linear-gradient(145deg,#EDF1F7,#E4E9F2)" : "linear-gradient(145deg,#E8EDF4,#DDE3EE)"}
+                      >
+                        {row.map((cell, ci) => (
+                          <td key={ci} style={{
+                            padding:"9px 14px", fontSize:13.5, color:"#1E2A3B",
+                            borderBottom:"1px solid rgba(196,205,217,0.4)",
+                            borderRight: ci < row.length - 1 ? "1px solid rgba(196,205,217,0.3)" : "none",
+                            fontFamily: cell.match(/^[\d\s\.\-\+×÷=≈∑∫∂]+$/) ? "'JetBrains Mono','Fira Code',monospace" : "inherit",
+                          }}>{cell}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        }
+      }
+
+      return <MdRenderer key={pi} text={part} />;
+    });
+  };
+
+  return (
+    <div style={{ animation:"lms-in .2s ease" }}>
+
+      {/* ── Header banner ── */}
+      <div style={{
+        background:"linear-gradient(135deg,#1e293b,#0f172a)",
+        borderRadius:16, padding:"18px 20px", marginBottom:20,
+        display:"flex", alignItems:"center", gap:14, flexWrap:"wrap",
+      }}>
+        <div style={{
+          width:48, height:48,
+          background:"linear-gradient(135deg,#8B5CF6,#6366F1)",
+          borderRadius:14, display:"flex", alignItems:"center",
+          justifyContent:"center", fontSize:24, flexShrink:0,
+          boxShadow:"0 4px 18px rgba(139,92,246,.5)",
+        }}>🧮</div>
+        <div style={{ flex:1, minWidth:180 }}>
+          <p style={{ fontWeight:800, fontSize:15, color:"#f8f9fa", margin:0, letterSpacing:"-.2px" }}>
+            Mathematical Formula Sheet — Day {day?.dayNum}: {day?.topic}
+          </p>
+          <p style={{ fontSize:12, color:"#94a3b8", margin:"3px 0 0" }}>
+            {content
+              ? `${sections.length} sections · Complete formula reference with worked examples, diagrams & proofs`
+              : "Generate comprehensive mathematical formulas, derivations, visual flows and step-by-step worked examples for every concept"}
+          </p>
+        </div>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+          {!studentMode && (
+            <button
+              className="lms-btn"
+              style={{
+                background: busy[`fm-${k}`]
+                  ? "rgba(139,92,246,0.3)"
+                  : "linear-gradient(135deg,#8B5CF6,#6366F1)",
+                color:"#fff", padding:"9px 18px", fontSize:13, fontWeight:700,
+              }}
+              disabled={!!busy[`fm-${k}`]}
+              onClick={onGenFormulaSheet}
+            >
+              {busy[`fm-${k}`]
+                ? <><Spin s={13}/>Generating…</>
+                : <><span style={{ fontSize:15 }}>🧮</span>{content ? " Regenerate" : " Generate Formula Sheet"}</>}
+            </button>
+          )}
+          {content && (
+            <>
+              <button
+                className="lms-btn lms-btn-ghost"
+                style={{ fontSize:13, padding:"9px 14px", background:"rgba(255,255,255,0.08)", color:"#e2e8f0", border:"1px solid rgba(255,255,255,0.15)" }}
+                onClick={handleCopy}
+              >
+                {copied ? "✅ Copied!" : "📋 Copy"}
+              </button>
+              <button
+                className="lms-btn lms-btn-ghost"
+                style={{ fontSize:13, padding:"9px 14px", background:"rgba(255,255,255,0.08)", color:"#e2e8f0", border:"1px solid rgba(255,255,255,0.15)" }}
+                onClick={handleDownload}
+              >
+                <Ic n="download" s={13} c="#e2e8f0"/>Download .md
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ── No content state ── */}
+      {!content && !busy[`fm-${k}`] && (
+        <div style={{
+          background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+          borderRadius:20, border:"1px solid #fff",
+          boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff",
+          padding:"52px 32px", textAlign:"center",
+        }}>
+          <div style={{ fontSize:64, marginBottom:16 }}>🧮</div>
+          <p style={{ fontWeight:800, fontSize:18, color:"#1E2A3B", marginBottom:8 }}>No Formula Sheet yet</p>
+          <p style={{ fontSize:14, color:"#64748b", lineHeight:1.7, maxWidth:520, margin:"0 auto 24px" }}>
+            {studentMode
+              ? "Your trainer hasn't generated the formula sheet for this topic yet. Check back soon."
+              : "Generate a complete mathematical reference: every formula with derivations, step-by-step worked examples on real data, ASCII diagrams, tables, sensitivity analysis, and visual flows — all in one place."}
+          </p>
+          {!studentMode && (
+            <button
+              className="lms-btn"
+              style={{ background:"linear-gradient(135deg,#8B5CF6,#6366F1)", color:"#fff", fontSize:15, padding:"12px 32px", margin:"0 auto" }}
+              onClick={onGenFormulaSheet}
+            >
+              🧮 Generate Formula Sheet
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Generating spinner ── */}
+      {busy[`fm-${k}`] && (
+        <div style={{
+          background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+          borderRadius:20, border:"1px solid #fff",
+          boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff",
+          padding:"52px 32px", textAlign:"center",
+        }}>
+          <div style={{ display:"flex", justifyContent:"center", marginBottom:20 }}>
+            <div style={{
+              width:56, height:56,
+              background:"linear-gradient(135deg,#8B5CF6,#6366F1)",
+              borderRadius:16, display:"flex", alignItems:"center", justifyContent:"center",
+              animation:"lms-spin 1.2s linear infinite",
+              boxShadow:"0 4px 18px rgba(139,92,246,.4)",
+            }}>
+              <span style={{ fontSize:26 }}>🧮</span>
+            </div>
+          </div>
+          <p style={{ fontWeight:800, fontSize:17, color:"#1E2A3B", marginBottom:8 }}>Generating Formula Sheet…</p>
+          <p style={{ fontSize:13, color:"#64748b", lineHeight:1.7 }}>
+            Building complete mathematical reference with formulas, derivations,<br/>
+            worked examples, diagrams and visual flows. This may take 30–60 seconds.
+          </p>
+          <div style={{ marginTop:20, display:"flex", justifyContent:"center", gap:16, flexWrap:"wrap" }}>
+            {["📐 Formulas","🔢 Derivations","📊 Worked Examples","🔄 Visual Flows","📈 Graphs","🧠 Intuition"].map(s => (
+              <span key={s} style={{
+                fontSize:12, fontWeight:700, color:"#8B5CF6",
+                background:"rgba(139,92,246,0.1)", border:"1px solid rgba(139,92,246,0.25)",
+                borderRadius:99, padding:"4px 12px",
+              }}>{s}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Content: accordion sections ── */}
+      {content && sections.length > 0 && (
+        <div>
+          {/* Search + controls */}
+          <div style={{
+            display:"flex", gap:10, alignItems:"center", flexWrap:"wrap",
+            marginBottom:16, padding:"12px 16px",
+            background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+            borderRadius:14, border:"1px solid #fff",
+            boxShadow:"6px 6px 14px #C4CDD9,-4px -4px 10px #fff",
+          }}>
+            <div style={{ flex:1, position:"relative", minWidth:200 }}>
+              <input
+                className="lms-input"
+                placeholder="🔍  Search formulas, sections, symbols…"
+                value={searchQ}
+                onChange={e => setSearchQ(e.target.value)}
+                style={{ padding:"8px 14px 8px 36px", fontSize:13 }}
+              />
+              <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", fontSize:15, pointerEvents:"none" }}>🔍</span>
+            </div>
+            <span style={{ fontSize:12, color:"#64748b", fontWeight:600, whiteSpace:"nowrap" }}>
+              {filteredSections.length}/{sections.length} sections
+            </span>
+            <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"7px 12px" }} onClick={expandAll}>
+              ⊕ Expand All
+            </button>
+            <button className="lms-btn lms-btn-ghost" style={{ fontSize:12, padding:"7px 12px" }} onClick={collapseAll}>
+              ⊖ Collapse All
+            </button>
+          </div>
+
+          {/* Quick-jump chips */}
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
+            {filteredSections.map((s, i) => {
+              const c = SECTION_COLORS[i % SECTION_COLORS.length];
+              return (
+                <button key={i}
+                  onClick={() => {
+                    setOpenSections(p => ({ ...p, [i]: true }));
+                    setTimeout(() => {
+                      document.getElementById(`formula-section-${i}`)?.scrollIntoView({ behavior:"smooth", block:"start" });
+                    }, 80);
+                  }}
+                  style={{
+                    fontSize:11.5, fontWeight:700, padding:"4px 12px", borderRadius:99,
+                    border:`1.5px solid ${c.badge}44`, background:`${c.badge}11`,
+                    color:c.badge, cursor:"pointer", fontFamily:"inherit",
+                    transition:"all .15s",
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = `${c.badge}22`; e.currentTarget.style.transform = "translateY(-1px)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = `${c.badge}11`; e.currentTarget.style.transform = "none"; }}
+                >
+                  {c.icon} {s.title.replace(/^[🎯🔢📊🔄📐🧮📈🔗⚡🧠]\s*/, "").replace(/^SECTION \d+:\s*/i, "")}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Sections accordion */}
+          <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+            {filteredSections.map((section, si) => {
+              const c = SECTION_COLORS[si % SECTION_COLORS.length];
+              const isOpen = !!openSections[si];
+              const sectionText = section.lines.join("\n");
+
+              return (
+                <div
+                  key={si}
+                  id={`formula-section-${si}`}
+                  style={{
+                    background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+                    borderRadius:18, border:`1px solid #fff`,
+                    boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff",
+                    overflow:"hidden",
+                    borderLeft:`4px solid ${c.bar}`,
+                    transition:"box-shadow .2s",
+                  }}
+                >
+                  {/* Section header — always visible */}
+                  <button
+                    onClick={() => toggleSection(si)}
+                    style={{
+                      width:"100%", display:"flex", alignItems:"center", gap:14,
+                      padding:"14px 20px", background:"transparent", border:"none",
+                      cursor:"pointer", fontFamily:"inherit", textAlign:"left",
+                    }}
+                  >
+                    <div style={{
+                      width:38, height:38, borderRadius:11, flexShrink:0,
+                      background:`linear-gradient(135deg,${c.bar},${c.badge}aa)`,
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                      fontSize:18,
+                      boxShadow:`0 3px 12px ${c.bar}44`,
+                    }}>
+                      {c.icon}
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontWeight:800, fontSize:14.5, color:"#1E2A3B", lineHeight:1.3 }}>
+                        {section.title}
+                      </div>
+                      <div style={{ fontSize:11.5, color:"#64748b", marginTop:2 }}>
+                        {section.lines.filter(l => l.trim().startsWith("###")).length} sub-sections ·{" "}
+                        {section.lines.filter(l => l.trim().startsWith("```")).length / 2 | 0} code blocks ·{" "}
+                        {section.lines.filter(l => l.includes("|")).length > 3 ? "tables included" : ""}
+                      </div>
+                    </div>
+                    <div style={{
+                      width:28, height:28, borderRadius:8,
+                      background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+                      boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff",
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                      flexShrink:0, fontSize:14, color:"#64748b",
+                      transition:"transform .2s",
+                      transform: isOpen ? "rotate(180deg)" : "none",
+                    }}>▾</div>
+                  </button>
+
+                  {/* Section body */}
+                  {isOpen && (
+                    <div style={{
+                      padding:"4px 20px 20px",
+                      borderTop:`1px solid rgba(196,205,217,0.4)`,
+                      animation:"lms-in .2s ease",
+                    }}>
+                      {/* Highlight search terms */}
+                      <div className="pr-body" style={{ marginTop:12 }}>
+                        {renderFormulaContent(sectionText)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* If no sections after search */}
+          {filteredSections.length === 0 && (
+            <div style={{
+              textAlign:"center", padding:"40px 20px",
+              background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+              borderRadius:16, border:"1px solid #fff",
+              boxShadow:"8px 8px 20px #C4CDD9,-5px -5px 14px #fff",
+            }}>
+              <div style={{ fontSize:36, marginBottom:10 }}>🔍</div>
+              <p style={{ fontWeight:700, color:"#1E2A3B" }}>No sections match "{searchQ}"</p>
+              <button className="lms-btn lms-btn-ghost" style={{ marginTop:12, fontSize:12 }} onClick={() => setSearchQ("")}>
+                Clear search
+              </button>
+            </div>
+          )}
+
+          {/* Raw markdown fallback — if no H2 sections detected */}
+          {sections.length === 0 && content && (
+            <div style={{
+              background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+              borderRadius:20, border:"1px solid #fff",
+              boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff",
+              padding:22,
+            }}>
+              <div className="pr-body">
+                <MdRenderer text={content} />
+              </div>
+            </div>
+          )}
+
+          {/* Footer info card */}
+          <div style={{
+            marginTop:16, padding:"14px 18px",
+            background:"linear-gradient(135deg,rgba(139,92,246,0.08),rgba(99,102,241,0.06))",
+            border:"1.5px solid rgba(139,92,246,0.2)", borderRadius:14,
+            display:"flex", gap:12, alignItems:"flex-start", flexWrap:"wrap",
+          }}>
+            <span style={{ fontSize:20, flexShrink:0 }}>💡</span>
+            <div>
+              <p style={{ fontWeight:700, fontSize:13, color:"#5b21b6", marginBottom:3 }}>How to use this Formula Sheet</p>
+              <p style={{ fontSize:12.5, color:"#64748b", lineHeight:1.7 }}>
+                Use the <strong>search bar</strong> to jump to any formula or symbol. Click any section to expand it.
+                Each section has <strong>worked examples</strong> with real numbers — trace through them step by step.
+                ASCII diagrams show the <strong>data flow</strong>. Tables let you compare formulas side by side.
+                Download as Markdown to keep as offline reference notes.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -10343,6 +11028,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
     { id:"examples",  label:"⚡ Examples" },
     { id:"resources", label:"📂 Resources" },
     { id:"assignment",label:"📝 Assignment" },
+    { id:"formula",   label:"🧮 Formulas" },
     { id:"quiz",      label:"🎯 Quiz" },
     // Data Generator tab: always visible for trainers; for students only if trainer has published data
     ...(!studentMode || dayData?.dataGenerator ? [{ id:"data", label:"🗃️ Data Generator" }] : []),
@@ -10852,6 +11538,23 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
             <EmptyState icon="clip" title="No assignment yet" text="Generate a complete assignment with theory questions, coding challenges, and mini project." />
           )}
         </div>
+      )}
+
+      {/* ── FORMULA SHEET ── */}
+      {tab==="formula" && (
+        <FormulaSheetTab
+          day={day}
+          dayData={dayData}
+          busy={busy}
+          onGenFormulaSheet={onGenFormulaSheet}
+          updateDay={updateDay}
+          notify={notify}
+          studentMode={studentMode}
+          trackActivity={trackActivity}
+          sb={sb}
+          courseId={courseId}
+          studentId={studentId}
+        />
       )}
 
       {/* ── QUIZ ── */}
