@@ -3498,7 +3498,7 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
    Lists all enrolled students; clicking a name loads and shows their
    full StudentDashboard (read-only) with data from Supabase.
 ═══════════════════════════════════════════════════════════════════ */
-function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
+function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {}, darkMode = false }) {
   const [students,    setStudents]    = useState([]);
   const [activityMap, setActivityMap] = useState({});   // { studentId: activityObj }
   const [statusMap,   setStatusMap]   = useState({});   // { studentId: { dayKey: status } }
@@ -3626,13 +3626,13 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
           const pctColor = sum.pct >= 75 ? "#16a34a" : sum.pct >= 40 ? "#d97706" : "#dc2626";
 
           return (
-            <div key={s.id} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:20, border:`1.5px solid ${isOpen?"rgba(139,92,246,.5)":"#fff"}`, boxShadow: isOpen ? "20px 20px 48px #C4CDD9,-12px -12px 32px #fff,0 0 0 2px rgba(139,92,246,.1)" : "12px 12px 28px #C4CDD9,-8px -8px 20px #fff", transition:"border-color .15s, box-shadow .15s", overflow:"hidden" }}>
+            <div key={s.id} style={{ background: darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:20, border:`1.5px solid ${isOpen?"rgba(139,92,246,.5)":(darkMode?"#2a3a52":"#fff")}`, boxShadow: isOpen ? (darkMode?"0 0 0 2px rgba(139,92,246,.18)":"20px 20px 48px #C4CDD9,-12px -12px 32px #fff,0 0 0 2px rgba(139,92,246,.1)") : (darkMode?"none":"12px 12px 28px #C4CDD9,-8px -8px 20px #fff"), transition:"border-color .15s, box-shadow .15s", overflow:"hidden" }}>
 
               {/* ── Clickable summary row ── */}
               <div
                 onClick={() => handleSelect(s.id)}
                 style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 18px", cursor:"pointer" }}
-                onMouseEnter={e => { if (!isOpen) e.currentTarget.style.background = "#f8fafc"; }}
+                onMouseEnter={e => { if (!isOpen) e.currentTarget.style.background = darkMode ? "#243249" : "#f8fafc"; }}
                 onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}
               >
                 {/* Avatar */}
@@ -3642,7 +3642,7 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
 
                 {/* Name + email */}
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:14, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                  <div style={{ fontWeight:700, fontSize:14, color: darkMode ? "#f1f5f9" : "#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
                   <div style={{ fontSize:11.5, color:"#94a3b8", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
                 </div>
 
@@ -3665,8 +3665,8 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
                   </div>
                   {/* Last seen */}
                   <div style={{ textAlign:"right", minWidth:72 }}>
-                    <div style={{ fontSize:11, color:"#64748b" }}>Last active</div>
-                    <div style={{ fontSize:11.5, fontWeight:600, color:"#334155" }}>{sum.lastSeen}</div>
+                    <div style={{ fontSize:11, color: darkMode ? "#94a3b8" : "#64748b" }}>Last active</div>
+                    <div style={{ fontSize:11.5, fontWeight:600, color: darkMode ? "#e2e8f0" : "#334155" }}>{sum.lastSeen}</div>
                   </div>
                   {/* Chevron */}
                   <div style={{ color:"#94a3b8", fontSize:18, transition:"transform .2s", transform: isOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
@@ -3676,13 +3676,13 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {} }) {
               </div>
 
               {/* ── Progress bar strip ── */}
-              <div style={{ height:4, background:"linear-gradient(145deg,#E4E9F2,#EDF1F7)", boxShadow:"inset 2px 2px 5px #C4CDD9", marginTop:-2 }}>
+              <div style={{ height:4, background: darkMode ? "#0f172a" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)", boxShadow: darkMode ? "none" : "inset 2px 2px 5px #C4CDD9", marginTop:-2 }}>
                 <div style={{ height:"100%", width:`${sum.pct}%`, background:`linear-gradient(90deg,${pctColor},${pctColor}88)`, transition:"width .5s" }} />
               </div>
 
               {/* ── Expanded student dashboard ── */}
               {isOpen && selectedStudent && (
-                <div style={{ borderTop:"1px solid #e8edf3", padding:"20px 18px", background:"#fafbfc" }}>
+                <div style={{ borderTop: darkMode ? "1px solid #2a3a52" : "1px solid #e8edf3", padding:"20px 18px", background: darkMode ? "#0f172a" : "#fafbfc" }}>
                   <StudentDashboard
                     planDays={planDays}
                     dayMap={dayMap}
@@ -3748,7 +3748,7 @@ function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen
 }
 
 /* ─── StudentsPanel (top-level to avoid remount on each render) ─── */
-function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) {
+function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen, darkMode = false }) {
   const [list, setList] = useState([]);
 
   // FIX: dual-query strategy so requests are never missed:
@@ -3819,30 +3819,30 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
   return (
     <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, zIndex:500, display:"flex" }} onClick={e=>{ if(e.target===e.currentTarget) setStudentsOpen(false); }}>
       <div style={{ width: collapsed ? 58 : 210, flexShrink:0 }} />
-      <div style={{ width:300, background:"linear-gradient(180deg,#EDF1F7 0%,#E4E9F2 100%)", borderRight:"1.5px solid #C4CDD9", display:"flex", flexDirection:"column", boxShadow:"8px 0 24px rgba(196,205,217,.4)", animation:"lms-slide .2s ease", height:"100vh", overflow:"hidden" }}>
-        <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid #f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+      <div style={{ width:300, background: darkMode ? "#111827" : "linear-gradient(180deg,#EDF1F7 0%,#E4E9F2 100%)", borderRight: darkMode ? "1.5px solid #1f2937" : "1.5px solid #C4CDD9", display:"flex", flexDirection:"column", boxShadow:"8px 0 24px rgba(196,205,217,.4)", animation:"lms-slide .2s ease", height:"100vh", overflow:"hidden" }}>
+        <div style={{ padding:"16px 16px 12px", borderBottom: darkMode ? "1px solid #1f2937" : "1px solid #f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
           <div>
-            <p style={{ fontWeight:700, fontSize:14, color:"#0f172a", margin:0 }}>Students</p>
+            <p style={{ fontWeight:700, fontSize:14, color: darkMode ? "#f1f5f9" : "#0f172a", margin:0 }}>Students</p>
             <p style={{ fontSize:11.5, color:"#94a3b8", margin:"2px 0 0 0" }}>{list.length} enrolled · {pending.length} pending</p>
           </div>
-          <button onClick={()=>setStudentsOpen(false)} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", borderRadius:10, cursor:"pointer", padding:"5px 8px", color:"#64748B", display:"flex", alignItems:"center", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="x" s={14}/></button>
+          <button onClick={()=>setStudentsOpen(false)} style={{ background: darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", border: darkMode ? "1px solid #2a3a52" : "1px solid #fff", borderRadius:10, cursor:"pointer", padding:"5px 8px", color: darkMode ? "#cbd5e1" : "#64748B", display:"flex", alignItems:"center", boxShadow: darkMode ? "none" : "4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="x" s={14}/></button>
         </div>
         <div style={{ flex:1, overflowY:"auto", padding:"12px 10px" }}>
           {pending.length > 0 && (
             <div style={{ marginBottom:16 }}>
               <div style={{ fontSize:10, fontWeight:700, color:"#f59e0b", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>⏳ Pending ({pending.length})</div>
               {pending.map(s => (
-                <div key={s.id} style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
+                <div key={s.id} style={{ background: darkMode ? "rgba(120,53,15,.25)" : "#fffbeb", border: darkMode ? "1px solid rgba(253,230,138,.35)" : "1px solid #fde68a", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
-                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#92400e", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background: darkMode ? "rgba(217,119,6,.3)" : "#fef3c7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color: darkMode ? "#fbbf24" : "#92400e", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:12.5, fontWeight:700, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
-                      <div style={{ fontSize:11, color:"#78716c", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
+                      <div style={{ fontSize:12.5, fontWeight:700, color: darkMode ? "#f1f5f9" : "#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                      <div style={{ fontSize:11, color: darkMode ? "#a8a29e" : "#78716c", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
                     </div>
                   </div>
                   <div style={{ display:"flex", gap:6 }}>
                     <button onClick={()=>handleApprove(s.id)} style={{ flex:1, padding:"5px 0", background:"#22c55e", color:"#fff", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✓ Approve</button>
-                    <button onClick={()=>handleReject(s.id)} style={{ flex:1, padding:"5px 0", background:"#fee2e2", color:"#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✕ Reject</button>
+                    <button onClick={()=>handleReject(s.id)} style={{ flex:1, padding:"5px 0", background: darkMode ? "rgba(127,29,29,.35)" : "#fee2e2", color: darkMode ? "#fca5a5" : "#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>✕ Reject</button>
                   </div>
                 </div>
               ))}
@@ -3852,15 +3852,15 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen }) 
             <div>
               <div style={{ fontSize:10, fontWeight:700, color:"#22c55e", textTransform:"uppercase", letterSpacing:".07em", padding:"0 6px 8px" }}>✓ Enrolled ({approved.length})</div>
               {approved.map(s => (
-                <div key={s.id} style={{ background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
+                <div key={s.id} style={{ background: darkMode ? "rgba(20,83,45,.25)" : "#f0fdf4", border: darkMode ? "1px solid rgba(134,239,172,.3)" : "1px solid #bbf7d0", borderRadius:10, padding:"10px 12px", marginBottom:8 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:8 }}>
-                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#dcfce7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#15803d", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background: darkMode ? "rgba(34,197,94,.25)" : "#dcfce7", display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color: darkMode ? "#86efac" : "#15803d", flexShrink:0 }}>{s.name.charAt(0).toUpperCase()}</div>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:12.5, fontWeight:700, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
-                      <div style={{ fontSize:11, color:"#64748b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
+                      <div style={{ fontSize:12.5, fontWeight:700, color: darkMode ? "#f1f5f9" : "#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</div>
+                      <div style={{ fontSize:11, color: darkMode ? "#94a3b8" : "#64748b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.email}</div>
                     </div>
                   </div>
-                  <button onClick={()=>handleReject(s.id)} style={{ width:"100%", padding:"5px 0", background:"#fee2e2", color:"#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Remove</button>
+                  <button onClick={()=>handleReject(s.id)} style={{ width:"100%", padding:"5px 0", background: darkMode ? "rgba(127,29,29,.35)" : "#fee2e2", color: darkMode ? "#fca5a5" : "#dc2626", border:"none", borderRadius:6, fontSize:11.5, fontWeight:700, cursor:"pointer" }}>Remove</button>
                 </div>
               ))}
             </div>
@@ -8180,7 +8180,7 @@ Hard rules:
 
         {/* ── STUDENTS PANEL (sidebar overlay) ── */}
         {studentsOpen && !studentMode && courseId && (
-          <StudentsPanel sb={sb} courseId={courseId} trainerId={trainerId} collapsed={collapsed} setStudentsOpen={setStudentsOpen} />
+          <StudentsPanel sb={sb} courseId={courseId} trainerId={trainerId} collapsed={collapsed} setStudentsOpen={setStudentsOpen} darkMode={darkMode} />
         )}
 
         {/* ── MAIN ── */}
@@ -8252,7 +8252,7 @@ Hard rules:
                   </div>
                 </div>
               )}
-              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} onGenWeek={async(days,onProgress)=>{
+              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} darkMode={darkMode} onGenWeek={async(days,onProgress)=>{
                 // Sequential, rate-limit-resilient week generation.
                 // 429 → pause 5s; 2×429 same model → auto-switch model; never aborts mid-batch.
                 const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
@@ -8358,6 +8358,7 @@ Hard rules:
                   courseId={courseId}
                   planDays={planDays}
                   dayMap={dayMap}
+                  darkMode={darkMode}
                 />
               )}
               {/* ── LEADERBOARD — visible to both trainer and student ── */}
@@ -8910,7 +8911,7 @@ Day 2: [Topic]
 /* ═══════════════════════════════════════════════════════════════════
    CALENDAR PAGE — FIX 10: responsive layout
 ═══════════════════════════════════════════════════════════════════ */
-function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides, onDeleteDay }) {
+function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDayStatus = {}, calYear, setCalYear, calMonth, setCalMonth, onSelectDay, notify, busy, onGenWeek, dayData, studentMode, dayOverrides = {}, setDayOverrides, onDeleteDay, darkMode = false }) {
   const todayK = todayKey();
   const dim = daysInMonth(calYear, calMonth);
   const fw  = firstWeekday(calYear, calMonth);
@@ -9296,7 +9297,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       {/* Month tabs — scrollable on mobile */}
       <div style={{ display:"flex", gap:5, overflowX:"auto", paddingBottom:4, WebkitOverflowScrolling:"touch", flexShrink:0 }}>
         {MONTHS_SHORT.map((m,i) => (
-          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"6px 16px", borderRadius:99, border:`1.5px solid ${calMonth===i?"transparent":"#C4CDD9"}`, fontSize:12.5, fontWeight:700, cursor:"pointer", transition:"all .18s", flexShrink:0, background:calMonth===i?"linear-gradient(135deg,#8B5CF6,#6366F1)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)", color:calMonth===i?"#fff":"#64748B", boxShadow:calMonth===i?"0 4px 14px rgba(99,102,241,.35),inset 0 1px 0 rgba(255,255,255,.2)":"6px 6px 14px #C4CDD9,-4px -4px 10px #fff", fontFamily:"inherit" }}>{m}</button>
+          <button key={m} onClick={()=>setCalMonth(i)} style={{ padding:"6px 16px", borderRadius:99, border:`1.5px solid ${calMonth===i?"transparent":(darkMode?"#2a3a52":"#C4CDD9")}`, fontSize:12.5, fontWeight:700, cursor:"pointer", transition:"all .18s", flexShrink:0, background:calMonth===i?"linear-gradient(135deg,#8B5CF6,#6366F1)":(darkMode?"linear-gradient(145deg,#1e293b,#162032)":"linear-gradient(145deg,#EDF1F7,#E4E9F2)"), color:calMonth===i?"#fff":(darkMode?"#94a3b8":"#64748B"), boxShadow:calMonth===i?"0 4px 14px rgba(99,102,241,.35),inset 0 1px 0 rgba(255,255,255,.2)":(darkMode?"none":"6px 6px 14px #C4CDD9,-4px -4px 10px #fff"), fontFamily:"inherit" }}>{m}</button>
         ))}
       </div>
 
@@ -9304,9 +9305,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
       <div className="lms-cal-grid" style={{ display:"grid", gridTemplateColumns:"1fr 270px", gap:18, alignItems:"start" }}>
         <div className="lms-card" style={{ padding:20 }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
-            <button onClick={prev} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevL" s={18}/></button>
+            <button onClick={prev} style={{ background: darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", border: darkMode ? "1px solid #2a3a52" : "1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color: darkMode ? "#cbd5e1" : "#64748B", boxShadow: darkMode ? "none" : "4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevL" s={18}/></button>
             <span className="cal-month-label" style={{ fontWeight:700, fontSize:16, color:"#0f172a" }}>{MONTHS_FULL[calMonth]} {calYear}</span>
-            <button onClick={next} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevR" s={18}/></button>
+            <button onClick={next} style={{ background: darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", border: darkMode ? "1px solid #2a3a52" : "1px solid #fff", cursor:"pointer", padding:"6px 8px", borderRadius:10, color: darkMode ? "#cbd5e1" : "#64748B", boxShadow: darkMode ? "none" : "4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}><Ic n="chevR" s={18}/></button>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:8 }}>
             {DAYS_HDR.map(d => <div key={d} className="cal-hdr-day" style={{ textAlign:"center", fontSize:11.5, fontWeight:800, color:"#8B5CF6", padding:"4px 0" }}>{d}</div>)}
@@ -9443,11 +9444,11 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   const isHol = ov.type==="holiday";
                   const isSpe = ov.type==="special";
                   return (
-                    <div key={k} style={{ padding:"9px 12px", borderRadius:10, background:isHol?"#fffbeb":isSpe?"#fff7ed":"#f5f3ff", border:`1.5px solid ${isHol?"#fde68a":isSpe?"#fed7aa":"#ddd6fe"}`, cursor:!studentMode?"pointer":"default", display:"flex", justifyContent:"space-between", alignItems:"center" }}
+                    <div key={k} style={{ padding:"9px 12px", borderRadius:10, background: darkMode ? (isHol?"rgba(120,53,15,.25)":isSpe?"rgba(124,45,18,.25)":"rgba(91,33,182,.2)") : (isHol?"#fffbeb":isSpe?"#fff7ed":"#f5f3ff"), border:`1.5px solid ${darkMode ? (isHol?"rgba(253,230,138,.35)":isSpe?"rgba(253,186,116,.35)":"rgba(196,181,253,.3)") : (isHol?"#fde68a":isSpe?"#fed7aa":"#ddd6fe")}`, cursor:!studentMode?"pointer":"default", display:"flex", justifyContent:"space-between", alignItems:"center" }}
                       onClick={()=>{ if(!studentMode) openOverrideModal(k); }}>
                       <div>
-                        <div style={{ fontSize:11, fontWeight:700, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6" }}>{isHol?"🏖️":isSpe?"⭐":"📌"} {MONTHS_SHORT[calMonth]} {d}</div>
-                        <div style={{ fontSize:12, color:isHol?"#92400e":isSpe?"#9a3412":"#5b21b6", fontWeight:500, marginTop:1 }}>{ov.label}</div>
+                        <div style={{ fontSize:11, fontWeight:700, color: darkMode ? (isHol?"#fde68a":isSpe?"#fdba74":"#c4b5fd") : (isHol?"#92400e":isSpe?"#9a3412":"#5b21b6") }}>{isHol?"🏖️":isSpe?"⭐":"📌"} {MONTHS_SHORT[calMonth]} {d}</div>
+                        <div style={{ fontSize:12, color: darkMode ? (isHol?"#fde68a":isSpe?"#fdba74":"#c4b5fd") : (isHol?"#92400e":isSpe?"#9a3412":"#5b21b6"), fontWeight:500, marginTop:1 }}>{ov.label}</div>
                       </div>
                       {!studentMode && <Ic n="settings" s={12} c={isHol?"#f59e0b":isSpe?"#f97316":"#8b5cf6"}/>}
                     </div>
@@ -9502,9 +9503,9 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
               const monLabel = `${MONTHS_SHORT[week.monday.getMonth()]} ${week.monday.getDate()}`;
               const friLabel = `${MONTHS_SHORT[week.endFri.getMonth()]} ${week.endFri.getDate()}`;
               return (
-                <div key={week.weekKey} className="lms-card" style={{ borderRadius:10, border:"1.5px solid #e2e8f0", overflow:"hidden", display:"flex", flexDirection:"column", padding:0 }}>
-                  <div style={{ padding:"10px 14px", background:"linear-gradient(145deg,#E4E9F2,#EDF1F7)", borderBottom:"1px solid #C4CDD9", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                    <span style={{ fontSize:12, fontWeight:700, color:"#334155" }}>
+                <div key={week.weekKey} className="lms-card" style={{ borderRadius:10, border: darkMode ? "1.5px solid #2a3a52" : "1.5px solid #e2e8f0", overflow:"hidden", display:"flex", flexDirection:"column", padding:0 }}>
+                  <div style={{ padding:"10px 14px", background: darkMode ? "#0f172a" : "linear-gradient(145deg,#E4E9F2,#EDF1F7)", borderBottom: darkMode ? "1px solid #2a3a52" : "1px solid #C4CDD9", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontSize:12, fontWeight:700, color: darkMode ? "#e2e8f0" : "#334155" }}>
                       {monLabel} – {friLabel}
                     </span>
                     <span style={{ fontSize:11, color:"#94a3b8", fontWeight:500 }}>
@@ -9513,7 +9514,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
                   </div>
                   <div style={{ padding:"6px 12px 4px", flex:1 }}>
                     {week.weekDays.map(d => (
-                      <div key={d.key} style={{ fontSize:11.5, color:"#475569", padding:"3px 0", borderBottom:"1px solid #f1f5f9", display:"flex", gap:6, alignItems:"center" }}>
+                      <div key={d.key} style={{ fontSize:11.5, color: darkMode ? "#cbd5e1" : "#475569", padding:"3px 0", borderBottom: darkMode ? "1px solid #1f2937" : "1px solid #f1f5f9", display:"flex", gap:6, alignItems:"center" }}>
                         <span style={{ color:"#3b82f6", fontWeight:700, minWidth:40, flexShrink:0 }}>Day {d.dayNum}</span>
                         <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{d.topic}</span>
                       </div>
@@ -9853,7 +9854,7 @@ Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression
    Receives: day, groqKey, groqModel, notify
    All state is local — no LMS state is mutated.
 ═══════════════════════════════════════════════════════════════════ */
-function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay, studentMode, trackActivity }) {
+function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay, studentMode, trackActivity, darkMode = false }) {
   const topicHint  = day?.topic || "";
   const k          = day?.key || "";
   // Read sub-topics set in the shared DayPage sub-topics field
@@ -10198,9 +10199,9 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
             {DG_PRESETS.map(p => (
               <button key={p.label}
                 onClick={() => handlePreset(p.prompt)}
-                style={{ padding:"4px 12px", borderRadius:99, background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", fontSize:11.5, fontWeight:700, color:"#64748B", cursor:"pointer", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff", transition:"background .15s" }}
-                onMouseEnter={e => e.currentTarget.style.background="#e2e8f0"}
-                onMouseLeave={e => e.currentTarget.style.background="#f1f5f9"}
+                style={{ padding:"4px 12px", borderRadius:99, background: darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)", border: darkMode ? "1px solid #2a3a52" : "1px solid #fff", fontSize:11.5, fontWeight:700, color: darkMode ? "#cbd5e1" : "#64748B", cursor:"pointer", boxShadow: darkMode ? "none" : "4px 4px 10px #C4CDD9,-3px -3px 8px #fff", transition:"background .15s" }}
+                onMouseEnter={e => e.currentTarget.style.background = darkMode ? "#28374e" : "#e2e8f0"}
+                onMouseLeave={e => e.currentTarget.style.background = darkMode ? "linear-gradient(145deg,#1e293b,#162032)" : "#f1f5f9"}
               >
                 {p.label}
               </button>
@@ -11585,6 +11586,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           notify={notify}
           updateDay={updateDay}
           studentMode={studentMode}
+          darkMode={darkMode}
         />
       )}
 
