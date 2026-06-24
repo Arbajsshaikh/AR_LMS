@@ -1,4 +1,16 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Component } from "react";
+import {
+  AutonomousCourseArchitect,
+  SmartGapDetector,
+  AIScheduleOptimizer,
+  AutoContentRefresh,
+  AutomatedAnnouncementsAgent,
+  PersonalizedAITutor,
+  AdaptiveLearningPath,
+  AIAssignmentReviewer,
+  DynamicQuizGenerator,
+  PlatformIntelligenceAgent,
+} from "./LMS_Agents";
 
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
@@ -4583,7 +4595,7 @@ function LeaderboardPage({ sb, courseId, planDays, studentMode, currentStudentId
    STUDENT DASHBOARD — personal progress overview for enrolled students
    Shows stats, activity breakdown, recent days, and a quick-actions strip.
 ═══════════════════════════════════════════════════════════════════ */
-function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, studentActivity, dayData, startDate, courseId, onSelectDay, readOnly = false, enrolledCourses = [], pendingCourses = [] }) {
+function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, studentActivity, dayData, startDate, courseId, onSelectDay, readOnly = false, enrolledCourses = [], pendingCourses = [], sb, studentId, groqKey, groqModel, notify }) {
   const act = studentActivity || {};
   const goToDay = readOnly ? null : onSelectDay;
 
@@ -4857,6 +4869,23 @@ function StudentDashboard({ planDays, dayMap = {}, dayStatus, trainerDayStatus, 
             </table>
           </div>
         </div>
+      )}
+
+      {/* ── AGENT 7: Adaptive Learning Path ── */}
+      {groqKey && (
+        <AdaptiveLearningPath
+          sb={sb}
+          studentId={studentId}
+          courseId={courseId}
+          planDays={planDays}
+          dayMap={dayMap}
+          studentActivity={studentActivity || {}}
+          groqKey={groqKey}
+          groqModel={groqModel}
+          onSelectDay={onSelectDay}
+          notify={notify || (() => {})}
+          darkMode={false}
+        />
       )}
 
     </div>
@@ -5834,6 +5863,9 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [aiProvider, setAiProvider] = useState("groq");
   const [groqKey,    setGroqKey]    = useState("");
   const [groqModel,  setGroqModel]  = useState(GROQ_MODELS[0]);
+  // Student's own Groq key — used exclusively for student-side AI agents
+  const [studentGroqKey,   setStudentGroqKey]   = useState("");
+  const [studentGroqModel, setStudentGroqModel] = useState(GROQ_MODELS[0]);
   // Keep _rlState seeded to the trainer's chosen model so the resilience
   // engine starts from the right model (not always index 0).
   // If the trainer changes model mid-session, sync it immediately.
@@ -5880,7 +5912,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const [page, setPageRaw] = useState(() => {
     const h = getHashPage();
-    if (h?.page && ["calendar","day","setup","settings","performance","attendance","dashboard"].includes(h.page)) {
+    if (h?.page && ["calendar","day","setup","settings","performance","attendance","announcements","ai-settings","dashboard"].includes(h.page)) {
       return h.page;
     }
     return studentMode ? "calendar" : "setup";
@@ -5966,6 +5998,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   // FIX #12: Scope AI prefs to the auth session (user-level), not per-course
   // Previously "lms_ai_prefs_{courseId}" meant the Groq key was lost when switching courses
   const AI_PREFS_KEY = `lms_ai_prefs_user`;
+  const STUDENT_AI_KEY = studentId ? `lms_student_ai_${studentId}` : null;
 
   /* ════ INIT from Supabase ════ */
   useEffect(() => {
@@ -5978,6 +6011,14 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       if (prefs.ollamaUrl)   setOllamaUrl(prefs.ollamaUrl);
       if (prefs.ollamaModel) setOllamaModel(prefs.ollamaModel);
     } catch {}
+    // Load student's own Groq key from localStorage (persists across sessions)
+    if (STUDENT_AI_KEY) {
+      try {
+        const sp = JSON.parse(localStorage.getItem(STUDENT_AI_KEY) || "{}");
+        if (sp.groqKey)   setStudentGroqKey(sp.groqKey);
+        if (sp.groqModel) setStudentGroqModel(sp.groqModel);
+      } catch {}
+    }
 
     if (!sb || !courseId) return;
 
@@ -6232,6 +6273,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     try { sessionStorage.setItem(AI_PREFS_KEY, JSON.stringify({ groqKey, aiProvider, groqModel, ollamaUrl, ollamaModel })); } catch {}
   }, [groqKey, aiProvider, groqModel, ollamaUrl, ollamaModel]);
 
+  // Persist student's own key to localStorage (survives page refresh)
+  useEffect(() => {
+    if (!STUDENT_AI_KEY) return;
+    try { localStorage.setItem(STUDENT_AI_KEY, JSON.stringify({ groqKey: studentGroqKey, groqModel: studentGroqModel })); } catch {}
+  }, [studentGroqKey, studentGroqModel, STUDENT_AI_KEY]);
+
   /* ════ Debounced Supabase save for course data ════
      FIX #5: studentMode guard — students must NEVER overwrite trainer data.
      FIX #4: AI content (notebook, examples, etc.) saved to lms_day_content rows,
@@ -6359,7 +6406,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           setPageRaw("day");
         }
       }
-    } else if (["calendar","setup","settings","performance","attendance","dashboard"].includes(h.page)) {
+    } else if (["calendar","setup","settings","performance","attendance","announcements","ai-settings","dashboard"].includes(h.page)) {
       setPageRaw(h.page);
     }
   // Only run once after first load — deps intentionally limited
@@ -6384,7 +6431,13 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       }
     };
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    // Custom nav event from child components (e.g. DayPage banner → AI Settings)
+    const onGotoPage = (e) => { if (e.detail) setPage(e.detail); };
+    window.addEventListener("lms-goto-page", onGotoPage);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("lms-goto-page", onGotoPage);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayMap, planDays, studentMode]);
 
@@ -7352,6 +7405,14 @@ Hard rules:
   const handleParsePlan = () => {
     const days = parsePlan(planText);
     if (!days.length) { notify("No days found. Format: 'Day 1: Topic'", "err"); return; }
+    // Auto-set startDate to today if trainer hasn't picked one
+    if (!startDate) {
+      const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm   = String(today.getMonth() + 1).padStart(2, "0");
+      const dd   = String(today.getDate()).padStart(2, "0");
+      setStartDate(`${yyyy}-${mm}-${dd}`);
+    }
     // FIX: if a plan already exists, ask for confirmation before wiping status/content
     if (planDays.length > 0) {
       setParsePlanConfirm(days);
@@ -8086,6 +8147,8 @@ Hard rules:
               { id:"calendar", ic:"calendar",label:"Calendar" },
               ...(studentMode ? [] : [{ id:"attendance",  ic:"clipbrd",  label:"Attendance"          }]),
               ...(studentMode ? [] : [{ id:"performance", ic:"👥",  label:"Std Performance" }]),
+              ...(studentMode ? [] : [{ id:"announcements", ic:"📢", label:"Announcements"   }]),
+              ...(studentMode ? [{ id:"ai-settings", ic:"brain", label:"AI Settings" }] : []),
               ...(studentMode ? [] : [{ id:"settings",    ic:"settings", label:"Settings"            }]),
             ].map(item => (
               <button key={item.id} className={`lms-nav${page===item.id&&!leaderboardOpen?" on":""}`} onClick={()=>{ setPage(item.id); setMobileMenuOpen(false); setLeaderboardOpen(false); }} title={collapsed?item.label:""}
@@ -8191,7 +8254,7 @@ Hard rules:
             <div style={{ flex:1, fontSize:13, color: darkMode ? "#94a3b8" : "#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
               <span style={{ color: darkMode ? "#64748b" : "#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color: darkMode ? "#f1f5f9" : "#0f172a", fontWeight:600 }}>
-                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="attendance"?"📋 Attendance":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
+                {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="attendance"?"📋 Attendance":page==="announcements"?"📢 Announcements":page==="ai-settings"?"🤖 AI Settings":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
             </div>
             {page==="calendar" && planDays.length>0 && (
@@ -8225,8 +8288,19 @@ Hard rules:
 
           <main style={{ flex:1, overflowY:"auto", padding:"24px 24px 80px", minHeight:0, background: darkMode ? "#0d1117" : "#EDF1F7" }}>
             <ErrorBoundary>
-              {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} />}
-              {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} />}
+              {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} sb={sb} studentId={studentId} groqKey={studentGroqKey} groqModel={studentGroqModel} notify={notify} />}
+              {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} groqKey={groqKey} groqModel={groqModel} dayMap={dayMap} genNotebook={genNotebook} genExamples={genExamples} genResources={genResources} genAssignment={genAssignment} genQuiz={genQuiz} genTeachingGuide={genTeachingGuide} darkMode={darkMode} />}
+              {/* ── AGENT 3: AI Schedule Optimizer (Setup page) ── */}
+              {!leaderboardOpen && page==="setup" && !studentMode && (
+                <AIScheduleOptimizer
+                  planText={planText}
+                  groqKey={groqKey}
+                  groqModel={groqModel}
+                  onOptimized={(optimized) => setPlanText(optimized)}
+                  notify={notify}
+                  darkMode={darkMode}
+                />
+              )}
               {/* FIX: Parse plan confirmation dialog — prevents accidental wipe of dayStatus/dayData */}
               {parsePlanConfirm && (
                 <div style={{ position:"fixed", inset:0, background:"rgba(15,23,42,.65)", zIndex:9500, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
@@ -8322,8 +8396,10 @@ Hard rules:
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
                   groqKey={groqKey} groqModel={groqModel}
+                  studentGroqKey={studentGroqKey} studentGroqModel={studentGroqModel}
                   sb={sb} courseId={courseId} trainerId={trainerId} studentId={studentId}
                   trackActivity={studentMode ? trackActivity : null}
+                  studentActivity={studentMode ? studentActivity : null}
                   darkMode={darkMode} setDarkMode={setDarkMode}
                   onEditTopic={(newTopic) => {
                     // Find the planDays index for this day key and update only its topic
@@ -8352,12 +8428,53 @@ Hard rules:
                   setDayOverrides={setDayOverrides}
                 />
               )}
+              {/* ── STUDENT AI SETTINGS PAGE ── */}
+              {!leaderboardOpen && page==="ai-settings" && studentMode && (
+                <StudentApiKeyPage
+                  studentGroqKey={studentGroqKey}
+                  setStudentGroqKey={setStudentGroqKey}
+                  studentGroqModel={studentGroqModel}
+                  setStudentGroqModel={setStudentGroqModel}
+                  notify={notify}
+                  darkMode={darkMode}
+                />
+              )}
               {!leaderboardOpen && page==="performance" && !studentMode && courseId && (
                 <TrainerStudentPerformance
                   sb={sb}
                   courseId={courseId}
                   planDays={planDays}
                   dayMap={dayMap}
+                  darkMode={darkMode}
+                />
+              )}
+              {/* ── AGENT 2: Smart Gap Detector (Performance page) ── */}
+              {!leaderboardOpen && page==="performance" && !studentMode && courseId && (
+                <SmartGapDetector
+                  sb={sb}
+                  courseId={courseId}
+                  planDays={planDays}
+                  dayMap={dayMap}
+                  groqKey={groqKey}
+                  groqModel={groqModel}
+                  notify={notify}
+                  darkMode={darkMode}
+                />
+              )}
+              {/* ── AGENT 4: Auto Content Refresh (Performance page) ── */}
+              {!leaderboardOpen && page==="performance" && !studentMode && courseId && (
+                <AutoContentRefresh
+                  sb={sb}
+                  courseId={courseId}
+                  planDays={planDays}
+                  dayMap={dayMap}
+                  dayData={dayData}
+                  groqKey={groqKey}
+                  groqModel={groqModel}
+                  genNotebook={genNotebook}
+                  genQuiz={genQuiz}
+                  notify={notify}
+                  trainerId={trainerId}
                   darkMode={darkMode}
                 />
               )}
@@ -8379,6 +8496,20 @@ Hard rules:
                   trainerId={trainerId}
                   planDays={planDays}
                   dayMap={dayMap}
+                  darkMode={darkMode}
+                />
+              )}
+              {/* ── AGENT 5: Automated Announcements (dedicated page) ── */}
+              {!leaderboardOpen && page==="announcements" && !studentMode && courseId && (
+                <AutomatedAnnouncementsAgent
+                  sb={sb}
+                  courseId={courseId}
+                  trainerId={trainerId}
+                  planDays={planDays}
+                  dayMap={dayMap}
+                  groqKey={groqKey}
+                  groqModel={groqModel}
+                  notify={notify}
                   darkMode={darkMode}
                 />
               )}
@@ -8473,7 +8604,116 @@ Hard rules:
   );
 }
 
-function SetupPage({ planText, setPlanText, startDate, setStartDate, monfri, setMonfri, planDays, onParse, notify, callAI }) {
+/* ═══════════════════════════════════════════════════════════════════
+   MINI CALENDAR PICKER — same visual style as CalendarPage
+   Used in SetupPage to pick course start date
+═══════════════════════════════════════════════════════════════════ */
+function MiniCalPicker({ value, onChange }) {
+  const today    = new Date();
+  const todayK   = todayKey();
+
+  // Parse current value or default to today
+  const initDate = value ? new Date(value + "T12:00:00") : today;
+  const [year,  setYear]  = useState(initDate.getFullYear());
+  const [month, setMonth] = useState(initDate.getMonth());
+
+  const dim   = daysInMonth(year, month);
+  const fw    = firstWeekday(year, month);
+  // Mon-based grid (Mon=0 … Sun=6)
+  const cells = [...Array(fw).fill(null), ...Array.from({ length: dim }, (_, i) => i + 1)];
+
+  const prev = () => { if (month === 0) { setMonth(11); setYear(y => y - 1); } else setMonth(m => m - 1); };
+  const next = () => { if (month === 11) { setMonth(0); setYear(y => y + 1); } else setMonth(m => m + 1); };
+
+  const select = (day) => {
+    const k = toKey(year, month, day);
+    onChange(k);
+  };
+
+  const selectedK = value || "";
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+      {/* Month tab pills */}
+      <div style={{ display:"flex", gap:4, overflowX:"auto", paddingBottom:2, WebkitOverflowScrolling:"touch" }}>
+        {MONTHS_SHORT.map((m, i) => (
+          <button key={m} onClick={() => setMonth(i)} style={{
+            padding:"4px 10px", borderRadius:99, flexShrink:0, fontFamily:"inherit", cursor:"pointer",
+            border:`1.5px solid ${month === i ? "transparent" : "#C4CDD9"}`,
+            fontSize:11, fontWeight:700,
+            background: month === i ? "linear-gradient(135deg,#8B5CF6,#6366F1)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+            color:   month === i ? "#fff" : "#64748B",
+            boxShadow: month === i ? "0 3px 10px rgba(99,102,241,.35)" : "4px 4px 8px #C4CDD9,-3px -3px 6px #fff",
+          }}>{m}</button>
+        ))}
+      </div>
+
+      {/* Prev / Month+Year / Next */}
+      <div className="lms-card" style={{ padding:14 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
+          <button onClick={prev} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"5px 7px", borderRadius:9, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}>
+            <Ic n="chevL" s={15}/>
+          </button>
+          <span style={{ fontWeight:700, fontSize:14, color:"#0f172a" }}>{MONTHS_FULL[month]} {year}</span>
+          <button onClick={next} style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", cursor:"pointer", padding:"5px 7px", borderRadius:9, color:"#64748B", boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}>
+            <Ic n="chevR" s={15}/>
+          </button>
+        </div>
+
+        {/* Day headers */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:3, marginBottom:6 }}>
+          {DAYS_HDR.map(d => (
+            <div key={d} style={{ textAlign:"center", fontSize:10, fontWeight:800, color:"#8B5CF6", padding:"2px 0" }}>{d}</div>
+          ))}
+        </div>
+
+        {/* Day cells */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:3 }}>
+          {cells.map((day, idx) => {
+            if (!day) return <div key={idx}/>;
+            const k       = toKey(year, month, day);
+            const isToday = k === todayK;
+            const isSel   = k === selectedK;
+            const isPast  = k < todayK;
+
+            return (
+              <button key={idx} onClick={() => select(day)} style={{
+                aspectRatio:"1", display:"flex", alignItems:"center", justifyContent:"center",
+                borderRadius:8, border:"none", cursor:"pointer", fontSize:12, fontWeight: isSel || isToday ? 800 : 500,
+                fontFamily:"inherit",
+                background: isSel
+                  ? "linear-gradient(135deg,#8B5CF6,#6366F1)"
+                  : isToday
+                    ? "linear-gradient(135deg,#ddd6fe,#c7d2fe)"
+                    : "linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+                color: isSel ? "#fff" : isToday ? "#4f46e5" : isPast ? "#94a3b8" : "#0f172a",
+                boxShadow: isSel
+                  ? "0 3px 10px rgba(99,102,241,.4)"
+                  : "3px 3px 7px #C4CDD9,-2px -2px 5px #fff",
+              }}>
+                {day}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Selected date display */}
+        {selectedK && (
+          <div style={{ marginTop:10, padding:"7px 12px", borderRadius:8, background:"linear-gradient(145deg,#f5f3ff,#ede9fe)", border:"1.5px solid #c4b5fd", fontSize:12.5, fontWeight:700, color:"#5b21b6", textAlign:"center" }}>
+            📅 Start: {new Date(selectedK + "T12:00:00").toLocaleDateString("en-US", { weekday:"short", year:"numeric", month:"long", day:"numeric" })}
+          </div>
+        )}
+        {!selectedK && (
+          <div style={{ marginTop:10, padding:"7px 12px", borderRadius:8, background:"#f8fafc", border:"1.5px dashed #c7d2fe", fontSize:12, color:"#94a3b8", textAlign:"center" }}>
+            No date selected — will start from <strong>today</strong>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SetupPage({ planText, setPlanText, startDate, setStartDate, monfri, setMonfri, planDays, onParse, notify, callAI, groqKey, groqModel, dayMap, genNotebook, genExamples, genResources, genAssignment, genQuiz, genTeachingGuide, darkMode }) {
   const sample = `Day 1: Python Basics - variables, data types, print
 Day 2: Control Flow - if/elif/else, comparison operators
 Day 3: Loops - for loops, while loops, range()
@@ -8705,7 +8945,7 @@ Day 2: [Topic]
   const usePlanInSetup = () => {
     if (!brochureResult?.plan) return;
     setPlanText(brochureResult.plan);
-    notify("Plan loaded into editor — review and click Parse & Start!");
+    notify("✅ Plan loaded — set a start date and click 'Parse & Map to Calendar'");
   };
 
   return (
@@ -8859,25 +9099,77 @@ Day 2: [Topic]
         )}
       </div>
 
+      {/* ── AGENT 1: Autonomous Course Architect — below AI Plan Generator from Brochure ── */}
+      <AutonomousCourseArchitect
+        groqKey={groqKey}
+        groqModel={groqModel}
+        planDays={planDays}
+        dayMap={dayMap}
+        onCourseBuilt={(days) => {
+          const text = days.map(d => `Day ${d.dayNum}: ${d.topic}`).join("\n");
+          setPlanText(text);
+          notify("✅ Plan generated — review & edit below, then click 'Parse & Map to Calendar'");
+        }}
+        genNotebook={genNotebook}
+        genExamples={genExamples}
+        genResources={genResources}
+        genAssignment={genAssignment}
+        genQuiz={genQuiz}
+        genTeachingGuide={genTeachingGuide}
+        notify={notify}
+        darkMode={darkMode}
+      />
+
       <div className="lms-setup-grid" style={{ display:"grid", gridTemplateColumns:"1fr 340px", gap:20 }}>
         <div className="lms-card" style={{ padding:22 }}>
-          <p className="lms-section-label">Teaching Plan (.txt format)</p>
-          <textarea className="lms-input" value={planText} onChange={e=>setPlanText(e.target.value)}
-            placeholder={sample} style={{ minHeight:300, fontSize:12.5, fontFamily:"'JetBrains Mono','Fira Code',monospace" }} />
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+            <p className="lms-section-label">Day-wise Teaching Plan</p>
+            {planText && (
+              <button className="lms-btn lms-btn-ghost" style={{ fontSize:11.5, padding:"3px 10px" }}
+                onClick={()=>setPlanText("")}>
+                <Ic n="trash" s={12}/>Clear
+              </button>
+            )}
+          </div>
+
+          {/* ── Plan editor (always editable) ── */}
+          <textarea
+            className="lms-input"
+            value={planText}
+            onChange={e => setPlanText(e.target.value)}
+            placeholder={sample}
+            style={{ minHeight:300, fontSize:12.5, fontFamily:"'JetBrains Mono','Fira Code',monospace" }}
+          />
+
           <div style={{ display:"flex", gap:8, marginTop:12, flexWrap:"wrap" }}>
-            <button className="lms-btn lms-btn-dark" onClick={onParse}><Ic n="check" s={14}/>Parse & Start</button>
             <label className="lms-btn lms-btn-ghost" style={{ cursor:"pointer" }}>
               <Ic n="upload" s={14}/>Upload .txt
               <input type="file" accept=".txt,.md" onChange={handleFile} style={{ display:"none" }} />
             </label>
             <button className="lms-btn lms-btn-ghost" onClick={()=>setPlanText(sample)}><Ic n="file" s={14}/>Load Sample</button>
           </div>
+
+          {/* ── Parse & Map to Calendar — below upload/sample ── */}
+          {planText && (
+            <button
+              className="lms-btn"
+              style={{ marginTop:12, background:"linear-gradient(135deg,#6366f1,#8b5cf6)", color:"#fff",
+                justifyContent:"center", padding:"13px 0", fontSize:14, fontWeight:800,
+                borderRadius:12, boxShadow:"0 4px 16px rgba(99,102,241,.35)", width:"100%" }}
+              onClick={onParse}
+            >
+              <Ic n="check" s={16}/>Parse &amp; Map to Calendar
+            </button>
+          )}
         </div>
 
         <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
           <div className="lms-card" style={{ padding:18 }}>
             <p className="lms-section-label">Course Start Date</p>
-            <input type="date" className="lms-input" value={startDate} onChange={e=>setStartDate(e.target.value)} />
+            <MiniCalPicker value={startDate} onChange={setStartDate} />
+            <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:8, lineHeight:1.5 }}>
+              Leave blank to start from <strong>today</strong>. Days will be mapped on the calendar from this date.
+            </p>
           </div>
 
           <div className="lms-card" style={{ padding:18 }}>
@@ -8891,7 +9183,7 @@ Day 2: [Topic]
 
           {planDays.length > 0 && (
             <div className="lms-card" style={{ padding:18 }}>
-              <p className="lms-section-label">{planDays.length} Days Parsed</p>
+              <p className="lms-section-label">{planDays.length} Days on Calendar</p>
               <div style={{ maxHeight:200, overflowY:"auto", display:"flex", flexDirection:"column", gap:5 }}>
                 {planDays.map((d,i) => (
                   <div key={i} style={{ display:"flex", gap:10, fontSize:12.5, padding:"5px 0", borderBottom:"1px solid #f8fafc" }} className="stp-day-row">
@@ -10992,7 +11284,7 @@ function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, not
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, sb, courseId, trainerId, studentId, trackActivity, darkMode, setDarkMode }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -11039,6 +11331,28 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
 
   return (
     <div style={{ animation:"lms-in .3s ease", paddingBottom:60 }}>
+      {/* ── Student AI key missing banner ── */}
+      {studentMode && !studentGroqKey && (
+        <div style={{ background:"linear-gradient(135deg,#f5f3ff,#ede9fe)", border:"1.5px solid #c4b5fd", borderRadius:12, padding:"12px 16px", marginBottom:16, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+          <div style={{ width:36, height:36, background:"linear-gradient(135deg,#8b5cf6,#6366f1)", borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            <Ic n="brain" s={18} c="#fff"/>
+          </div>
+          <div style={{ flex:1, minWidth:180 }}>
+            <p style={{ fontWeight:700, fontSize:13.5, color:"#4c1d95", margin:0 }}>Add your Groq API key to unlock AI features</p>
+            <p style={{ fontSize:12, color:"#6d28d9", margin:"2px 0 0" }}>AI Tutor, adaptive quizzes, and assignment review need your personal key — free at console.groq.com</p>
+          </div>
+          <button
+            className="lms-btn"
+            style={{ background:"linear-gradient(135deg,#8b5cf6,#6366f1)", color:"#fff", fontSize:12.5, padding:"7px 14px", borderRadius:9, flexShrink:0 }}
+            onClick={() => {
+              // Navigate to ai-settings page — bubble up via window event since we're inside DayPage
+              window.dispatchEvent(new CustomEvent("lms-goto-page", { detail: "ai-settings" }));
+            }}
+          >
+            <Ic n="settings" s={13}/>Set Up AI Key
+          </button>
+        </div>
+      )}
       {/* FIX 8: pending generation indicator — FIX 9: use exact key prefix matching */}
       {Object.keys(pendingGen).filter(pk => pk.endsWith(`-${k}`)).length > 0 && (
         <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:10, padding:"10px 14px", marginBottom:16, display:"flex", alignItems:"center", gap:10, fontSize:13 }}>
@@ -11538,6 +11852,20 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           ) : (
             <EmptyState icon="clip" title="No assignment yet" text="Generate a complete assignment with theory questions, coding challenges, and mini project." />
           )}
+          {/* ── AGENT 8: AI Assignment Reviewer (student only) ── */}
+          {studentMode && dayData.assignment && (
+            <AIAssignmentReviewer
+              day={day}
+              dayData={dayData}
+              sb={sb}
+              courseId={courseId}
+              studentId={studentId}
+              groqKey={studentGroqKey}
+              groqModel={studentGroqModel}
+              notify={notify}
+              darkMode={darkMode}
+            />
+          )}
         </div>
       )}
 
@@ -11572,6 +11900,9 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           sb={sb}
           courseId={courseId}
           studentId={studentId}
+          groqKey={studentGroqKey}
+          groqModel={studentGroqModel}
+          studentActivity={studentActivity}
         />
       )}
 
@@ -11632,6 +11963,18 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
         </div>
       )}
       </div>{/* end dark mode content wrapper */}
+
+    {/* ── AGENT 6: Personalized AI Tutor (student floating panel) ── */}
+    {studentMode && (
+      <PersonalizedAITutor
+        day={day}
+        dayData={dayData}
+        groqKey={studentGroqKey}
+        groqModel={studentGroqModel}
+        studentName={null}
+        darkMode={darkMode}
+      />
+    )}
 
     {exportOpen && (
       <DayExportPanel
@@ -12058,7 +12401,7 @@ function TeachingGuideView({ content }) {
 /* ═══════════════════════════════════════════════════════════════════
    QUIZ TAB — interactive MCQ with scoring
 ═══════════════════════════════════════════════════════════════════ */
-function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId }) {
+function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId, groqKey, groqModel, studentActivity }) {
   const k = day.key;
   const questions = dayData.quiz || null;
   const [answers, setAnswers] = useState({});
@@ -12126,6 +12469,20 @@ function QuizTab({ day, dayData, busy, onGenQuiz, updateDay, notify, studentMode
             <button className="lms-btn lms-btn-ghost" onClick={handleReset}>
               <Ic n="refresh" s={14}/>Retake
             </button>
+            {/* ── AGENT 9: Dynamic Quiz Generator (student only) ── */}
+            {studentMode && (
+              <DynamicQuizGenerator
+                day={day}
+                dayData={dayData}
+                studentId={studentId}
+                studentActivity={studentActivity || {}}
+                groqKey={groqKey}
+                groqModel={groqModel}
+                onQuizReady={(quiz) => updateDay(day.key, { quiz })}
+                notify={notify}
+                darkMode={false}
+              />
+            )}
             {dayData.quizScore && (
               <span style={{ fontSize:12.5, color:"#64748B", padding:"4px 12px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1px solid #fff", borderRadius:99, boxShadow:"4px 4px 10px #C4CDD9,-3px -3px 8px #fff" }}>
                 Last score: {dayData.quizScore.score}/{dayData.quizScore.total} ({dayData.quizScore.pct}%)
@@ -12339,6 +12696,168 @@ function EmptyState({ icon, title, text }) {
 /* ═══════════════════════════════════════════════════════════════════
    SETTINGS PAGE — Supabase-backed, no localStorage
 ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════
+   STUDENT API KEY SETTINGS PAGE
+   Students set their own Groq key here to unlock all AI agent features
+═══════════════════════════════════════════════════════════════════ */
+function StudentApiKeyPage({ studentGroqKey, setStudentGroqKey, studentGroqModel, setStudentGroqModel, notify, darkMode }) {
+  const [draft, setDraft] = useState(studentGroqKey || "");
+  const [show,  setShow]  = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const save = () => {
+    setStudentGroqKey(draft.trim());
+    notify(draft.trim() ? "✅ API key saved — AI features are now unlocked!" : "API key cleared");
+  };
+
+  const testKey = async () => {
+    if (!draft.trim()) { notify("Paste your key first", "err"); return; }
+    setTesting(true);
+    try {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${draft.trim()}` },
+        body: JSON.stringify({ model: studentGroqModel, max_tokens: 10, messages: [{ role:"user", content:"Hi" }] })
+      });
+      if (res.ok) {
+        setStudentGroqKey(draft.trim());
+        notify("✅ Key works! AI features are now active.");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        notify(`Key error: ${err?.error?.message || res.statusText}`, "err");
+      }
+    } catch(e) { notify(`Connection error: ${e.message}`, "err"); }
+    setTesting(false);
+  };
+
+  const features = [
+    { icon:"🤖", name:"AI Tutor",         desc:"Ask questions about today's topic and get instant explanations" },
+    { icon:"🎯", name:"Adaptive Quizzes", desc:"Personalized quiz questions based on your learning gaps" },
+    { icon:"✅", name:"Assignment Review", desc:"Submit your work and get instant AI feedback" },
+    { icon:"🗺️", name:"Learning Path",    desc:"Smart day recommendations based on your progress" },
+  ];
+
+  const steps = [
+    { n:1, text:"Go to", link:"https://console.groq.com", linkText:"console.groq.com" },
+    { n:2, text:"Sign up or log in (it's free)" },
+    { n:3, text:'Click "API Keys" in the left sidebar' },
+    { n:4, text:'Click "Create API Key" — give it any name' },
+    { n:5, text:"Copy the key (starts with gsk_…) and paste it below" },
+  ];
+
+  return (
+    <div style={{ animation:"lms-in .3s ease", maxWidth:680, paddingBottom:60 }}>
+
+      {/* Header */}
+      <div style={{ marginBottom:28 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:8 }}>
+          <div style={{ width:44, height:44, background:"linear-gradient(135deg,#8b5cf6,#6366f1)", borderRadius:13, display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 4px 16px rgba(99,102,241,.35)" }}>
+            <Ic n="brain" s={22} c="#fff"/>
+          </div>
+          <div>
+            <h1 style={{ fontSize:22, fontWeight:800, background:"linear-gradient(135deg,#8B5CF6,#6366F1)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", margin:0 }}>AI Features Setup</h1>
+            <p style={{ fontSize:13, color:"#64748b", margin:0 }}>Your personal key — only used on your device</p>
+          </div>
+        </div>
+      </div>
+
+      {/* What you unlock */}
+      <div className="lms-card" style={{ padding:20, marginBottom:16 }}>
+        <p className="lms-section-label" style={{ marginBottom:12 }}>What you unlock with an API key</p>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }} className="lms-setup-grid">
+          {features.map(f => (
+            <div key={f.name} style={{ display:"flex", gap:10, padding:"10px 12px", background:"linear-gradient(145deg,#f5f3ff,#ede9fe)", borderRadius:10, border:"1px solid #ddd6fe" }}>
+              <span style={{ fontSize:20, flexShrink:0 }}>{f.icon}</span>
+              <div>
+                <p style={{ fontWeight:700, fontSize:13, color:"#4c1d95", margin:0 }}>{f.name}</p>
+                <p style={{ fontSize:11.5, color:"#6d28d9", margin:"2px 0 0", lineHeight:1.4 }}>{f.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* How to get a key */}
+      <div className="lms-card" style={{ padding:20, marginBottom:16 }}>
+        <p className="lms-section-label" style={{ marginBottom:12 }}>How to get your free Groq API key</p>
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {steps.map(s => (
+            <div key={s.n} style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+              <div style={{ width:24, height:24, background:"linear-gradient(135deg,#8b5cf6,#6366f1)", borderRadius:7, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, marginTop:1 }}>
+                <span style={{ fontSize:11, fontWeight:800, color:"#fff" }}>{s.n}</span>
+              </div>
+              <p style={{ fontSize:13.5, color:"#334155", margin:0, lineHeight:1.6 }}>
+                {s.text}{" "}
+                {s.link && <a href={s.link} target="_blank" rel="noopener noreferrer" style={{ color:"#6366f1", fontWeight:700, textDecoration:"none" }}>{s.linkText} ↗</a>}
+              </p>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop:14, padding:"10px 14px", background:"#f0fdf4", border:"1.5px solid #86efac", borderRadius:9, fontSize:12.5, color:"#166534" }}>
+          💡 Groq is <strong>completely free</strong> — no credit card needed. You get generous daily limits for personal use.
+        </div>
+      </div>
+
+      {/* Key input */}
+      <div className="lms-card" style={{ padding:20, marginBottom:16 }}>
+        <p className="lms-section-label" style={{ marginBottom:10 }}>Paste your API key</p>
+        <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+          <input
+            className="lms-input"
+            type={show ? "text" : "password"}
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            placeholder="gsk_..."
+            style={{ flex:1, fontFamily:"'JetBrains Mono','Fira Code',monospace", fontSize:13, letterSpacing: show ? "normal" : "0.12em" }}
+          />
+          <button className="lms-btn lms-btn-ghost" style={{ flexShrink:0, padding:"0 12px" }} onClick={() => setShow(s => !s)}>
+            {show ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {/* Model selector */}
+        <p className="lms-section-label" style={{ marginBottom:8 }}>Model</p>
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
+          {GROQ_MODELS.map(m => (
+            <button key={m} onClick={() => setStudentGroqModel(m)} style={{
+              padding:"5px 12px", borderRadius:99, fontSize:11.5, fontWeight:700, cursor:"pointer", fontFamily:"inherit",
+              border:`1.5px solid ${studentGroqModel === m ? "transparent" : "#C4CDD9"}`,
+              background: studentGroqModel === m ? "linear-gradient(135deg,#8B5CF6,#6366F1)" : "linear-gradient(145deg,#EDF1F7,#E4E9F2)",
+              color: studentGroqModel === m ? "#fff" : "#64748B",
+              boxShadow: studentGroqModel === m ? "0 3px 10px rgba(99,102,241,.35)" : "3px 3px 7px #C4CDD9,-2px -2px 5px #fff",
+            }}>{m}</button>
+          ))}
+        </div>
+
+        <div style={{ display:"flex", gap:8 }}>
+          <button className="lms-btn lms-btn-ghost" onClick={testKey} disabled={testing} style={{ flex:1, justifyContent:"center" }}>
+            {testing ? <><Spin s={13}/>Testing…</> : <><Ic n="play" s={13}/>Test Key</>}
+          </button>
+          <button
+            className="lms-btn"
+            style={{ flex:1, justifyContent:"center", background:"linear-gradient(135deg,#8b5cf6,#6366f1)", color:"#fff" }}
+            onClick={save}
+          >
+            <Ic n="check" s={14}/>Save Key
+          </button>
+        </div>
+
+        {studentGroqKey && (
+          <div style={{ marginTop:12, padding:"8px 12px", background:"#f0fdf4", border:"1.5px solid #86efac", borderRadius:9, display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:16 }}>✅</span>
+            <span style={{ fontSize:12.5, color:"#166534", fontWeight:600 }}>Key saved — AI features are active on your account</span>
+          </div>
+        )}
+      </div>
+
+      {/* Privacy note */}
+      <div style={{ padding:"12px 16px", background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:10, fontSize:12, color:"#64748b", lineHeight:1.6 }}>
+        🔒 <strong>Your key never leaves your device.</strong> It's stored in your browser's local storage only and is never sent to our servers. Each student uses their own key independently.
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqModel, setGroqModel, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel, callAI, notify, sb, courseId, trainerId, setPlanText, setPlanDays, setStartDate, setMonfri, setDayStatus, setDayData, setDayOverrides }) {
   const [testing,     setTesting]     = useState(false);
   const [testSb,      setTestSb]      = useState(false);
@@ -13152,6 +13671,7 @@ function AdminDashboard({ sb, onLogout }) {
             { id:"trainers", label:"🧑‍🏫 Trainers", badge: pendingTrainers > 0 ? pendingTrainers : null, badgeColor:"#f59e0b" },
             { id:"students", label:"👨‍🎓 Students",  badge: pendingStudents > 0 ? pendingStudents : null, badgeColor:"#f59e0b" },
             { id:"courses",  label:"📚 Courses" },
+            { id:"intelligence", label:"🛡 Platform Intel" },
           ].map(s => (
             <button key={s.id}
               className={`adm-section-tab ${section===s.id?"adm-section-active":"adm-section-inactive"}`}
@@ -13382,6 +13902,13 @@ function AdminDashboard({ sb, onLogout }) {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── AGENT 10: Platform Intelligence Agent ── */}
+        {section === "intelligence" && (
+          <div style={{ animation:"adm-in .2s ease" }}>
+            <PlatformIntelligenceAgent sb={sb} darkMode={false} />
           </div>
         )}
 
