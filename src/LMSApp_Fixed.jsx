@@ -1399,7 +1399,27 @@ const todayKey = () => { const n=new Date(); return toKey(n.getFullYear(),n.getM
 
 function parsePlan(text) {
   const days = [];
-  for (const line of text.trim().split("\n")) {
+  const safeText = (text == null || typeof text !== "string") ? String(text ?? "") : text;
+
+  // Normalise: split on newlines first, then detect if the whole plan arrived
+  // as a single comma-separated line (e.g. from the AI Schedule Optimizer agent).
+  // Pattern: "Day 1: Topic,Day 2: Topic,Day 3: Topic, ..."
+  let rawLines = safeText.trim().split("\n");
+
+  // If there is only one non-empty line AND it contains multiple "Day N:" tokens,
+  // re-split it on the comma that precedes each "Day N" marker.
+  if (rawLines.filter(l => l.trim()).length === 1) {
+    const single = rawLines[0].trim();
+    const dayTokenCount = (single.match(/(?:^|,)\s*day\s*\d+\s*[:\-\.]/gi) || []).length;
+    if (dayTokenCount > 1) {
+      rawLines = single
+        .split(/,(?=\s*[Dd]ay\s*\d+\s*[:\-\.])/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
+  }
+
+  for (const line of rawLines) {
     // FIX 13: Added dot (.) as a valid delimiter so "1. Topic" format also works
     const m = line.trim().match(/^(?:day\s*)?(\d+)\s*[:\-\.\u2013]\s*(.+)$/i);
     if (m) days.push({ dayNum: parseInt(m[1]), topic: m[2].trim() });
@@ -6025,7 +6045,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     const loadCourse = async () => {
       const course = await sbGetCourseData(sb, courseId);
       if (!course) return;
-      if (course.planText)  setPlanText(course.planText);
+      if (course.planText)  setPlanText(typeof course.planText === "string" ? course.planText : String(course.planText ?? ""));
       // FIX: use planDays.length > 0 check so empty array doesn't block calendar navigation
       if (Array.isArray(course.planDays) && course.planDays.length > 0) {
         setPlanDays(course.planDays);
@@ -8293,10 +8313,16 @@ Hard rules:
               {/* ── AGENT 3: AI Schedule Optimizer (Setup page) ── */}
               {!leaderboardOpen && page==="setup" && !studentMode && (
                 <AIScheduleOptimizer
-                  planText={planText}
+                  planText={typeof planText === "string" ? planText : String(planText ?? "")}
                   groqKey={groqKey}
                   groqModel={groqModel}
-                  onOptimized={(optimized) => setPlanText(optimized)}
+                  onOptimized={(optimized) => {
+                    // Guard: agent may return object/null — always set a string
+                    const safe = (optimized == null || typeof optimized !== "string")
+                      ? String(optimized ?? "")
+                      : optimized;
+                    setPlanText(safe);
+                  }}
                   notify={notify}
                   darkMode={darkMode}
                 />
@@ -12897,7 +12923,7 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
     try {
       const course = await sbGetCourseData(sb, courseId);
       if (!course) { notify("No course data found in Supabase", "warn"); return; }
-      if (course.planText)  setPlanText(course.planText);
+      if (course.planText)  setPlanText(typeof course.planText === "string" ? course.planText : String(course.planText ?? ""));
       if (course.planDays)  setPlanDays(course.planDays);
       if (course.startDate) setStartDate(course.startDate);
       if (course.monfri !== undefined) setMonfri(course.monfri);
