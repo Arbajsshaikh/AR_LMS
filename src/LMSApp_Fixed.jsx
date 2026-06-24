@@ -3367,6 +3367,28 @@ function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
 }
 
 
+// Batch options available in the dropdown — trainer can also type a custom label
+const BATCH_OPTIONS = ["Morning", "Evening", "Batch A", "Batch B", "Batch 1", "Batch 2", "Weekend", "Online"];
+// Deterministic color per known label; unknown labels get a hash-based color in the UI
+const BATCH_COLORS = {
+  "Morning":  "#f59e0b",
+  "Evening":  "#8B5CF6",
+  "Batch A":  "#3b82f6",
+  "Batch B":  "#10b981",
+  "Batch 1":  "#3b82f6",
+  "Batch 2":  "#10b981",
+  "Weekend":  "#ef4444",
+  "Online":   "#06b6d4",
+};
+// Returns a stable color for any batch label string
+function batchLabelColor(label) {
+  if (!label) return "#94a3b8";
+  if (BATCH_COLORS[label]) return BATCH_COLORS[label];
+  // Hash-based fallback for custom names
+  let h = 0; for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) & 0xFFFFFF;
+  return "#" + (h & 0x7F7FFF | 0x404040).toString(16).padStart(6, "0");
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    TRAINER ENROLLMENTS — Supabase-backed
 ═══════════════════════════════════════════════════════════════════ */
@@ -3376,6 +3398,9 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
   const [addCourseStudentId, setAddCourseStudentId] = useState(null);
   const [addCourseId, setAddCourseId]               = useState("");
   const [loading, setLoading] = useState(true);
+  // Batch editing: { [studentId]: draftLabel }
+  const [batchDraft, setBatchDraft]   = useState({});
+  const [batchSaving, setBatchSaving] = useState({});
 
   const load = async () => {
     setLoading(true);
@@ -3462,6 +3487,34 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
     load();
   };
 
+  // Save batch label into the enrolledCourseIds entry for this course
+  const handleSetBatch = async (studentId) => {
+    const label = (batchDraft[studentId] ?? "").trim();
+    const s = students.find(x => x.id === studentId);
+    if (!s) return;
+    setBatchSaving(p => ({ ...p, [studentId]: true }));
+    try {
+      const newEnrolled = (s.enrolledCourseIds || []).map(e =>
+        e.courseId === courseId ? { ...e, batchLabel: label || null } : e
+      );
+      // Legacy path: no enrolledCourseIds array yet
+      if (!Array.isArray(s.enrolledCourseIds) || !newEnrolled.some(e => e.courseId === courseId)) {
+        newEnrolled.push({ courseId, courseName, batchLabel: label || null, approvedAt: new Date().toISOString() });
+      }
+      await sbSaveStudent(sb, { ...s, enrolledCourseIds: newEnrolled });
+      // Update local state immediately so badge shows without full reload
+      setStudents(prev => prev.map(x => x.id === studentId ? { ...x, enrolledCourseIds: newEnrolled } : x));
+      setBatchDraft(p => { const n = { ...p }; delete n[studentId]; return n; });
+    } catch (e) { alert("Failed to save batch: " + e.message); }
+    finally { setBatchSaving(p => ({ ...p, [studentId]: false })); }
+  };
+
+  // Helper: get current saved batchLabel for a student in this course
+  const getStudentBatch = (s) => {
+    const entry = Array.isArray(s.enrolledCourseIds) ? s.enrolledCourseIds.find(e => e.courseId === courseId) : null;
+    return entry?.batchLabel || "";
+  };
+
   return (
     <div style={{ position:"fixed", top:0, left:0, right:0, bottom:0, background:"rgba(0,0,0,0.6)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:10000, padding:20 }}>
       <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:30, maxWidth:720, width:"100%", maxHeight:"85vh", overflow:"auto", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", border:"1px solid #fff" }}>
@@ -3487,20 +3540,62 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
             <div style={{ marginBottom:20 }}>
               <h3 style={{ color:"#22c55e", marginBottom:10, fontSize:15 }}>✅ Enrolled ({approved.length})</h3>
               {approved.length === 0 ? <p style={{ color:"#718096", fontSize:13 }}>No enrolled students</p> : approved.map(s => {
-                const otherCourses = (s.enrolledCourseIds||[]).filter(e=>e.courseId!==courseId);
+                const otherCourses    = (s.enrolledCourseIds||[]).filter(e=>e.courseId!==courseId);
+                const savedBatch      = getStudentBatch(s);
+                const isDrafting      = studentId => studentId in batchDraft;
+                const draftVal        = batchDraft[s.id] ?? savedBatch;
+                const isBatchEditing  = s.id in batchDraft;
+                const batchColor      = savedBatch ? BATCH_COLORS[savedBatch] || "#8B5CF6" : null;
                 return (
                   <div key={s.id} style={{ padding:12, background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:8, marginBottom:8 }}>
                     <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
                       <div style={{ flex:1 }}>
-                        <p style={{ fontWeight:600, margin:"0 0 2px 0", color:"#1a202c", fontSize:14 }}>{s.name}</p>
+                        <div style={{ display:"flex", alignItems:"center", gap:7, flexWrap:"wrap", marginBottom:2 }}>
+                          <p style={{ fontWeight:600, margin:0, color:"#1a202c", fontSize:14 }}>{s.name}</p>
+                          {savedBatch && (
+                            <span style={{ padding:"1px 8px", borderRadius:99, fontSize:11, fontWeight:700, background: batchColor + "22", color: batchColor, border:`1px solid ${batchColor}55` }}>
+                              {savedBatch}
+                            </span>
+                          )}
+                        </div>
                         <p style={{ fontSize:12, color:"#718096", margin:"0 0 4px 0" }}>{s.email}</p>
                         {otherCourses.length > 0 && <p style={{ fontSize:11, color:"#764ba2", margin:0 }}>Also enrolled in: {otherCourses.map(e=>e.courseName).join(", ")}</p>}
                       </div>
-                      <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                      <div style={{ display:"flex", gap:6, flexShrink:0, alignItems:"center" }}>
+                        <button title="Assign batch" onClick={()=>setBatchDraft(p=>({ ...p, [s.id]: savedBatch }))} style={{ padding:"5px 9px", background:"rgba(139,92,246,.1)", color:"#8B5CF6", border:"1px solid rgba(139,92,246,.3)", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:700 }}>🏷️ Batch</button>
                         <button title="Enroll in another course" onClick={()=>{setAddCourseStudentId(s.id);setAddCourseId("");}} style={{ padding:"5px 9px", background:"#eff6ff", color:"#3b82f6", border:"1px solid #bfdbfe", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>+ Course</button>
                         <button onClick={()=>handleRevoke(s.id)} style={{ padding:"5px 9px", background:"#fef2f2", color:"#dc2626", border:"1px solid #fecaca", borderRadius:4, cursor:"pointer", fontSize:11, fontWeight:600 }}>Revoke</button>
                       </div>
                     </div>
+
+                    {/* ── Batch assignment inline panel ── */}
+                    {isBatchEditing && (
+                      <div style={{ marginTop:10, padding:"10px 12px", background:"rgba(139,92,246,.06)", border:"1px solid rgba(139,92,246,.2)", borderRadius:8 }}>
+                        <div style={{ fontSize:11.5, fontWeight:700, color:"#8B5CF6", marginBottom:7 }}>🏷️ Assign Batch for this course</div>
+                        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
+                          {BATCH_OPTIONS.map(opt => (
+                            <button key={opt} onClick={()=>setBatchDraft(p=>({ ...p, [s.id]: opt === "—" ? "" : opt }))}
+                              style={{ padding:"4px 10px", borderRadius:99, fontSize:11, fontWeight:700, cursor:"pointer", border:`1.5px solid ${(draftVal||"")===opt||(opt==="—"&&!draftVal)?"#8B5CF6":"#e2e8f0"}`, background:(draftVal||"")===opt||(opt==="—"&&!draftVal)?"rgba(139,92,246,.15)":"#fff", color:(draftVal||"")===opt||(opt==="—"&&!draftVal)?"#8B5CF6":"#475569" }}>
+                              {opt}
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{ display:"flex", gap:6 }}>
+                          <input value={draftVal} onChange={e=>setBatchDraft(p=>({ ...p, [s.id]: e.target.value }))}
+                            placeholder="Or type custom batch name…"
+                            style={{ flex:1, padding:"6px 10px", border:"1px solid #cbd5e1", borderRadius:6, fontSize:12, fontFamily:"inherit", outline:"none" }} />
+                          <button onClick={()=>handleSetBatch(s.id)} disabled={batchSaving[s.id]}
+                            style={{ padding:"6px 14px", background:"#8B5CF6", color:"#fff", border:"none", borderRadius:6, cursor:batchSaving[s.id]?"wait":"pointer", fontSize:12, fontWeight:700, fontFamily:"inherit" }}>
+                            {batchSaving[s.id] ? "…" : "Save"}
+                          </button>
+                          <button onClick={()=>setBatchDraft(p=>{ const n={...p}; delete n[s.id]; return n; })}
+                            style={{ padding:"6px 10px", background:"#f1f5f9", color:"#64748b", border:"1px solid #e2e8f0", borderRadius:6, cursor:"pointer", fontSize:12, fontFamily:"inherit" }}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {addCourseStudentId === s.id && (
                       <div style={{ marginTop:10, display:"flex", gap:8 }}>
                         <select value={addCourseId} onChange={e=>setAddCourseId(e.target.value)} style={{ flex:1, padding:"6px 8px", border:"1px solid #cbd5e1", borderRadius:6, fontSize:12, background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)" }}>
@@ -5151,18 +5246,42 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
   };
 
   // ── Build pivot table data ───────────────────────────────────────
-  const { dates, byStudentDate } = useMemo(() => {
-    const dateSet = new Set(sessions.map(s => s.session_date));
-    const dates   = Array.from(dateSet).sort();
+  // FIX: Multiple sessions on the same date (e.g. morning + evening batches)
+  // are merged into ONE column per date. A student is marked Present (P) if
+  // they attended ANY session on that date. The earliest scan_at is kept so
+  // the per-student report shows a real timestamp.
+  const { dates, byStudentDate, sessionsByDate } = useMemo(() => {
+    // Map session_id → session_date
     const sessDateMap = {};
     for (const s of sessions) sessDateMap[s.id] = s.session_date;
+
+    // Unique sorted dates (one column per calendar day, regardless of
+    // how many sessions the trainer ran that day)
+    const dateSet = new Set(sessions.map(s => s.session_date));
+    const dates   = Array.from(dateSet).sort();
+
+    // Group session objects by date (used in header tooltip / sessions tab)
+    const sessionsByDate = {};
+    for (const s of sessions) {
+      if (!sessionsByDate[s.session_date]) sessionsByDate[s.session_date] = [];
+      sessionsByDate[s.session_date].push(s);
+    }
+
+    // byStudentDate[studentId][date] = earliest scanned_at across ALL sessions
+    // that day — so a morning-batch student is still marked P even when an
+    // evening session record comes in later and would otherwise overwrite.
     const byStudentDate = {};
     for (const r of records) {
       const date = sessDateMap[r.session_id] || r.session_date;
+      if (!date) continue;
       if (!byStudentDate[r.student_id]) byStudentDate[r.student_id] = {};
-      byStudentDate[r.student_id][date] = r.scanned_at;
+      const existing = byStudentDate[r.student_id][date];
+      // Keep the earliest timestamp so first-scan wins (not last-write)
+      if (!existing || r.scanned_at < existing) {
+        byStudentDate[r.student_id][date] = r.scanned_at;
+      }
     }
-    return { dates, byStudentDate };
+    return { dates, byStudentDate, sessionsByDate };
   }, [sessions, records]);
 
   const studentStats = useMemo(() =>
@@ -5170,9 +5289,14 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
       const present = dates.filter(d => !!byStudentDate[s.id]?.[d]).length;
       const total   = dates.length;
       const pct     = total > 0 ? Math.round((present / total) * 100) : 0;
-      return { ...s, present, total, pct, byDate: byStudentDate[s.id] || {} };
+      // Pull batchLabel from the enrollment entry for this specific course
+      const enrollEntry = Array.isArray(s.enrolledCourseIds)
+        ? s.enrolledCourseIds.find(e => e.courseId === courseId)
+        : null;
+      const batchLabel = enrollEntry?.batchLabel || s.batchLabel || "";
+      return { ...s, present, total, pct, byDate: byStudentDate[s.id] || {}, batchLabel };
     }),
-    [students, dates, byStudentDate]
+    [students, dates, byStudentDate, courseId]
   );
 
   // ── Excel export ─────────────────────────────────────────────────
@@ -5182,47 +5306,49 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
       const XLSX = await loadXLSX();
       const wb   = XLSX.utils.book_new();
 
-      // Sheet 1 — Matrix
+      // Sheet 1 — Matrix (includes Batch column)
       const fmtDate = d => new Date(d + "T12:00:00").toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"2-digit" });
       const matrixRows = [
-        ["Student Name", "Email", ...dates.map(fmtDate), "Present", "Total", "Attendance %"],
+        ["Student Name", "Email", "Batch", ...dates.map(fmtDate), "Present", "Total", "Attendance %"],
         ...studentStats.map(s => [
-          s.name, s.email || "", ...dates.map(d => s.byDate[d] ? "P" : "A"),
+          s.name, s.email || "", s.batchLabel || "", ...dates.map(d => s.byDate[d] ? "P" : "A"),
           s.present, s.total, s.pct + "%",
         ]),
         // Totals row
-        ["DAILY TOTAL", "", ...dates.map(d => students.filter(s => !!byStudentDate[s.id]?.[d]).length), "", "", ""],
+        ["DAILY TOTAL", "", "", ...dates.map(d => students.filter(s => !!byStudentDate[s.id]?.[d]).length), "", "", ""],
       ];
       const ws1 = XLSX.utils.aoa_to_sheet(matrixRows);
-      ws1["!cols"] = [{ wch:22 }, { wch:28 }, ...dates.map(() => ({ wch:11 })), { wch:10 }, { wch:10 }, { wch:14 }];
+      ws1["!cols"] = [{ wch:22 }, { wch:28 }, { wch:12 }, ...dates.map(() => ({ wch:11 })), { wch:10 }, { wch:10 }, { wch:14 }];
       XLSX.utils.book_append_sheet(wb, ws1, "Attendance Matrix");
 
-      // Sheet 2 — Summary
+      // Sheet 2 — Summary (includes Batch column)
       const summaryRows = [
-        ["Student Name", "Email", "Present Days", "Total Sessions", "Attendance %", "Eligibility"],
+        ["Student Name", "Email", "Batch", "Present Days", "Total Days", "Attendance %", "Eligibility"],
         ...studentStats.map(s => [
-          s.name, s.email || "", s.present, s.total, s.pct + "%",
+          s.name, s.email || "", s.batchLabel || "", s.present, s.total, s.pct + "%",
           s.pct >= 75 ? "Eligible" : s.pct >= 60 ? "Short Attendance" : "Insufficient",
         ]),
       ];
       const ws2 = XLSX.utils.aoa_to_sheet(summaryRows);
-      ws2["!cols"] = [{ wch:22 }, { wch:28 }, { wch:14 }, { wch:16 }, { wch:14 }, { wch:18 }];
+      ws2["!cols"] = [{ wch:22 }, { wch:28 }, { wch:12 }, { wch:14 }, { wch:12 }, { wch:14 }, { wch:18 }];
       XLSX.utils.book_append_sheet(wb, ws2, "Summary");
 
-      // Sheet 3 — Raw records
+      // Sheet 3 — Raw records (includes Batch)
+      const statsByStudentId = Object.fromEntries(studentStats.map(s => [s.id, s]));
       const rawRows = [
-        ["Session Date", "Session Label", "Student Name", "Email", "Scanned At"],
+        ["Session Date", "Session Label", "Student Name", "Email", "Batch", "Scanned At"],
         ...records.map(r => {
-          const sess = sessions.find(s => s.id === r.session_id);
-          const stu  = students.find(s => s.id === r.student_id);
+          const sess  = sessions.find(s => s.id === r.session_id);
+          const stu   = students.find(s => s.id === r.student_id);
+          const batch = statsByStudentId[r.student_id]?.batchLabel || "";
           return [
-            r.session_date, sess?.label || "", r.student_name, stu?.email || "",
+            r.session_date, sess?.label || "", r.student_name, stu?.email || "", batch,
             new Date(r.scanned_at).toLocaleString("en-IN"),
           ];
         }).sort((a, b) => a[0] > b[0] ? 1 : -1),
       ];
       const ws3 = XLSX.utils.aoa_to_sheet(rawRows);
-      ws3["!cols"] = [{ wch:14 }, { wch:26 }, { wch:22 }, { wch:28 }, { wch:22 }];
+      ws3["!cols"] = [{ wch:14 }, { wch:26 }, { wch:22 }, { wch:28 }, { wch:12 }, { wch:22 }];
       XLSX.utils.book_append_sheet(wb, ws3, "Raw Records");
 
       // Sheet 4 — Month-wise
@@ -5381,14 +5507,24 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
             </div>
           ) : (
             sessions.map(sess => {
-              const sessRecs = records.filter(r => r.session_id === sess.id);
-              const rate     = students.length > 0 ? Math.round((sessRecs.length / students.length) * 100) : 0;
+              const sessRecs  = records.filter(r => r.session_id === sess.id);
+              const rate      = students.length > 0 ? Math.round((sessRecs.length / students.length) * 100) : 0;
               const dateLabel = new Date(sess.session_date + "T12:00:00").toLocaleDateString("en-IN", { weekday:"short", day:"2-digit", month:"short", year:"numeric" });
+              // How many sessions ran on this same date? (multi-batch indicator)
+              const siblingSessions = sessions.filter(s => s.session_date === sess.session_date && s.id !== sess.id);
               return (
                 <div key={sess.id} style={{ ...card({ padding:"14px 18px" }), display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
                   <div style={{ width:44, height:44, borderRadius:12, background:"linear-gradient(135deg,#10b981,#059669)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>📅</div>
                   <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>{dateLabel}</div>
+                    <div style={{ display:"flex", alignItems:"center", gap:7, flexWrap:"wrap" }}>
+                      <span style={{ fontWeight:700, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>{dateLabel}</span>
+                      {siblingSessions.length > 0 && (
+                        <span title={`${siblingSessions.length + 1} sessions on this day — merged into one column in Attendance Table`}
+                          style={{ padding:"1px 7px", borderRadius:99, background:"rgba(139,92,246,.12)", color:"#8B5CF6", fontSize:10, fontWeight:800 }}>
+                          🔀 Multi-batch day
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize:11.5, color:"#64748b", marginTop:1 }}>{sess.label}</div>
                   </div>
                   <div style={{ display:"flex", gap:18, alignItems:"center", flexShrink:0 }}>
@@ -5421,7 +5557,7 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
           <div style={{ padding:"14px 18px", borderBottom:`1px solid ${darkMode?"#334155":"#e2e8f0"}`, display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
             <div>
               <div style={{ fontWeight:800, fontSize:14, color:darkMode?"#e2e8f0":"#0f172a" }}>Attendance Matrix</div>
-              <div style={{ fontSize:11.5, color:"#94a3b8", marginTop:1 }}>Students × Dates · <span style={{color:"#22c55e",fontWeight:700}}>P</span>=Present · <span style={{color:"#ef4444",fontWeight:700}}>A</span>=Absent · Click a student row for their full report</div>
+              <div style={{ fontSize:11.5, color:"#94a3b8", marginTop:1 }}>Students × Dates · <span style={{color:"#22c55e",fontWeight:700}}>P</span>=Present · <span style={{color:"#ef4444",fontWeight:700}}>A</span>=Absent · Multiple sessions on same day are merged · <span style={{color:"#8B5CF6",fontWeight:700}}>×2</span>=multi-batch day</div>
             </div>
             <button onClick={handleExport} disabled={exportBusy||dates.length===0} style={{ padding:"7px 16px", background:"#0f172a", color:"#fff", border:"none", borderRadius:8, cursor:(exportBusy||dates.length===0)?"not-allowed":"pointer", fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(exportBusy||dates.length===0)?.5:1 }}>
               {exportBusy?"⟳":"📊"} Export Excel
@@ -5441,12 +5577,24 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
                     <th style={{ padding:"12px 14px", textAlign:"left", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, whiteSpace:"nowrap", position:"sticky", left:0, background:darkMode?"#0f172a":"#f8fafc", zIndex:2 }}>
                       Student
                     </th>
-                    {dates.map(d => (
-                      <th key={d} style={{ padding:"10px 6px", textAlign:"center", fontWeight:700, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, minWidth:68 }}>
-                        <div style={{ fontSize:11 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short"})}</div>
-                        <div style={{ fontSize:9.5, color:"#94a3b8", fontWeight:500 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{weekday:"short"})}</div>
-                      </th>
-                    ))}
+                    <th style={{ padding:"12px 10px", textAlign:"center", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, whiteSpace:"nowrap", minWidth:80 }}>
+                      Batch
+                    </th>
+                    {dates.map(d => {
+                      const sessCount = (sessionsByDate[d] || []).length;
+                      return (
+                        <th key={d} style={{ padding:"10px 6px", textAlign:"center", fontWeight:700, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, minWidth:68 }}
+                          title={sessCount > 1 ? `${sessCount} sessions on this day (batches merged)` : undefined}>
+                          <div style={{ fontSize:11 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short"})}</div>
+                          <div style={{ fontSize:9.5, color:"#94a3b8", fontWeight:500 }}>{new Date(d+"T12:00:00").toLocaleDateString("en-IN",{weekday:"short"})}</div>
+                          {sessCount > 1 && (
+                            <div title={`${sessCount} sessions (merged)`} style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", marginTop:2, padding:"1px 5px", borderRadius:99, background:"rgba(139,92,246,.15)", color:"#8B5CF6", fontSize:8.5, fontWeight:800, letterSpacing:".03em" }}>
+                              ×{sessCount}
+                            </div>
+                          )}
+                        </th>
+                      );
+                    })}
                     <th style={{ padding:"12px 12px", textAlign:"center", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}`, whiteSpace:"nowrap" }}>P/T</th>
                     <th style={{ padding:"12px 12px", textAlign:"center", fontWeight:800, color:darkMode?"#94a3b8":"#475569", borderBottom:`1.5px solid ${darkMode?"#334155":"#e2e8f0"}` }}>%</th>
                   </tr>
@@ -5468,6 +5616,16 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
                           </div>
                         </div>
                       </td>
+                      {/* Batch column */}
+                      <td style={{ padding:"6px 10px", textAlign:"center" }}>
+                        {s.batchLabel ? (
+                          <span style={{ display:"inline-block", padding:"2px 9px", borderRadius:99, fontSize:11, fontWeight:800, background: batchLabelColor(s.batchLabel) + "22", color: batchLabelColor(s.batchLabel), border:`1px solid ${batchLabelColor(s.batchLabel)}44`, whiteSpace:"nowrap" }}>
+                            {s.batchLabel}
+                          </span>
+                        ) : (
+                          <span style={{ fontSize:10, color:"#cbd5e1" }}>—</span>
+                        )}
+                      </td>
                       {dates.map(d => {
                         const present = !!byStudentDate[s.id]?.[d];
                         return (
@@ -5487,6 +5645,7 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
                   {/* Daily totals */}
                   <tr style={{ background:darkMode?"#0f172a":"#f8fafc", borderTop:`2px solid ${darkMode?"#334155":"#e2e8f0"}` }}>
                     <td style={{ padding:"10px 14px", fontWeight:800, color:darkMode?"#64748b":"#475569", position:"sticky", left:0, background:darkMode?"#0f172a":"#f8fafc", fontSize:12 }}>📊 Daily Total</td>
+                    <td></td>{/* Batch column spacer */}
                     {dates.map(d => {
                       const cnt  = students.filter(s => !!byStudentDate[s.id]?.[d]).length;
                       const rate = students.length > 0 ? Math.round((cnt/students.length)*100) : 0;
@@ -5518,7 +5677,10 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
                   {s.name.charAt(0).toUpperCase()}
                 </div>
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontWeight:700, fontSize:13, color:darkMode?"#e2e8f0":"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{s.name}</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap" }}>
+                    <span style={{ fontWeight:700, fontSize:13, color:darkMode?"#e2e8f0":"#0f172a", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:120 }}>{s.name}</span>
+                    {s.batchLabel && <span style={{ padding:"1px 6px", borderRadius:99, fontSize:9.5, fontWeight:800, background:batchLabelColor(s.batchLabel)+"22", color:batchLabelColor(s.batchLabel), flexShrink:0 }}>{s.batchLabel}</span>}
+                  </div>
                   <div style={{ fontSize:10.5, color:"#94a3b8" }}>{s.pct}% attendance</div>
                 </div>
                 <span style={{ padding:"2px 8px", borderRadius:99, fontSize:11, fontWeight:800, background:pctBg(s.pct), color:pctColor(s.pct), flexShrink:0 }}>{s.pct}%</span>
@@ -5586,7 +5748,14 @@ function AttendanceStudentReport({ student, sessions, records, dates, darkMode, 
             {student.name.charAt(0).toUpperCase()}
           </div>
           <div style={{ flex:1 }}>
-            <div style={{ fontWeight:800, fontSize:19 }}>{student.name}</div>
+            <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+              <span style={{ fontWeight:800, fontSize:19 }}>{student.name}</span>
+              {student.batchLabel && (
+                <span style={{ padding:"2px 10px", borderRadius:99, fontSize:11, fontWeight:800, background:"rgba(255,255,255,.25)", color:"#fff", border:"1px solid rgba(255,255,255,.4)" }}>
+                  🏷️ {student.batchLabel}
+                </span>
+              )}
+            </div>
             <div style={{ fontSize:13, opacity:.85, marginTop:2 }}>{student.email}</div>
           </div>
           <div style={{ textAlign:"center", flexShrink:0 }}>
