@@ -27,6 +27,23 @@ const GROQ_MODELS = [
   "openai/gpt-oss-120b",
 ];
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
+
+/* Vision-capable Groq models, best first. Groq rotates its multimodal
+   lineup often, so the brochure reader walks this list and skips any model
+   the API rejects (404/400) instead of failing the whole request. */
+const GROQ_VISION_MODELS = [
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+  "qwen/qwen3.6-27b",
+  "llama-3.2-90b-vision-preview",
+  "llama-3.2-11b-vision-preview",
+];
+const _VISION_SET = new Set(GROQ_VISION_MODELS);
+function isVisionCapable(model) {
+  if (_VISION_SET.has(model)) return true;
+  // Defensive: catch future names that clearly advertise multimodality.
+  return /vision|llava|scout|maverick|multimodal/i.test(model || "");
+}
 const DAYS_HDR = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -123,7 +140,7 @@ function dgToCSV(ds) {
 }
 
 // ── Call Groq to get a dataset schema + metadata (no python_code) ─
-async function dgCallGroqForSchema(userPrompt, apiKey, model, rows, seed) {
+async function dgCallGroqForSchema(userPrompt, apiKey, model, rows, seed, onEvent = null) {
   const system = `You are an expert ML data engineer and educator. Your job is to:
 1. Design a synthetic dataset whose columns are DIRECTLY USABLE for the given ML topic and every sub-topic listed.
 
@@ -159,24 +176,23 @@ Return ONLY valid JSON (no markdown, no backticks):
   "practice_steps": ["Step 1: ...", "Step 2: ...", "Step 3: ...", "Step 4: ...", "Step 5: ..."]
 }`;
 
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
+  // Routed through the shared engine so a rate limit rotates keys/models
+  // and retries instead of failing the click.
+  const content = await aiRun(
+    [
+      { role: "system", content: system },
+      { role: "user", content: userPrompt },
+    ],
+    {
+      keys: aiEffectiveKeys(apiKey),
+      preferredModel: model,
       temperature: 0.45,
-      max_tokens: 2000,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
-  if (!res.ok) { const t = await res.text(); throw new Error(t); }
-  const json = await res.json();
-  const content = json.choices?.[0]?.message?.content || "{}";
-  return JSON.parse(content);
+      maxTokens: 2000,
+      responseFormat: { type: "json_object" },
+      onEvent: onEvent || null,
+    }
+  );
+  return JSON.parse(content || "{}");
 }
 
 // ── Per-model max completion tokens (from console.groq.com/docs/models) ──
@@ -213,7 +229,7 @@ function dgIsTokenError(errText) {
 // in a 400-800 line script, which reliably causes invalid_request_error or
 // broken JSON parses. Raw Python is simpler, faster, and works on every model.
 // On any failure, auto-retry once with a shorter script target (250 lines).
-async function dgCallGroqForCode(schema, subTopicList, apiKey, model) {
+async function dgCallGroqForCode(schema, subTopicList, apiKey, model, onEvent = null) {
   const colSummary = (schema.columns || []).map(c => {
     const parts = [`name: ${c.name}`, `type: ${c.type}`];
     if (c.range)              parts.push(`range:[${c.range[0]},${c.range[1]}]`);
@@ -297,30 +313,20 @@ Use these comment headers: # ═══ SECTION 1: IMPORTS & LOAD ═══  |  #
 
   // ── Inner fetch helper — always raw Python, no JSON mode ─────────
   async function fetchCode(maxTokens, short) {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
+    // NO response_format — raw Python avoids JSON-escaping failures entirely
+    const content = await aiRun(
+      [
+        { role: "system", content: short ? systemShort : systemFull },
+        { role: "user",   content: userMsg },
+      ],
+      {
+        keys: aiEffectiveKeys(apiKey),
+        preferredModel: model,
         temperature: 0.4,
-        max_tokens: maxTokens,
-        // NO response_format — raw Python avoids JSON-escaping failures entirely
-        messages: [
-          { role: "system", content: short ? systemShort : systemFull },
-          { role: "user",   content: userMsg },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      const err = new Error(errText);
-      err.isTokenError = dgIsTokenError(errText);
-      throw err;
-    }
-
-    const json    = await res.json();
-    const content = json.choices?.[0]?.message?.content || "";
+        maxTokens,
+        onEvent: onEvent || null,
+      }
+    );
     return cleanRawPython(content);
   }
 
@@ -331,7 +337,7 @@ Use these comment headers: # ═══ SECTION 1: IMPORTS & LOAD ═══  |  #
     return await fetchCode(budget, false);
   } catch (e) {
     // ── Attempt 2: retry with shorter prompt + reduced budget ─────────
-    if (e.isTokenError) {
+    if (e.isTokenError || e._tokenError) {
       return await fetchCode(Math.min(budget, 4000), true);
     }
     throw e;
@@ -548,30 +554,74 @@ function makeSupabase(url, key) {
     "Prefer": "return=representation"
   };
 
-  const req = async (method, path, body, extra = {}) => {
-    const r = await fetch(`${url}/rest/v1/${path}`, {
-      method,
-      headers: { ...h, ...extra },
-      body: body ? JSON.stringify(body) : undefined
-    });
+  // A write that dies on a flaky connection used to be swallowed by a
+  // .catch(console.warn) further up the stack — that is how content went
+  // missing. Every request now retries transient failures before it is
+  // allowed to fail, and callers can queue anything that still doesn't land.
+  const SB_RETRYABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+  const once = async (method, path, body, extra = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    let r;
+    try {
+      r = await fetch(`${url}/rest/v1/${path}`, {
+        method,
+        headers: { ...h, ...extra },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      const err = new Error(
+        e.name === "AbortError"
+          ? "Supabase request timed out after 30s"
+          : `Supabase unreachable: ${e.message}`
+      );
+      err._httpStatus = 0;          // network-level → always retryable
+      err._retryable = true;
+      throw err;
+    }
+    clearTimeout(timer);
     if (!r.ok) {
-      const e = await r.text().catch(() => r.statusText);
-      throw new Error(`Supabase ${r.status}: ${e}`);
+      const text = await r.text().catch(() => r.statusText);
+      const err = new Error(`Supabase ${r.status}: ${text}`);
+      err._httpStatus = r.status;
+      err._retryable = SB_RETRYABLE.has(r.status);
+      throw err;
     }
     const ct = r.headers.get("content-type") || "";
     if (ct.includes("json")) return r.json();
     return null;
   };
 
+  const req = async (method, path, body, extra = {}, attempts = 4) => {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await once(method, path, body, extra);
+      } catch (e) {
+        lastErr = e;
+        if (!e._retryable || i === attempts - 1) throw e;
+        await new Promise(r => setTimeout(r, 600 * Math.pow(2, i) + Math.random() * 250));
+      }
+    }
+    throw lastErr;
+  };
+
   return {
+    _url: url,
     async select(table, filter = "") {
       return req("GET", `${table}${filter ? "?" + filter : ""}`);
     },
     async upsert(table, row) {
       return req("POST", table, row, { "Prefer": "resolution=merge-duplicates,return=representation" });
     },
+    // Returns the updated row(s) so callers can read back the authoritative
+    // updated_at instead of guessing it — the old guess permanently disabled
+    // every subsequent save.
     async update(table, filter, patch) {
-      return req("PATCH", `${table}?${filter}`, patch);
+      return req("PATCH", `${table}?${filter}`, patch, { "Prefer": "return=representation" });
     },
     async delete(table, filter) {
       return req("DELETE", `${table}?${filter}`);
@@ -580,6 +630,94 @@ function makeSupabase(url, key) {
       return req("POST", table, rows, { "Prefer": "resolution=merge-duplicates,return=representation" });
     }
   };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   DURABLE WRITE QUEUE
+   If a write still fails after its retries (tab closed, offline, RLS
+   hiccup) it is parked in localStorage and replayed on the next flush —
+   on reconnect, on an interval, and on the next app load. Nothing that
+   was generated is ever dropped on the floor.
+═══════════════════════════════════════════════════════════════════ */
+const SB_QUEUE_LS = "lms_write_queue_v1";
+const SB_QUEUE_MAX = 400;
+
+function sbQueueRead() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SB_QUEUE_LS) || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function sbQueueWrite(items) {
+  try {
+    localStorage.setItem(SB_QUEUE_LS, JSON.stringify(items.slice(-SB_QUEUE_MAX)));
+  } catch {
+    // Storage full — drop the oldest half rather than lose the newest work.
+    try { localStorage.setItem(SB_QUEUE_LS, JSON.stringify(items.slice(-Math.floor(SB_QUEUE_MAX / 2)))); } catch {}
+  }
+}
+
+// dedupeKey collapses repeated writes to the same target so a long session
+// doesn't replay hundreds of stale versions of the same row.
+function sbQueuePush(op) {
+  const items = sbQueueRead().filter(o => !(op.dedupeKey && o.dedupeKey === op.dedupeKey));
+  items.push({ ...op, ts: Date.now() });
+  sbQueueWrite(items);
+  try { window.dispatchEvent(new CustomEvent("lms-queue-changed", { detail: { size: items.length } })); } catch {}
+}
+
+function sbQueueSize() { return sbQueueRead().length; }
+
+let _sbFlushing = false;
+async function sbQueueFlush(sb) {
+  if (!sb || _sbFlushing) return { flushed: 0, remaining: sbQueueSize() };
+  const items = sbQueueRead();
+  if (!items.length) return { flushed: 0, remaining: 0 };
+  _sbFlushing = true;
+  const survivors = [];
+  let flushed = 0;
+  try {
+    for (const op of items) {
+      try {
+        if (op.kind === "upsert")      await sb.upsert(op.table, op.row);
+        else if (op.kind === "update") await sb.update(op.table, op.filter, op.row);
+        else if (op.kind === "delete") await sb.delete(op.table, op.filter);
+        flushed++;
+      } catch (e) {
+        // Permanent rejections (bad column, RLS denial) would loop forever.
+        const status = e._httpStatus;
+        const permanent = status && status !== 0 && status < 500 && status !== 429;
+        if (!permanent) survivors.push(op);
+        else console.error("Dropping unsendable queued write:", op.table, e.message);
+      }
+    }
+  } finally {
+    sbQueueWrite(survivors);
+    _sbFlushing = false;
+    try { window.dispatchEvent(new CustomEvent("lms-queue-changed", { detail: { size: survivors.length } })); } catch {}
+  }
+  return { flushed, remaining: survivors.length };
+}
+
+// The write every caller should use: try hard, then queue, never throw away.
+async function sbDurableWrite(sb, op) {
+  if (!sb) { sbQueuePush(op); return { ok: false, queued: true }; }
+  try {
+    if (op.kind === "upsert")      await sb.upsert(op.table, op.row);
+    else if (op.kind === "update") await sb.update(op.table, op.filter, op.row);
+    else if (op.kind === "delete") await sb.delete(op.table, op.filter);
+    return { ok: true, queued: false };
+  } catch (e) {
+    const status = e._httpStatus;
+    const permanent = status && status !== 0 && status < 500 && status !== 429;
+    if (permanent) {
+      console.error(`Supabase rejected ${op.kind} on ${op.table}:`, e.message);
+      return { ok: false, queued: false, error: e };
+    }
+    sbQueuePush(op);
+    return { ok: false, queued: true, error: e };
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -765,7 +903,20 @@ async function sbSaveCourseData(sb, courseId, patch) {
     if (patch[jsKey] !== undefined) dbPatch[dbCol] = patch[jsKey];
   }
   dbPatch.updated_at = new Date().toISOString();
-  await sb.update("lms_courses", `id=eq.${encodeURIComponent(courseId)}`, dbPatch);
+  const rows = await sb.update("lms_courses", `id=eq.${encodeURIComponent(courseId)}`, dbPatch);
+  // Hand back what the database actually stored. The caller uses this to
+  // detect real concurrent edits; previously it compared against a locally
+  // generated timestamp that was always fractionally older than the row's
+  // own updated_at, so every save after the first was silently skipped.
+  const saved = Array.isArray(rows) ? rows[0] : rows;
+  if (!saved) {
+    // PATCH matched zero rows → the course row is missing. Say so loudly
+    // instead of reporting a successful save that never happened.
+    const err = new Error("Course row not found — nothing was saved");
+    err._noRow = true;
+    throw err;
+  }
+  return saved.updated_at || dbPatch.updated_at;
 }
 
 async function sbCreateCourse(sb, name, trainerId) {
@@ -1234,13 +1385,46 @@ async function sbGetActiveSession(sb, token) {
   return { ...session, expired: new Date(session.qr_expires_at) < new Date() };
 }
 
-async function sbMarkAttendance(sb, token, studentId, studentName, courseId) {
+/* The QR decides which register the student lands in.
+
+   Previously the record was filed against whichever course the student
+   happened to have open on their phone, and a mismatch was rejected
+   outright — so scanning the NLP QR while sitting in the Python course
+   failed, and the trainer saw an empty sheet. The session row already
+   knows its own course, so that is now the single source of truth and the
+   caller's courseId is only a hint. What we do check is enrolment: the
+   student must belong to the course the QR came from. */
+async function sbMarkAttendance(sb, token, studentId, studentName, courseIdHint) {
   const session = await sbGetActiveSession(sb, token);
-  if (!session) throw new Error("Invalid attendance token.");
+  if (!session) throw new Error("This QR code isn't valid. Ask your trainer to show a new one.");
   if (session.expired) throw new Error("This QR code has expired (60-second window). Ask your trainer for a new one.");
-  if (session.course_id !== courseId) throw new Error("This QR code is for a different course.");
+
+  const courseId = session.course_id;   // authoritative
+
+  // Enrolment check against the QR's course, not the open one.
+  let courseName = "";
+  try {
+    const rows = await sb.select("lms_students", `id=eq.${encodeURIComponent(studentId)}&limit=1`);
+    const student = rows?.[0] ? dbRowToStudent(rows[0]) : null;
+    if (student) {
+      const enrolled = getStudentEnrolledCourses(student);
+      const match = enrolled.find(e => e.courseId === courseId);
+      courseName = match?.courseName || "";
+      const legacyOk = student.approved && student.requestedCourseId === courseId;
+      if (!match && !legacyOk) {
+        const label = await sbGetCourseName(sb, courseId);
+        throw new Error(`You're not enrolled in ${label || "that course"}, so attendance can't be marked. Ask your trainer to approve you first.`);
+      }
+    }
+  } catch (e) {
+    // Only swallow lookup failures — a real "not enrolled" must surface.
+    if (/not enrolled/i.test(e.message)) throw e;
+    console.warn("Enrolment check skipped:", e.message);
+  }
+
   const existing = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(session.id)}&student_id=eq.${encodeURIComponent(studentId)}&limit=1`);
-  if (existing?.length > 0) throw new Error("You have already marked attendance for this session.");
+  if (existing?.length > 0) throw new Error("You've already marked attendance for this session.");
+
   const record = {
     id: "att_rec_" + generateId(),
     session_id: session.id, student_id: studentId, student_name: studentName,
@@ -1248,7 +1432,14 @@ async function sbMarkAttendance(sb, token, studentId, studentName, courseId) {
     scanned_at: new Date().toISOString(),
   };
   await sb.upsert("lms_attendance_records", record);
-  return record;
+  return { ...record, courseName };
+}
+
+async function sbGetCourseName(sb, courseId) {
+  try {
+    const rows = await sb.select("lms_courses", `id=eq.${encodeURIComponent(courseId)}&select=name&limit=1`);
+    return rows?.[0]?.name || "";
+  } catch { return ""; }
 }
 
 async function sbGetAttendanceRecords(sb, courseId) {
@@ -1298,9 +1489,13 @@ async function sbLoadStudentDayStatus(sb, studentId, courseId) {
 
 // ── FIX #4: DAY CONTENT — separate table, one row per (course, day, type) ──
 // content_type: 'notebook' | 'examples' | 'resources' | 'assignment' | 'quiz' | 'teachingGuide'
+// Reserved day_key used to stash course-level settings (download lock, etc.)
+// in the existing lms_day_content table — no schema migration required.
+const COURSE_SETTINGS_KEY = "__course_settings__";
+
 async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
-  const payload = typeof content === "object" ? JSON.stringify(content) : (content || "");
+  const payload = typeof content === "object" ? JSON.stringify(content) : (content ?? "");
   const row = {
     id,
     course_id: courseId,
@@ -1312,7 +1507,29 @@ async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trai
   };
   // Include trainer_id if provided — needed for RLS policies on lms_day_content
   if (trainerId) row.trainer_id = trainerId;
-  await sb.upsert("lms_day_content", row);
+  // Durable: retried by the client, then queued for replay if it still fails.
+  const res = await sbDurableWrite(sb, {
+    kind: "upsert", table: "lms_day_content", row, dedupeKey: `dc:${id}`,
+  });
+  if (!res.ok && !res.queued) throw (res.error || new Error("Save rejected"));
+  return res;
+}
+
+// ── COURSE SETTINGS (download lock) ─────────────────────────────────
+async function sbSaveCourseSettings(sb, courseId, settings, trainerId) {
+  return sbSaveDayContent(sb, courseId, COURSE_SETTINGS_KEY, "settings", settings, trainerId);
+}
+
+async function sbGetCourseSettings(sb, courseId) {
+  try {
+    const rows = await sb.select(
+      "lms_day_content",
+      `id=eq.${encodeURIComponent(`${courseId}__${COURSE_SETTINGS_KEY}__settings`)}&limit=1`
+    );
+    const raw = rows?.[0]?.content;
+    if (!raw) return {};
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch { return {}; }
 }
 
 async function sbGetDayContent(sb, courseId, dayKey) {
@@ -1340,6 +1557,8 @@ async function sbGetAllDayContent(sb, courseId) {
   );
   const byDay = {};
   for (const row of (rows || [])) {
+    // The reserved settings row lives in this table but is not a day.
+    if (row.day_key === COURSE_SETTINGS_KEY) continue;
     if (!byDay[row.day_key]) byDay[row.day_key] = {};
     try {
       byDay[row.day_key][row.content_type] = (row.content_type === "quiz" || row.content_type === "dataGenerator")
@@ -1366,6 +1585,122 @@ async function sbDeleteDayFiles(sb, courseId, dayKey) {
     "lms_day_files",
     `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}`
   );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LOCAL SNAPSHOT CACHE
+   A mirror of the course kept in localStorage. It paints the calendar
+   instantly on refresh (no blank flash while Supabase answers) and acts
+   as a safety net if the network read fails. Server data always wins
+   once it arrives — the snapshot only fills gaps.
+═══════════════════════════════════════════════════════════════════ */
+const SNAP_PREFIX = "lms_course_snap_v1_";
+
+function snapRead(courseId) {
+  if (!courseId) return null;
+  try {
+    const raw = localStorage.getItem(SNAP_PREFIX + courseId);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function snapWrite(courseId, data) {
+  if (!courseId) return;
+  try {
+    localStorage.setItem(SNAP_PREFIX + courseId, JSON.stringify({ ...data, _savedAt: Date.now() }));
+  } catch (e) {
+    // Quota exceeded — drop other courses' snapshots before giving up.
+    try {
+      Object.keys(localStorage)
+        .filter(k => k.startsWith(SNAP_PREFIX) && k !== SNAP_PREFIX + courseId)
+        .forEach(k => localStorage.removeItem(k));
+      localStorage.setItem(SNAP_PREFIX + courseId, JSON.stringify({ ...data, _savedAt: Date.now() }));
+    } catch {}
+  }
+}
+
+/* Rebuild a lost day plan from whatever survived in lms_day_content.
+   Every generator stamps `generatedForTopic` alongside its output, so the
+   topic list can be reconstructed even when plan_days was wiped. */
+function recoverPlanFromContent(contentByDay) {
+  const keys = Object.keys(contentByDay || {})
+    .filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k))
+    .sort();
+  if (!keys.length) return null;
+  const planDays = [];
+  keys.forEach((k, idx) => {
+    const topic = contentByDay[k]?.generatedForTopic;
+    if (!topic) return;
+    planDays.push({ dayNum: idx + 1, topic: String(topic) });
+  });
+  if (!planDays.length) return null;
+  planDays.forEach((d, i) => { d.dayNum = i + 1; });
+  return {
+    planDays,
+    planText: planDays.map(d => `Day ${d.dayNum}: ${d.topic}`).join("\n"),
+    startDate: keys[0],
+    recoveredDays: planDays.length,
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   NOTIFICATIONS
+   Stored per student, so the alert reaches them on whichever device they
+   next open — phone Chrome, laptop, anywhere. The browser Notification
+   API surfaces it as a system toast when the app is open; the in-app bell
+   holds it until it is read either way.
+
+   SQL to run once in the Supabase SQL editor:
+
+     create table if not exists lms_notifications (
+       id          text primary key,
+       student_id  text not null,
+       course_id   text,
+       type        text not null default 'info',
+       title       text not null,
+       body        text,
+       read        boolean not null default false,
+       created_at  timestamptz not null default now()
+     );
+     create index if not exists idx_notif_student
+       on lms_notifications(student_id, created_at desc);
+═══════════════════════════════════════════════════════════════════ */
+async function sbCreateNotification(sb, { studentId, courseId = null, type = "info", title, body = "" }) {
+  if (!sb || !studentId || !title) return { ok: false };
+  const row = {
+    id: "ntf_" + generateId(),
+    student_id: studentId,
+    course_id: courseId,
+    type,
+    title,
+    body,
+    read: false,
+    created_at: new Date().toISOString(),
+  };
+  // Durable: a missed notification should not be lost because the network
+  // blinked while the trainer was clicking Approve.
+  return sbDurableWrite(sb, { kind: "upsert", table: "lms_notifications", row });
+}
+
+async function sbGetNotifications(sb, studentId, limit = 30) {
+  if (!sb || !studentId) return [];
+  try {
+    const rows = await sb.select(
+      "lms_notifications",
+      `student_id=eq.${encodeURIComponent(studentId)}&order=created_at.desc&limit=${limit}`
+    );
+    return rows || [];
+  } catch (e) {
+    // Table not created yet → behave as "no notifications", never crash the app.
+    console.warn("Notifications unavailable:", e.message);
+    return [];
+  }
+}
+
+async function sbMarkNotificationsRead(sb, ids) {
+  if (!sb || !ids?.length) return;
+  const filter = `id=in.(${ids.map(i => `"${i}"`).join(",")})`;
+  await sbDurableWrite(sb, { kind: "update", table: "lms_notifications", filter, row: { read: true } });
 }
 
 function getCourseStats(course) {
@@ -1467,7 +1802,33 @@ function buildDayMap(planDays, startDate, monfriOnly, dayOverrides = {}) {
   return map;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   DOWNLOAD LOCK
+   The trainer can lock a course so students read everything in place but
+   pull nothing out of it. Every export in the app funnels through
+   canDownload(), so locking is a single switch rather than a hunt through
+   twenty buttons — and it keeps Supabase Storage egress flat.
+   Trainers are never blocked by their own lock.
+═══════════════════════════════════════════════════════════════════ */
+const DL_GUARD = { locked: false, studentMode: false, notify: null, courseName: "" };
+
+function setDownloadGuard(next) { Object.assign(DL_GUARD, next); }
+
+function downloadsBlocked() { return !!(DL_GUARD.locked && DL_GUARD.studentMode); }
+
+function canDownload(silent = false) {
+  if (!downloadsBlocked()) return true;
+  if (!silent && DL_GUARD.notify) {
+    DL_GUARD.notify(
+      `Downloads are turned off for ${DL_GUARD.courseName || "this course"} — everything is still here to read and work through.`,
+      "warn"
+    );
+  }
+  return false;
+}
+
 function downloadBlob(content, filename, mime="text/plain") {
+  if (!canDownload()) return;
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1499,6 +1860,47 @@ function extractCodeBlocks(text) {
 /* ═══════════════════════════════════════════════════════════════════
    ZIP EXPORT — lazy-loads JSZip from CDN, then packs day content
 ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════
+   PDF TEXT EXTRACTION
+   The brochure reader used to hand the model a filename and ask it to
+   guess the syllabus, which is exactly why it produced unrelated topics.
+   Now the real text comes out of the PDF first and the plan is built from
+   that text alone.
+═══════════════════════════════════════════════════════════════════ */
+const PDFJS_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.mjs";
+const PDFJS_WORKER = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
+let _pdfjsPromise = null;
+
+function loadPdfJs() {
+  if (_pdfjsPromise) return _pdfjsPromise;
+  _pdfjsPromise = import(/* @vite-ignore */ PDFJS_URL)
+    .then(mod => {
+      const lib = mod.getDocument ? mod : (mod.default || mod);
+      try { lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER; } catch {}
+      return lib;
+    })
+    .catch(e => { _pdfjsPromise = null; throw new Error(`Couldn't load the PDF reader: ${e.message}`); });
+  return _pdfjsPromise;
+}
+
+// dataUrl → plain text. Returns "" when the PDF holds no selectable text
+// (a scan), which the caller treats as "fall back to reading it as an image".
+async function extractPdfText(dataUrl, maxPages = 20) {
+  const lib = await loadPdfJs();
+  const base64 = String(dataUrl).split(",")[1] || "";
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const pdf = await lib.getDocument({ data: bytes }).promise;
+  const pages = Math.min(pdf.numPages, maxPages);
+  const out = [];
+  for (let p = 1; p <= pages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const text = content.items.map(it => it.str).join(" ").replace(/\s+/g, " ").trim();
+    if (text) out.push(text);
+  }
+  return out.join("\n\n").trim();
+}
+
 let _jszipPromise = null;
 function loadJSZip() {
   if (window.JSZip) return Promise.resolve(window.JSZip);
@@ -1668,6 +2070,7 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
   };
 
   const downloadZip = async () => {
+    if (!canDownload()) return;
     if (totalSelected === 0) { notify("Select at least one item to export", "err"); return; }
     setPacking(true);
     try {
@@ -1806,14 +2209,70 @@ function DayExportPanel({ day, dayData, notify, isTrainer, onClose }) {
    ─ Respects Retry-After header when present
    ─ Does NOT retry permanent errors (401, 400, 404)
 ═══════════════════════════════════════════════════════════════════ */
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+// A key that returns these is invalid/revoked — skip it for the rest of the session.
+const KEY_DEAD_STATUSES = new Set([401, 403]);
+// A model that returns these is unusable for THIS request (wrong shape, decommissioned,
+// no vision support…). We drop the model for this call and try the next one.
+const MODEL_BAD_STATUSES = new Set([400, 404, 413, 415, 422]);
 
-// Shared mutable state so every concurrent call shares the same model index
-// (avoids all parallel calls hammering a rate-limited model simultaneously)
+/* ── API KEY POOL ────────────────────────────────────────────────────
+   The trainer can register as many Groq keys as they like in Settings.
+   Shape: [{ id, key, label }]. Stored in localStorage so it survives
+   refresh; never sent to Supabase. */
+const AI_KEYS_LS = "lms_ai_keys_v1";
+
+function aiLoadKeys() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(AI_KEYS_LS) || "[]");
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter(k => k && typeof k.key === "string" && k.key.trim())
+      .map((k, idx) => ({ id: k.id || `k${idx}_${k.key.slice(-6)}`, key: k.key.trim(), label: k.label || `Key ${idx + 1}` }));
+  } catch { return []; }
+}
+
+function aiSaveKeys(list) {
+  try { localStorage.setItem(AI_KEYS_LS, JSON.stringify(list || [])); } catch {}
+  try { window.dispatchEvent(new CustomEvent("lms-ai-keys-changed")); } catch {}
+}
+
+// Effective pool = saved pool, plus the legacy single key if it isn't already in there.
+function aiEffectiveKeys(legacyKey) {
+  const pool = aiLoadKeys().map(k => k.key);
+  const lk = (legacyKey || "").trim();
+  if (lk && !pool.includes(lk)) pool.unshift(lk);
+  return pool;
+}
+
+/* ── Per (key × model) cooldown ledger ───────────────────────────────
+   Groq meters per key AND per model, so a 429 only burns that one pair.
+   We remember when each pair becomes usable again and route around it. */
+const _rlCool = new Map();
+const _rlFingerprint = (key, model) => `${(key || "").slice(-10)}|${model}`;
+
+function _rlCoolUntil(key, model) {
+  const t = _rlCool.get(_rlFingerprint(key, model));
+  return (t && t > Date.now()) ? t : 0;
+}
+function _rlSetCool(key, model, ms) {
+  _rlCool.set(_rlFingerprint(key, model), Date.now() + Math.max(500, ms || 0));
+}
+function _rlSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      if (signal.aborted) { clearTimeout(t); reject(new Error("Cancelled")); return; }
+      signal.addEventListener("abort", () => { clearTimeout(t); reject(new Error("Cancelled")); }, { once: true });
+    }
+  });
+}
+
+// Shared model cursor so every concurrent call starts from the same place.
 const _rlState = {
-  currentModelIdx: 0,   // index into GROQ_MODELS
-  consecutiveRLs: 0,    // consecutive 429s on the SAME model
-  onModelSwitch: null,  // optional callback(newModel) for UI notification
+  currentModelIdx: 0,
+  consecutiveRLs: 0,
+  onModelSwitch: null,
 };
 
 function rlGetCurrentModel() {
@@ -1825,10 +2284,160 @@ function rlRotateModel(notifyFn) {
   _rlState.currentModelIdx = (_rlState.currentModelIdx + 1) % GROQ_MODELS.length;
   _rlState.consecutiveRLs = 0;
   const next = rlGetCurrentModel();
-  if (notifyFn) notifyFn(`⚠️ Rate limit — switched model: ${prev} → ${next}`, "warn");
+  if (notifyFn) notifyFn(`Rate limit — switched model: ${prev} → ${next}`, "warn");
   return next;
 }
 
+// Model preference order: whatever the trainer picked first, then the rest.
+function rlModelOrder(preferred) {
+  const first = preferred && GROQ_MODELS.includes(preferred) ? preferred : rlGetCurrentModel();
+  return [first, ...GROQ_MODELS.filter(m => m !== first)];
+}
+
+/* ── THE ENGINE ──────────────────────────────────────────────────────
+   Walks every (model × key) combination. A rate-limited pair is parked
+   on a cooldown and the next key is tried instantly; when every key on
+   the preferred model is parked it moves to the next model; when the
+   whole grid is parked it sleeps until the earliest pair frees up and
+   goes round again. It only gives up on a hard error (bad request on
+   every model, every key dead) or when maxWaitMs is exhausted.
+
+   onEvent({ type, ... }) reports progress so the UI can show
+   "limit reached — retrying in 8s on key 2" instead of failing. */
+async function aiRun(messages, {
+  keys = [],
+  models = null,
+  preferredModel = null,
+  onEvent = null,
+  maxWaitMs = 15 * 60 * 1000,
+  maxTokens,
+  timeoutMs,
+  signal = null,
+  temperature,
+  responseFormat = null,
+} = {}) {
+  const keyList = (keys || []).filter(Boolean);
+  if (!keyList.length) throw new Error("No Groq API key — add one in Settings › AI keys");
+
+  const modelList = (models && models.length) ? models.slice() : rlModelOrder(preferredModel);
+  const emit = (e) => { try { onEvent && onEvent(e); } catch {} };
+
+  const deadKeys = new Set();
+  const badModels = new Set();
+  const startedAt = Date.now();
+  let attempt = 0;
+  let lastErr = null;
+  let tokenBudget = maxTokens;
+
+  while (true) {
+    if (signal?.aborted) throw new Error("Cancelled");
+    if (Date.now() - startedAt > maxWaitMs) {
+      throw lastErr || new Error("Generation timed out after repeated rate limits — try again shortly");
+    }
+
+    const liveKeys   = keyList.filter(k => !deadKeys.has(k));
+    const liveModels = modelList.filter(m => !badModels.has(m));
+
+    if (!liveKeys.length)   throw lastErr || new Error("Every API key was rejected — check your keys in Settings");
+    if (!liveModels.length) throw lastErr || new Error("No model accepted this request");
+
+    // Pick the best usable pair: stay on the preferred model, rotate keys first.
+    let pick = null;
+    for (const m of liveModels) {
+      for (const k of liveKeys) {
+        if (!_rlCoolUntil(k, m)) { pick = { key: k, model: m }; break; }
+      }
+      if (pick) break;
+    }
+
+    // Whole grid is cooling down — wait for the soonest slot, then retry.
+    if (!pick) {
+      let soonest = Infinity;
+      for (const m of liveModels) for (const k of liveKeys) {
+        const t = _rlCoolUntil(k, m);
+        if (t && t < soonest) soonest = t;
+      }
+      const waitMs = Math.min(Math.max(1200, soonest - Date.now()), 30000);
+      emit({ type: "waiting", waitMs, keys: liveKeys.length, models: liveModels.length });
+      await _rlSleep(waitMs, signal);
+      continue;
+    }
+
+    attempt++;
+    const keyIndex = keyList.indexOf(pick.key);
+    emit({ type: "attempt", attempt, model: pick.model, keyIndex, keyCount: keyList.length });
+
+    try {
+      const out = await callGroq(pick.key, pick.model, messages, {
+        maxTokens: tokenBudget, timeoutMs, signal, temperature, responseFormat,
+      });
+      const idx = GROQ_MODELS.indexOf(pick.model);
+      if (idx !== -1) { _rlState.currentModelIdx = idx; _rlState.consecutiveRLs = 0; }
+      emit({ type: "success", model: pick.model, keyIndex, attempt });
+      return out;
+    } catch (e) {
+      lastErr = e;
+      const status = e._httpStatus;
+
+      if (e.name === "AbortError" || /cancelled/i.test(e.message || "")) throw e;
+
+      if (KEY_DEAD_STATUSES.has(status)) {
+        deadKeys.add(pick.key);
+        emit({ type: "key-dead", keyIndex, message: e.message });
+        continue;
+      }
+
+      if (status === 429) {
+        _rlState.consecutiveRLs++;
+        // Respect Retry-After; otherwise park this pair long enough for a
+        // per-minute window to roll over, and move on to the next key NOW.
+        _rlSetCool(pick.key, pick.model, e._retryAfterMs ?? 25000);
+        emit({ type: "rate-limited", keyIndex, model: pick.model, retryAfterMs: e._retryAfterMs ?? 25000, keyCount: keyList.length });
+        continue;
+      }
+
+      // Context/token overflow — shrink the ask and retry the same pair once.
+      if (e._tokenError && tokenBudget && tokenBudget > 1200) {
+        tokenBudget = Math.max(1200, Math.floor(tokenBudget / 2));
+        emit({ type: "shrink", maxTokens: tokenBudget });
+        continue;
+      }
+
+      if (MODEL_BAD_STATUSES.has(status)) {
+        badModels.add(pick.model);
+        emit({ type: "model-rejected", model: pick.model, message: e.message });
+        continue;
+      }
+
+      // Network blip / 5xx / timeout — short exponential backoff on this pair.
+      const backoff = Math.min(30000, 1500 * Math.pow(2, Math.min(4, attempt)));
+      _rlSetCool(pick.key, pick.model, backoff);
+      emit({ type: "transient", message: e.message, backoff });
+    }
+  }
+}
+
+// Turns an engine event into a short, human sentence for the toast/banner.
+function aiEventMessage(ev) {
+  switch (ev.type) {
+    case "rate-limited":
+      return ev.keyCount > 1
+        ? `Limit reached on key ${ev.keyIndex + 1} — switching to the next key…`
+        : `Limit reached — retrying in ${Math.round((ev.retryAfterMs || 25000) / 1000)}s…`;
+    case "waiting":
+      return `All keys are at their limit — resuming in ${Math.round(ev.waitMs / 1000)}s…`;
+    case "key-dead":
+      return `Key ${ev.keyIndex + 1} was rejected — skipping it`;
+    case "model-rejected":
+      return `${ev.model} can't handle this request — trying another model`;
+    case "transient":
+      return `Network hiccup — retrying in ${Math.round(ev.backoff / 1000)}s…`;
+    default:
+      return null;
+  }
+}
+
+// Legacy helper kept for the Ollama path and any non-Groq call site.
 async function withRetry(fn, maxAttempts = 3, baseDelayMs = 1500) {
   let lastErr;
   for (let i = 0; i < maxAttempts; i++) {
@@ -1846,33 +2455,26 @@ async function withRetry(fn, maxAttempts = 3, baseDelayMs = 1500) {
   throw lastErr;
 }
 
-// ── Rate-limit-aware sequential runner ───────────────────────────
-// Used by genAllForDay and genWeek to guarantee completion.
-// pauseMs: how long to wait after a 429 before retrying
-// maxModelRotations: how many model switches before giving up entirely
-async function withRLResilience(fn, { pauseMs = 5000, maxModelRotations = GROQ_MODELS.length * 2, notifyFn = null } = {}) {
-  let rotations = 0;
-  // eslint-disable-next-line no-constant-condition
+/* Outer safety net for batch steps. The inner engine already absorbs rate
+   limits, so this only catches a step that failed for a transient reason
+   after the engine gave up, and re-runs the whole step. */
+async function withRLResilience(fn, { pauseMs = 6000, maxRetries = 4, notifyFn = null } = {}) {
+  let tries = 0;
   while (true) {
     try {
       return await fn();
     } catch (e) {
-      const isRL = e._httpStatus === 429 || (e.message || "").toLowerCase().includes("rate limit");
-      if (!isRL) throw e; // non-rate-limit errors bubble up immediately
-
-      _rlState.consecutiveRLs += 1;
-
-      if (_rlState.consecutiveRLs >= 2) {
-        // Two 429s in a row → rotate model
-        if (rotations >= maxModelRotations) throw new Error("All models rate-limited — please wait a minute and try again.");
-        rlRotateModel(notifyFn);
-        rotations++;
-      } else {
-        // First 429 → just pause 5 s
-        const waitMs = e._retryAfterMs ?? pauseMs;
-        if (notifyFn) notifyFn(`⏳ Rate limit hit — pausing ${Math.round(waitMs / 1000)}s then continuing…`, "warn");
-        await new Promise(r => setTimeout(r, waitMs));
-      }
+      const msg = (e.message || "").toLowerCase();
+      const retryable =
+        e._httpStatus === 429 ||
+        RETRYABLE_STATUSES.has(e._httpStatus) ||
+        msg.includes("rate limit") || msg.includes("timed out") ||
+        msg.includes("unreachable") || msg.includes("network") || msg.includes("failed to fetch");
+      if (!retryable || tries >= maxRetries) throw e;
+      tries++;
+      const waitMs = e._retryAfterMs ?? pauseMs * tries;
+      if (notifyFn) notifyFn(`Retrying in ${Math.round(waitMs / 1000)}s (attempt ${tries + 1})…`, "warn");
+      await new Promise(r => setTimeout(r, waitMs));
     }
   }
 }
@@ -1880,10 +2482,8 @@ async function withRLResilience(fn, { pauseMs = 5000, maxModelRotations = GROQ_M
 /* ═══════════════════════════════════════════════════════════════════
    AI CALLERS
 ═══════════════════════════════════════════════════════════════════ */
-async function callGroq(apiKey, model, messages) {
-  // Vision-capable Groq models — only these support image_url content
-  const VISION_MODELS = new Set(["llava-v1.5-7b-4096-preview","llama-3.2-11b-vision-preview","llama-3.2-90b-vision-preview"]);
-  const isVisionModel = VISION_MODELS.has(model);
+async function callGroq(apiKey, model, messages, opts = {}) {
+  const isVisionModel = isVisionCapable(model);
 
   // For non-vision models, flatten array content down to text only
   const safeMessages = messages.map(m => {
@@ -1896,31 +2496,59 @@ async function callGroq(apiKey, model, messages) {
     return m;
   });
 
-  // Timeout after 30s — prevents UI freeze if Groq hangs mid-session
+  // Long-form notebooks legitimately take a while — 30s was cutting big
+  // generations off mid-flight and surfacing as a bogus "timeout" error.
+  const timeoutMs = opts.timeoutMs ?? 120000;
+  const maxTokens = Math.max(512, Math.min(opts.maxTokens ?? 8000, 32000));
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  const onOuterAbort = () => controller.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) throw new Error("Cancelled");
+    opts.signal.addEventListener("abort", onOuterAbort, { once: true });
+  }
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const cleanup = () => {
+    clearTimeout(timeout);
+    if (opts.signal) opts.signal.removeEventListener("abort", onOuterAbort);
+  };
   let res;
   try {
     res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method:"POST",
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: safeMessages, max_tokens:3000, temperature:0.7 }),
+      body: JSON.stringify({
+        model,
+        messages: safeMessages,
+        max_tokens: maxTokens,
+        temperature: opts.temperature ?? 0.7,
+        ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
+      }),
       signal: controller.signal
     });
   } catch(e) {
-    clearTimeout(timeout);
-    if (e.name === "AbortError") throw new Error("Groq timed out after 30s — check your connection or try a smaller model");
-    throw new Error(`Groq unreachable: ${e.message}`);
+    cleanup();
+    if (opts.signal?.aborted) throw new Error("Cancelled");
+    if (e.name === "AbortError") {
+      const err = new Error(`Groq timed out after ${Math.round(timeoutMs / 1000)}s`);
+      err._httpStatus = 504;
+      throw err;
+    }
+    const err = new Error(`Groq unreachable: ${e.message}`);
+    err._httpStatus = 503;
+    throw err;
   }
-  clearTimeout(timeout);
+  cleanup();
   if (!res.ok) {
     const e = await res.json().catch(()=>({}));
-    const err = new Error(e?.error?.message || `Groq ${res.status}`);
+    const msg = e?.error?.message || `Groq ${res.status}`;
+    const err = new Error(msg);
     err._httpStatus = res.status;
-    // Respect Retry-After header on 429 rate limit
+    if (dgIsTokenError(msg)) err._tokenError = true;
+    // Respect Retry-After on 429; Groq sends it in seconds (sometimes fractional).
     if (res.status === 429) {
-      const retryAfter = res.headers.get("retry-after");
-      err._retryAfterMs = retryAfter ? parseFloat(retryAfter) * 1000 : 8000;
+      const retryAfter = res.headers.get("retry-after") || res.headers.get("x-ratelimit-reset-requests");
+      const parsed = retryAfter ? parseFloat(retryAfter) : NaN;
+      err._retryAfterMs = Number.isFinite(parsed) ? Math.min(parsed * 1000, 60000) : 25000;
     }
     throw err;
   }
@@ -2547,7 +3175,7 @@ function PyOutputPane({ output, figureDataUrls, figureDataUrl, statusMsg, runnin
           <div style={{ padding:"6px 12px", fontSize:11.5, fontWeight:600, color:"#64748b",
             borderBottom:"1px solid #C4CDD9", background:"linear-gradient(145deg,#E4E9F2,#EDF1F7)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
             <span>📊 {figs.length > 1 ? `Figure ${idx + 1} of ${figs.length}` : "Plot Output"}</span>
-            <a href={url} download={`figure_${idx + 1}.png`}
+            <a href={url} download={`figure_${idx + 1}.png`} onClick={e => { if (!canDownload()) e.preventDefault(); }}
               style={{ fontSize:10.5, color:"#3b82f6", textDecoration:"none", fontWeight:500 }}>⬇ Save PNG</a>
           </div>
           <img src={url} alt={`Figure ${idx + 1}`} style={{ maxWidth:"100%", display:"block" }} />
@@ -2904,6 +3532,246 @@ const Spin = ({ s=14 }) => (
 /* ═══════════════════════════════════════════════════════════════════
    LOGIN SCREEN — uses Supabase for all auth
 ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════
+   COURSE CATALOGUE — step 2 of student sign-up
+   A checkbox list stops working once a trainer has more than a handful of
+   courses. This is a searchable grid instead: every course gets a monogram
+   tile whose colour is derived from its own name, so a long catalogue stays
+   scannable, and the running selection sits in a tray that follows you down
+   the page.
+═══════════════════════════════════════════════════════════════════ */
+function courseAccent(name) {
+  // Deterministic hue per course — the same course always looks the same.
+  let h = 0;
+  const s = String(name || "?");
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return {
+    from: `hsl(${h} 72% 58%)`,
+    to:   `hsl(${(h + 38) % 360} 74% 46%)`,
+    soft: `hsl(${h} 80% 96%)`,
+    edge: `hsl(${h} 60% 82%)`,
+    ink:  `hsl(${h} 62% 32%)`,
+  };
+}
+
+function courseMonogram(name) {
+  const words = String(name || "?").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "?";
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
+}
+
+function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, onBack, onSubmit, loading, error, studentName }) {
+  const [query, setQuery]     = useState("");
+  const [trainerFilter, setTrainerFilter] = useState("all");
+
+  const trainerNames = useMemo(() => {
+    const m = new Map();
+    courses.forEach(c => {
+      const t = trainersMap[c.trainerId];
+      if (t) m.set(c.trainerId, t.name);
+    });
+    return Array.from(m.entries());
+  }, [courses, trainersMap]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return courses.filter(c => {
+      if (trainerFilter !== "all" && c.trainerId !== trainerFilter) return false;
+      if (!q) return true;
+      const tName = trainersMap[c.trainerId]?.name || "";
+      return c.name.toLowerCase().includes(q) || tName.toLowerCase().includes(q);
+    });
+  }, [courses, query, trainerFilter, trainersMap]);
+
+  const toggle = (id) => {
+    setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  const selectedCourses = courses.filter(c => selectedIds.includes(c.id));
+
+  return (
+    <div style={{
+      minHeight:"100vh",
+      background:"linear-gradient(170deg,#faf8ff 0%,#f4f0ff 55%,#ece6ff 100%)",
+      fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif",
+      paddingBottom:128,
+    }}>
+      <style>{`
+        @keyframes csp-rise { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+        .csp-card { animation: csp-rise .32s ease both; }
+        .csp-card:hover { transform: translateY(-3px); box-shadow: 0 14px 32px rgba(76,29,149,.14); }
+        .csp-card:focus-visible { outline:3px solid #7c3aed; outline-offset:3px; }
+        @media (prefers-reduced-motion: reduce) { .csp-card { animation:none; } .csp-card:hover { transform:none; } }
+        @media (max-width: 640px) { .csp-grid { grid-template-columns: 1fr !important; } .csp-head { padding:24px 18px 18px !important; } .csp-body { padding:0 18px !important; } }
+      `}</style>
+
+      {/* Header */}
+      <div className="csp-head" style={{ maxWidth:1080, margin:"0 auto", padding:"40px 28px 22px" }}>
+        <button onClick={onBack} style={{ background:"none", border:"none", color:"#7c3aed", fontWeight:600, fontSize:13.5, cursor:"pointer", padding:0, marginBottom:18 }}>
+          ← Back to your details
+        </button>
+        <p style={{ fontSize:12, fontWeight:800, letterSpacing:".14em", textTransform:"uppercase", color:"#a78bfa", marginBottom:8 }}>
+          Step 2 of 2
+        </p>
+        <h1 style={{ fontSize:34, fontWeight:800, color:"#2e1065", letterSpacing:"-.8px", lineHeight:1.15, marginBottom:8 }}>
+          {studentName ? `What are you studying, ${studentName.split(" ")[0]}?` : "Choose your courses"}
+        </h1>
+        <p style={{ fontSize:14.5, color:"#6b7280", maxWidth:560, lineHeight:1.6 }}>
+          Pick everything you want to join. Each request goes to that course's trainer for approval —
+          you'll get a notification the moment one is accepted.
+        </p>
+      </div>
+
+      {/* Controls */}
+      <div className="csp-body" style={{ maxWidth:1080, margin:"0 auto", padding:"0 28px" }}>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", marginBottom:18 }}>
+          <div style={{ position:"relative", flex:"1 1 260px" }}>
+            <span style={{ position:"absolute", left:15, top:"50%", transform:"translateY(-50%)", color:"#a78bfa", fontSize:14, pointerEvents:"none" }}>⌕</span>
+            <input
+              value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="Search courses or trainers"
+              style={{ width:"100%", padding:"12px 16px 12px 38px", border:"1.5px solid #e9e2ff", borderRadius:50, fontSize:14, background:"#fff", outline:"none", color:"#2d3748", boxSizing:"border-box" }}
+            />
+          </div>
+          {trainerNames.length > 1 && (
+            <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
+              <button onClick={() => setTrainerFilter("all")} style={pill(trainerFilter === "all")}>All trainers</button>
+              {trainerNames.map(([id, name]) => (
+                <button key={id} onClick={() => setTrainerFilter(id)} style={pill(trainerFilter === id)}>{name}</button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:12, padding:"11px 15px", marginBottom:16 }}>
+            <p style={{ color:"#dc2626", fontSize:13.5, fontWeight:600 }}>{error}</p>
+          </div>
+        )}
+
+        {/* Grid */}
+        {visible.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"60px 20px", background:"#fff", borderRadius:18, border:"1.5px dashed #ddd6fe" }}>
+            <p style={{ fontSize:15, fontWeight:700, color:"#4c1d95", marginBottom:6 }}>
+              {courses.length === 0 ? "No courses are open for enrolment yet" : "Nothing matches that search"}
+            </p>
+            <p style={{ fontSize:13.5, color:"#8b7fa8" }}>
+              {courses.length === 0 ? "Check back once a trainer publishes one." : "Try a different word, or clear the filter."}
+            </p>
+          </div>
+        ) : (
+          <div className="csp-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(268px,1fr))", gap:14 }}>
+            {visible.map((c, i) => {
+              const on = selectedIds.includes(c.id);
+              const a  = courseAccent(c.name);
+              const tName = trainersMap[c.trainerId]?.name || "Unknown trainer";
+              const dayCount = Array.isArray(c.planDays) ? c.planDays.length : 0;
+              return (
+                <div
+                  key={c.id}
+                  className="csp-card"
+                  role="checkbox"
+                  aria-checked={on}
+                  tabIndex={0}
+                  onClick={() => toggle(c.id)}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(c.id); } }}
+                  style={{
+                    position:"relative", cursor:"pointer", background:"#fff",
+                    border:`2px solid ${on ? a.edge : "#efeaff"}`,
+                    borderRadius:16, padding:"16px 16px 14px",
+                    boxShadow: on ? `0 10px 26px ${a.soft}` : "0 2px 10px rgba(76,29,149,.05)",
+                    transition:"transform .16s ease, box-shadow .16s ease, border-color .16s",
+                    animationDelay:`${Math.min(i * 24, 300)}ms`,
+                  }}
+                >
+                  {on && (
+                    <span style={{
+                      position:"absolute", top:12, right:12, width:23, height:23, borderRadius:99,
+                      background:`linear-gradient(135deg,${a.from},${a.to})`, color:"#fff",
+                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:800,
+                    }}>✓</span>
+                  )}
+                  <div style={{
+                    width:44, height:44, borderRadius:13, marginBottom:12,
+                    background:`linear-gradient(135deg,${a.from},${a.to})`,
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    color:"#fff", fontWeight:800, fontSize:15, letterSpacing:".5px",
+                  }}>{courseMonogram(c.name)}</div>
+                  <p style={{ fontSize:15, fontWeight:700, color:"#1e1b3a", lineHeight:1.35, marginBottom:5, paddingRight:on ? 26 : 0 }}>{c.name}</p>
+                  <p style={{ fontSize:12.5, color:"#8b7fa8", marginBottom:10 }}>{tName}</p>
+                  <span style={{
+                    display:"inline-block", fontSize:11.5, fontWeight:700, padding:"3px 9px", borderRadius:99,
+                    background:a.soft, color:a.ink,
+                  }}>
+                    {dayCount > 0 ? `${dayCount} days` : "Schedule coming soon"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Sticky selection tray */}
+      <div style={{
+        position:"fixed", left:0, right:0, bottom:0, zIndex:40,
+        background:"rgba(255,255,255,.94)", backdropFilter:"blur(12px)",
+        borderTop:"1.5px solid #ece6ff", boxShadow:"0 -8px 28px rgba(76,29,149,.09)",
+        padding:"13px 20px",
+      }}>
+        <div style={{ maxWidth:1080, margin:"0 auto", display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
+          <div style={{ flex:"1 1 200px", minWidth:0 }}>
+            {selectedCourses.length === 0 ? (
+              <p style={{ fontSize:13.5, color:"#8b7fa8" }}>Nothing selected yet — tap a course to add it.</p>
+            ) : (
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                <span style={{ fontSize:13, fontWeight:700, color:"#4c1d95" }}>{selectedCourses.length} selected:</span>
+                {selectedCourses.slice(0, 3).map(c => {
+                  const a = courseAccent(c.name);
+                  return (
+                    <span key={c.id} onClick={() => toggle(c.id)} title="Remove"
+                      style={{ cursor:"pointer", fontSize:12, fontWeight:600, padding:"4px 10px", borderRadius:99, background:a.soft, color:a.ink, border:`1px solid ${a.edge}` }}>
+                      {c.name} ×
+                    </span>
+                  );
+                })}
+                {selectedCourses.length > 3 && (
+                  <span style={{ fontSize:12, color:"#8b7fa8", fontWeight:600 }}>+{selectedCourses.length - 3} more</span>
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onSubmit}
+            disabled={loading || selectedCourses.length === 0}
+            style={{
+              padding:"13px 30px", borderRadius:50, border:"none",
+              background: selectedCourses.length === 0 ? "#e2e0ee" : "linear-gradient(135deg,#7c3aed,#6d28d9)",
+              color: selectedCourses.length === 0 ? "#a9a4bd" : "#fff",
+              fontWeight:700, fontSize:14.5,
+              cursor: selectedCourses.length === 0 ? "not-allowed" : "pointer",
+              boxShadow: selectedCourses.length === 0 ? "none" : "0 6px 20px rgba(124,58,237,.38)",
+              transition:"background .2s",
+            }}>
+            {loading ? "Creating account…" : "Create account"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function pill(active) {
+  return {
+    padding:"8px 14px", borderRadius:50, fontSize:12.5, fontWeight:700, cursor:"pointer",
+    border:`1.5px solid ${active ? "#7c3aed" : "#e9e2ff"}`,
+    background: active ? "#7c3aed" : "#fff",
+    color: active ? "#fff" : "#6b5b95",
+    transition:"all .15s",
+  };
+}
+
 function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
   const [mode, setMode] = useState(initialMode);
   const [trainerUsername, setTrainerUsername] = useState("");
@@ -3054,6 +3922,24 @@ function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
   };
 
 
+
+  // The catalogue takes over the whole viewport — it is a page in its own
+  // right, not a scroll box wedged into the sign-up card.
+  if (mode === "register-courses") {
+    return (
+      <CourseSelectPage
+        courses={allCourses}
+        trainersMap={trainersMap}
+        selectedIds={studentCourseIds}
+        setSelectedIds={setStudentCourseIds}
+        studentName={studentName}
+        loading={loading}
+        error={error}
+        onBack={() => { setError(""); setMode("register"); }}
+        onSubmit={handleStudentRegister}
+      />
+    );
+  }
 
   // ── Derived state for new unified design ──
   const isRegisterMode = mode === "register" || mode === "trainer-register";
@@ -3299,48 +4185,49 @@ function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
                     <input type="password" value={studentPassword} onChange={e=>setStudentPassword(e.target.value)} placeholder="Choose a password (min 6 chars)" style={inputSt} />
                   </div>
 
-                  {/* Multi-course selection — grouped by trainer */}
-                  <div style={{ border:"1.5px solid #e2e8f0", borderRadius:14, overflow:"hidden" }}>
-                    <div style={{ background:"#f8f5ff", padding:"8px 14px", fontSize:12.5, fontWeight:700, color:"#5b21b6", borderBottom:"1px solid #ede9fe" }}>
-                      📚 Select Course(s) to Enroll In {studentCourseIds.length > 0 && <span style={{ marginLeft:6, background:"#7c3aed", color:"#fff", borderRadius:99, fontSize:11, padding:"1px 8px" }}>{studentCourseIds.length} selected</span>}
+                  {/* Courses are chosen on their own page — see CourseSelectPage */}
+                  <div
+                    onClick={() => { setError(""); setMode("register-courses"); }}
+                    role="button" tabIndex={0}
+                    onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setError(""); setMode("register-courses"); } }}
+                    style={{
+                      border:`1.5px solid ${studentCourseIds.length ? "#c4b5fd" : "#e2e8f0"}`,
+                      background: studentCourseIds.length ? "#faf8ff" : "#fafafa",
+                      borderRadius:16, padding:"14px 16px", cursor:"pointer",
+                      display:"flex", alignItems:"center", gap:12, transition:"all .18s",
+                    }}>
+                    <div style={{
+                      width:38, height:38, borderRadius:11, flexShrink:0,
+                      background:"linear-gradient(135deg,#8b5cf6,#6d28d9)",
+                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:17,
+                    }}>📚</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <p style={{ fontSize:13.5, fontWeight:700, color:"#2e1065" }}>
+                        {studentCourseIds.length === 0
+                          ? "Choose your courses"
+                          : `${studentCourseIds.length} course${studentCourseIds.length > 1 ? "s" : ""} selected`}
+                      </p>
+                      <p style={{ fontSize:12, color:"#8b7fa8", marginTop:2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                        {studentCourseIds.length === 0
+                          ? `Browse ${allCourses.length} available course${allCourses.length === 1 ? "" : "s"}`
+                          : allCourses.filter(c => studentCourseIds.includes(c.id)).map(c => c.name).join(", ")}
+                      </p>
                     </div>
-                    <div style={{ maxHeight:200, overflowY:"auto", padding:"6px 4px" }}>
-                      {allCourses.length === 0
-                        ? <p style={{ padding:"12px 16px", color:"#94a3b8", fontSize:13 }}>No courses available yet.</p>
-                        : (() => {
-                            const byTrainer = {};
-                            allCourses.forEach(c => {
-                              const tName = trainersMap[c.trainerId]?.name || "Unknown Trainer";
-                              if (!byTrainer[tName]) byTrainer[tName] = [];
-                              byTrainer[tName].push(c);
-                            });
-                            return Object.entries(byTrainer).map(([tName, courses]) => (
-                              <div key={tName}>
-                                <div style={{ padding:"5px 12px 3px", fontSize:11, fontWeight:700, color:"#7c3aed", textTransform:"uppercase", letterSpacing:".06em" }}>👨‍🏫 {tName}</div>
-                                {courses.map(c => {
-                                  const checked = studentCourseIds.includes(c.id);
-                                  return (
-                                    <label key={c.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 14px", cursor:"pointer", background:checked?"#f5f3ff":"transparent", transition:"background .12s" }}>
-                                      <input type="checkbox" checked={checked}
-                                        onChange={e => {
-                                          if (e.target.checked) setStudentCourseIds(prev => [...prev, c.id]);
-                                          else setStudentCourseIds(prev => prev.filter(id => id !== c.id));
-                                        }}
-                                        style={{ width:15, height:15, accentColor:"#7c3aed", cursor:"pointer" }}
-                                      />
-                                      <span style={{ fontSize:13.5, color:checked?"#5b21b6":"#2d3748", fontWeight:checked?600:400 }}>{c.name}</span>
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            ));
-                          })()
-                      }
-                    </div>
+                    <span style={{ color:"#7c3aed", fontWeight:700, fontSize:18, flexShrink:0 }}>›</span>
                   </div>
 
-                  <button onClick={handleStudentRegister} disabled={loading} style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
-                    {loading ? "Registering…" : "Create Account"}
+                  <button
+                    onClick={() => {
+                      // Validate the details here so nobody fills in a whole
+                      // catalogue page only to be sent back for a typo.
+                      if (!studentName.trim() || !studentEmail.trim()) { setError("Fill in your name and email first"); return; }
+                      if (!studentPassword.trim() || studentPassword.trim().length < 6) { setError("Password must be at least 6 characters"); return; }
+                      setError("");
+                      setMode("register-courses");
+                    }}
+                    disabled={loading}
+                    style={{ padding:"13px 0", background:"linear-gradient(135deg,#7c3aed,#6d28d9)", color:"white", border:"none", borderRadius:50, fontWeight:700, cursor:"pointer", fontSize:14, boxShadow:"0 4px 16px rgba(124,58,237,.4)" }}>
+                    {studentCourseIds.length ? "Review courses & finish" : "Continue to courses"}
                   </button>
                   <p style={{ textAlign:"center", fontSize:13, color:"#64748b", margin:0 }}>
                     Already registered?{" "}
@@ -3440,6 +4327,14 @@ function TrainerEnrollments({ courseId, courseName, trainerId, sb, onClose }) {
     const newPending = Array.isArray(s.pendingCourseIds) ? s.pendingCourseIds.filter(p => p.courseId !== courseId) : [];
     const updated = { ...s, enrolledCourseIds: newEnrolled, pendingCourseIds: newPending, approved: true, approvedAt: new Date().toISOString(), requestedCourseId: s.requestedCourseId || courseId, requestedCourseName: s.requestedCourseName || courseName };
     await sbSaveStudent(sb, updated);
+    // Tell the student — reaches them on whatever device they open next.
+    sbCreateNotification(sb, {
+      studentId: s.id,
+      courseId,
+      type: "enrollment_approved",
+      title: `You're in: ${pendingEntry?.courseName || courseName}`,
+      body: "Your enrolment was approved. Open the course to start.",
+    }).catch(() => {});
     load();
   };
 
@@ -3919,6 +4814,13 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen, da
     if (!newEnrolled.some(e => e.courseId === courseId)) newEnrolled.push({ courseId, courseName: resolvedCourseName, approvedAt: new Date().toISOString() });
     const newPending = Array.isArray(s.pendingCourseIds) ? s.pendingCourseIds.filter(p => p.courseId !== courseId) : [];
     const updated = { ...s, enrolledCourseIds: newEnrolled, pendingCourseIds: newPending, approved: true, approvedAt: new Date().toISOString() };
+    sbCreateNotification(sb, {
+      studentId: s.id,
+      courseId,
+      type: "enrollment_approved",
+      title: `You're in: ${resolvedCourseName || "your course"}`,
+      body: "Your enrolment was approved. Open the course to start.",
+    }).catch(() => {});
     await sbSaveStudent(sb, updated).catch(() => {});
     setList(prev => prev.map(x => x.id === id ? updated : x));
   };
@@ -4000,6 +4902,162 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen, da
 }
 
 /* ─── StudentCourseView (top-level to avoid remount on each render) ─── */
+/* ═══════════════════════════════════════════════════════════════════
+   NOTIFICATION BELL (student)
+   Polls on mount, on window focus and every 25s. Anything unseen also
+   fires a system notification so it lands even when the tab is in the
+   background on a phone or a laptop.
+═══════════════════════════════════════════════════════════════════ */
+const NOTIF_SEEN_LS = "lms_notif_seen_v1";
+
+function notifSeenIds() {
+  try { return new Set(JSON.parse(localStorage.getItem(NOTIF_SEEN_LS) || "[]")); } catch { return new Set(); }
+}
+function notifRememberIds(ids) {
+  try {
+    const merged = Array.from(new Set([...notifSeenIds(), ...ids])).slice(-300);
+    localStorage.setItem(NOTIF_SEEN_LS, JSON.stringify(merged));
+  } catch {}
+}
+
+function StudentNotifications({ sb, studentId, onCourseApproved }) {
+  const [items, setItems]   = useState([]);
+  const [open, setOpen]     = useState(false);
+  const [perm, setPerm]     = useState(() => (typeof Notification !== "undefined" ? Notification.permission : "unsupported"));
+  const firstLoad           = useRef(true);
+
+  const unread = items.filter(n => !n.read).length;
+
+  const fire = useCallback((n) => {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    try {
+      const sysNote = new Notification(n.title, { body: n.body || "", tag: n.id, icon: "/favicon.ico" });
+      sysNote.onclick = () => { window.focus(); setOpen(true); sysNote.close(); };
+    } catch {}
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!sb || !studentId) return;
+    const rows = await sbGetNotifications(sb, studentId);
+    setItems(rows);
+    // On the very first poll we only record what exists — we don't replay
+    // a week of history as system toasts.
+    const seen = notifSeenIds();
+    const fresh = rows.filter(n => !seen.has(n.id));
+    if (!firstLoad.current) {
+      fresh.forEach(n => {
+        fire(n);
+        if (n.type === "enrollment_approved" && onCourseApproved) onCourseApproved(n);
+      });
+    }
+    if (fresh.length) notifRememberIds(fresh.map(n => n.id));
+    firstLoad.current = false;
+  }, [sb, studentId, fire, onCourseApproved]);
+
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 25000);
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    return () => { clearInterval(iv); window.removeEventListener("focus", onFocus); };
+  }, [load]);
+
+  const askPermission = async () => {
+    if (typeof Notification === "undefined") return;
+    try { const p = await Notification.requestPermission(); setPerm(p); } catch {}
+  };
+
+  const markAllRead = async () => {
+    const ids = items.filter(n => !n.read).map(n => n.id);
+    if (!ids.length) return;
+    setItems(prev => prev.map(n => ({ ...n, read: true })));
+    await sbMarkNotificationsRead(sb, ids).catch(() => {});
+  };
+
+  const when = (iso) => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  };
+
+  return (
+    <div style={{ position:"relative" }}>
+      <button
+        onClick={() => { setOpen(o => !o); if (!open) markAllRead(); }}
+        aria-label={unread ? `${unread} unread notifications` : "Notifications"}
+        style={{
+          position:"relative", width:38, height:38, borderRadius:12, cursor:"pointer",
+          background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", border:"1.5px solid #C4CDD9",
+          display:"flex", alignItems:"center", justifyContent:"center", fontSize:17,
+        }}>
+        🔔
+        {unread > 0 && (
+          <span style={{
+            position:"absolute", top:-4, right:-4, minWidth:18, height:18, padding:"0 5px",
+            borderRadius:99, background:"#ef4444", color:"#fff", fontSize:11, fontWeight:800,
+            display:"flex", alignItems:"center", justifyContent:"center",
+            boxShadow:"0 2px 6px rgba(239,68,68,.5)",
+          }}>{unread > 9 ? "9+" : unread}</span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position:"fixed", inset:0, zIndex:190 }}/>
+          <div style={{
+            position:"absolute", right:0, top:46, width:326, maxWidth:"calc(100vw - 32px)", zIndex:200,
+            background:"#fff", borderRadius:16, border:"1.5px solid #e2e8f0",
+            boxShadow:"0 18px 44px rgba(15,23,42,.18)", overflow:"hidden",
+          }}>
+            <div style={{ padding:"13px 16px", borderBottom:"1px solid #f1f5f9", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <p style={{ fontWeight:800, fontSize:14, color:"#0f172a" }}>Notifications</p>
+              {items.length > 0 && <span style={{ fontSize:11.5, color:"#94a3b8" }}>{items.length}</span>}
+            </div>
+
+            {perm === "default" && (
+              <div style={{ padding:"11px 16px", background:"#faf8ff", borderBottom:"1px solid #f1f5f9" }}>
+                <p style={{ fontSize:12.5, color:"#5b21b6", marginBottom:8, lineHeight:1.5 }}>
+                  Turn on alerts to hear about approvals while you're on another tab.
+                </p>
+                <button onClick={askPermission} style={{ padding:"6px 13px", borderRadius:8, border:"none", background:"#7c3aed", color:"#fff", fontSize:12, fontWeight:700, cursor:"pointer" }}>
+                  Turn on alerts
+                </button>
+              </div>
+            )}
+
+            <div style={{ maxHeight:330, overflowY:"auto" }}>
+              {items.length === 0 ? (
+                <p style={{ padding:"26px 16px", textAlign:"center", color:"#94a3b8", fontSize:13 }}>
+                  Nothing yet. Approvals and course updates land here.
+                </p>
+              ) : items.map(n => (
+                <div key={n.id} style={{
+                  padding:"12px 16px", borderBottom:"1px solid #f8fafc",
+                  background: n.read ? "#fff" : "#faf8ff",
+                  display:"flex", gap:10, alignItems:"flex-start",
+                }}>
+                  <span style={{ fontSize:16, lineHeight:1.3, flexShrink:0 }}>
+                    {n.type === "enrollment_approved" ? "✅" : n.type === "enrollment_rejected" ? "⚠️" : "📢"}
+                  </span>
+                  <div style={{ minWidth:0 }}>
+                    <p style={{ fontSize:13.2, fontWeight:700, color:"#0f172a", lineHeight:1.4 }}>{n.title}</p>
+                    {n.body && <p style={{ fontSize:12.3, color:"#64748b", marginTop:3, lineHeight:1.5 }}>{n.body}</p>}
+                    <p style={{ fontSize:11, color:"#a8b3c4", marginTop:4 }}>{when(n.created_at)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function StudentCourseView({ sb, auth, handleLogout }) {
   // FIX 11 & 12: Added refresh mechanism + retry on empty enrollment
   const [enrolledCourses, setEnrolledCourses] = useState([]);
@@ -4162,7 +5220,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
 
   return (
     <div style={{ minHeight:"100vh", background:"#EDF1F7" }}>
-      <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", padding:"14px 24px", borderBottom:"1.5px solid #C4CDD9", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100, boxShadow:"0 4px 16px rgba(196,205,217,.35)" }}>
+      <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", padding:"14px 24px", borderBottom:"1.5px solid #C4CDD9", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100, boxShadow:"0 4px 16px rgba(196,205,217,.35)", gap:12 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <AppLogo
             size="md"
@@ -4173,6 +5231,7 @@ function StudentCourseView({ sb, auth, handleLogout }) {
           <span style={{ background:"#f0fdf4", color:"#16a34a", border:"1px solid #bbf7d0", borderRadius:99, fontSize:10, fontWeight:700, padding:"2px 8px", whiteSpace:"nowrap" }}>🔄 Live</span>
         </div>
         <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <StudentNotifications sb={sb} studentId={auth?.id} onCourseApproved={loadStudent} />
           {enrolledCourses.length > 1 && (
             <select value={activeCourseId||""} onChange={e=>setActiveCourseId(e.target.value)} style={{ padding:"8px 12px", border:"1px solid #fff", borderRadius:99, fontSize:12, fontWeight:700, color:"#8B5CF6", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", cursor:"pointer", maxWidth:200, boxShadow:"6px 6px 14px #C4CDD9,-4px -4px 10px #fff" }}>
               {enrolledCourses.map(e=><option key={e.courseId} value={e.courseId}>{e.courseName}</option>)}
@@ -5086,7 +6145,7 @@ function QRCodeCanvas({ token, courseId, size = 200 }) {
 }
 
 /* ─── QR Display with 60-second countdown ring ─────────────────── */
-function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0 }) {
+function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0, liveRecords = [], roster = [] }) {
   const [timeLeft, setTimeLeft] = useState(60);
   const timerRef = useRef(null);
 
@@ -5102,44 +6161,135 @@ function AttendanceQRDisplay({ session, onExpire, courseId, liveCount = 0 }) {
     return () => clearInterval(timerRef.current);
   }, [session]);
 
+  // Newest scan first, so the trainer watches names arrive at the top.
+  const present = useMemo(() => {
+    return [...liveRecords].sort((a, b) => new Date(b.scanned_at) - new Date(a.scanned_at));
+  }, [liveRecords]);
+
+  const presentIds = useMemo(() => new Set(present.map(r => r.student_id)), [present]);
+  const waiting = useMemo(
+    () => roster.filter(s => !presentIds.has(s.id)),
+    [roster, presentIds]
+  );
+
   if (!session) return null;
   const pct      = (timeLeft / 60) * 100;
   const color    = timeLeft > 40 ? "#22c55e" : timeLeft > 15 ? "#f59e0b" : "#ef4444";
   const R        = 108;
   const circ     = 2 * Math.PI * R;
+  const total    = roster.length;
+  const donePct  = total > 0 ? Math.round((present.length / total) * 100) : 0;
+  const initials = (n) => String(n || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+  const hhmm = (iso) => {
+    try { return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+    catch { return ""; }
+  };
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:16 }}>
-      <div style={{ position:"relative", display:"inline-flex", alignItems:"center", justifyContent:"center" }}>
-        {/* SVG ring */}
-        <svg width={248} height={248} style={{ transform:"rotate(-90deg)", position:"absolute", top:0, left:0 }}>
-          <circle cx={124} cy={124} r={R} fill="none" stroke="#f1f5f9" strokeWidth={8}/>
-          <circle cx={124} cy={124} r={R} fill="none" stroke={color} strokeWidth={8}
-            strokeDasharray={circ}
-            strokeDashoffset={circ * (1 - pct / 100)}
-            strokeLinecap="round"
-            style={{ transition:"stroke-dashoffset .25s linear, stroke .5s" }}
-          />
-        </svg>
-        {/* QR code in centre */}
-        <div style={{ width:248, height:248, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8 }}>
-          <QRCodeCanvas token={session.qr_token} courseId={courseId} size={190}/>
+    <div style={{ display:"flex", gap:22, alignItems:"flex-start", justifyContent:"center", flexWrap:"wrap" }}>
+      <style>{`
+        @keyframes att-in { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+        .att-row { animation: att-in .28s ease both; }
+        @media (prefers-reduced-motion: reduce) { .att-row { animation:none; } }
+      `}</style>
+
+      {/* ── QR + countdown ── */}
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:16, flex:"0 0 auto" }}>
+        <div style={{ position:"relative", display:"inline-flex", alignItems:"center", justifyContent:"center" }}>
+          <svg width={248} height={248} style={{ transform:"rotate(-90deg)", position:"absolute", top:0, left:0 }}>
+            <circle cx={124} cy={124} r={R} fill="none" stroke="#f1f5f9" strokeWidth={8}/>
+            <circle cx={124} cy={124} r={R} fill="none" stroke={color} strokeWidth={8}
+              strokeDasharray={circ}
+              strokeDashoffset={circ * (1 - pct / 100)}
+              strokeLinecap="round"
+              style={{ transition:"stroke-dashoffset .25s linear, stroke .5s" }}
+            />
+          </svg>
+          <div style={{ width:248, height:248, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8 }}>
+            <QRCodeCanvas token={session.qr_token} courseId={courseId} size={190}/>
+          </div>
+        </div>
+
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:54, fontWeight:900, color, lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{timeLeft}s</div>
+          <div style={{ fontSize:13, color:"#64748b", marginTop:4 }}>
+            {timeLeft > 0 ? "Students scan before time runs out" : "QR code has expired"}
+          </div>
         </div>
       </div>
 
-      {/* Countdown number */}
-      <div style={{ textAlign:"center" }}>
-        <div style={{ fontSize:54, fontWeight:900, color, lineHeight:1, fontVariantNumeric:"tabular-nums" }}>{timeLeft}s</div>
-        <div style={{ fontSize:13, color:"#64748b", marginTop:4 }}>
-          {timeLeft > 0 ? "Students scan before time runs out" : "QR code has expired"}
+      {/* ── Live roster ── */}
+      <div style={{
+        flex:"1 1 268px", minWidth:250, maxWidth:330, textAlign:"left",
+        background:"#fff", borderRadius:16, border:"1.5px solid #e2e8f0",
+        overflow:"hidden", display:"flex", flexDirection:"column", maxHeight:400,
+      }}>
+        <div style={{ padding:"13px 16px 12px", borderBottom:"1px solid #f1f5f9" }}>
+          <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:8 }}>
+            <span style={{ fontSize:13.5, fontWeight:800, color:"#0f172a" }}>Marked present</span>
+            <span style={{ fontSize:13, fontWeight:800, color:"#16a34a", fontVariantNumeric:"tabular-nums" }}>
+              {present.length}{total > 0 ? ` / ${total}` : ""}
+            </span>
+          </div>
+          <div style={{ height:6, borderRadius:99, background:"#f1f5f9", overflow:"hidden" }}>
+            <div style={{
+              height:"100%", width:`${donePct}%`, borderRadius:99,
+              background:"linear-gradient(90deg,#22c55e,#16a34a)",
+              transition:"width .4s ease",
+            }}/>
+          </div>
+        </div>
+
+        <div style={{ overflowY:"auto", flex:1 }}>
+          {present.length === 0 && (
+            <p style={{ padding:"20px 16px", fontSize:12.5, color:"#94a3b8", textAlign:"center" }}>
+              No one has scanned yet. Names appear here the moment they do.
+            </p>
+          )}
+
+          {present.map((r, idx) => (
+            <div key={r.id || r.student_id} className="att-row"
+              style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 16px", borderBottom:"1px solid #f8fafc" }}>
+              <span style={{
+                width:28, height:28, borderRadius:9, flexShrink:0,
+                background: idx === 0 ? "linear-gradient(135deg,#22c55e,#16a34a)" : "#f0fdf4",
+                color: idx === 0 ? "#fff" : "#15803d",
+                border: idx === 0 ? "none" : "1px solid #bbf7d0",
+                display:"flex", alignItems:"center", justifyContent:"center",
+                fontSize:11, fontWeight:800,
+              }}>{initials(r.student_name)}</span>
+              <div style={{ minWidth:0, flex:1 }}>
+                <p style={{ fontSize:13, fontWeight:700, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                  {r.student_name || "Unknown"}
+                </p>
+                <p style={{ fontSize:11, color:"#94a3b8", fontVariantNumeric:"tabular-nums" }}>{hhmm(r.scanned_at)}</p>
+              </div>
+              <span style={{ fontSize:13, color:"#22c55e", flexShrink:0 }}>✓</span>
+            </div>
+          ))}
+
+          {waiting.length > 0 && (
+            <>
+              <div style={{ padding:"9px 16px 6px", background:"#fafbfc", borderTop:"1px solid #f1f5f9", borderBottom:"1px solid #f1f5f9" }}>
+                <span style={{ fontSize:11.5, fontWeight:800, color:"#94a3b8", textTransform:"uppercase", letterSpacing:".07em" }}>
+                  Not yet · {waiting.length}
+                </span>
+              </div>
+              {waiting.map(s => (
+                <div key={s.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 16px", borderBottom:"1px solid #f8fafc", opacity:.72 }}>
+                  <span style={{
+                    width:28, height:28, borderRadius:9, flexShrink:0, background:"#f1f5f9", color:"#94a3b8",
+                    display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800,
+                  }}>{initials(s.name)}</span>
+                  <p style={{ fontSize:12.5, color:"#64748b", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", flex:1 }}>
+                    {s.name || s.email || "Unknown"}
+                  </p>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
-
-      {liveCount > 0 && (
-        <div style={{ padding:"10px 22px", background:"#f0fdf4", border:"1.5px solid #bbf7d0", borderRadius:12, fontSize:14, fontWeight:800, color:"#16a34a" }}>
-          ✅ {liveCount} student{liveCount !== 1 ? "s" : ""} marked present
-        </div>
-      )}
     </div>
   );
 }
@@ -5160,11 +6310,12 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [liveCount, setLiveCount]   = useState(0);
+  const [liveRecords, setLiveRecords] = useState([]);   // who has scanned, live
   const pollRef                     = useRef(null);
 
   const showAttToast = (msg, type = "ok") => {
     setAttToast({ msg, type });
-    setTimeout(() => setAttToast(null), 4000);
+    setTimeout(() => setAttToast(null), 3000);
   };
 
   const loadData = useCallback(async () => {
@@ -5202,6 +6353,7 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
       try {
         const recs = await sbGetAttendanceBySession(sb, session.id);
         setLiveCount(recs.length);
+        setLiveRecords(recs);
         if (new Date(session.qr_expires_at) < new Date()) {
           clearInterval(pollRef.current);
           const allRecs = await sbGetAttendanceRecords(sb, courseId);
@@ -5218,7 +6370,7 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
     setGenerating(true);
     try {
       const s = await sbCreateAttendanceSession(sb, courseId, trainerId);
-      setSession(s); setLiveCount(0);
+      setSession(s); setLiveCount(0); setLiveRecords([]);
       showAttToast("✅ Attendance QR is live — 60 seconds!");
     } catch (e) {
       showAttToast("❌ " + e.message, "err");
@@ -5472,10 +6624,13 @@ CREATE INDEX IF NOT EXISTS idx_att_rec_course  ON lms_attendance_records(course_
       {/* ── Active QR modal ── */}
       {session && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:9800, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:"32px 28px", maxWidth:440, width:"100%", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", textAlign:"center", border:"1px solid #fff" }}>
+          <div style={{ background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", borderRadius:24, padding:"32px 28px", maxWidth:660, width:"100%", maxHeight:"92vh", overflowY:"auto", boxShadow:"20px 20px 48px #C4CDD9,-12px -12px 32px #fff", textAlign:"center", border:"1px solid #fff" }}>
             <div style={{ fontWeight:800, fontSize:20, color:"#0f172a", marginBottom:6 }}>📷 Scan to Mark Attendance</div>
             <div style={{ fontSize:13, color:"#64748b", marginBottom:20 }}>QR expires in 60 seconds — no proxy possible</div>
-            <AttendanceQRDisplay session={session} onExpire={handleExpire} courseId={courseId} liveCount={liveCount}/>
+            <AttendanceQRDisplay
+              session={session} onExpire={handleExpire} courseId={courseId}
+              liveCount={liveCount} liveRecords={liveRecords} roster={students}
+            />
             <div style={{ marginTop:16, padding:"10px 14px", background:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:10, fontSize:11.5, color:"#64748b", wordBreak:"break-all" }}>
               🔗 Students scan with phone camera to open the URL automatically
             </div>
@@ -5852,6 +7007,45 @@ function AttendanceStudentReport({ student, sessions, records, dates, darkMode, 
   );
 }
 
+/* ─── QR parameter capture ───────────────────────────────────────────
+   The scan URL is read once, at module load, and parked in sessionStorage.
+   Course switching remounts the app and history.replaceState wipes the
+   query string, so anything that reads window.location later can find an
+   empty URL and lose the scan. Reading it here means the token survives
+   whatever the app does to the address bar afterwards. */
+const ATT_PENDING_LS = "lms_pending_att_scan";
+
+function captureAttParams() {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const token = p.get("att");
+    const course = p.get("course");
+    if (token && course) {
+      sessionStorage.setItem(ATT_PENDING_LS, JSON.stringify({ token, courseId: course, at: Date.now() }));
+      return { token, courseId: course };
+    }
+  } catch {}
+  return null;
+}
+
+function readAttParams() {
+  try {
+    const raw = sessionStorage.getItem(ATT_PENDING_LS);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    // A QR lives 60s; anything older than 10 minutes is stale.
+    if (!v?.token || Date.now() - (v.at || 0) > 600000) { clearAttParams(); return null; }
+    return v;
+  } catch { return null; }
+}
+
+function clearAttParams() {
+  try { sessionStorage.removeItem(ATT_PENDING_LS); } catch {}
+}
+
+// Runs as the module loads, before React touches the URL.
+if (typeof window !== "undefined") captureAttParams();
+
 /* ─── Student attendance scan handler (triggered by ?att= URL param) ── */
 function AttendanceScanHandler({ sb, auth, onDismiss }) {
   const [state, setState]   = useState("scanning");
@@ -5861,10 +7055,7 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
   // Stored in a ref so re-renders don't re-read a cleared window.location.search.
   const attParamsRef = useRef(null);
   if (attParamsRef.current === null) {
-    try {
-      const p = new URLSearchParams(window.location.search);
-      attParamsRef.current = { token: p.get("att") || "", courseId: p.get("course") || "" };
-    } catch { attParamsRef.current = { token: "", courseId: "" }; }
+    attParamsRef.current = captureAttParams() || readAttParams() || { token: "", courseId: "" };
   }
   const { token, courseId } = attParamsRef.current;
 
@@ -5887,11 +7078,14 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
     sbMarkAttendance(sb, token, auth.id, auth.name, courseId)
       .then(record => {
         setState("success");
-        setScanMsg(`Marked at ${new Date(record.scanned_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}`);
+        const time = new Date(record.scanned_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"});
+        setScanMsg(record.courseName ? `${record.courseName} · marked at ${time}` : `Marked at ${time}`);
+        clearAttParams();
         window.history.replaceState({}, "", window.location.pathname);
       })
       .catch(e => {
         setState("error"); setScanMsg(e.message);
+        clearAttParams();
         window.history.replaceState({}, "", window.location.pathname);
       });
   // Use stable primitives only — avoids re-firing when parent re-renders
@@ -6118,15 +7312,9 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [studentsOpen, setStudentsOpen] = useState(false);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
 
-  // ── Detect attendance QR scan URL params (?att=TOKEN&course=ID) ──
-  // Captured at first render via lazy init — remains true even after
-  // AttendanceScanHandler calls window.history.replaceState to wipe the URL.
-  const [attScanActive, setAttScanActive] = useState(() => {
-    try {
-      const p = new URLSearchParams(window.location.search);
-      return !!(p.get("att") && p.get("course"));
-    } catch { return false; }
-  });
+  // QR scans are detected and handled in LMSApp, above the course view, so a
+  // code works from any course. The local flag that used to live here was
+  // scoped to one course and is gone.
 
   const [planText,  setPlanText]  = useState("");
   const [planDays,  setPlanDays]  = useState([]);
@@ -6165,8 +7353,57 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   const [busy,   setBusy]   = useState({});
   const [toasts, setToasts] = useState([]);
-  // Rate-limit banner: shows current active model & pause status during batch generation
+  // Course-level settings shared by trainer + students (download lock…)
+  const [courseSettings, setCourseSettings] = useState({});
+  // Auto-save is armed only after a successful first read (see loadCourse).
+  const hydratedRef = useRef(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+  // "saving" | "saved" | "queued" | "error" — surfaced in the header.
+  const [saveState, setSaveState] = useState({ status: "idle", at: null });
+  const [queuedWrites, setQueuedWrites] = useState(0);
+
+  // One line that updates in place while the retry engine works, instead of
+  // a toast per internal step.
   const [rlBanner, setRlBanner] = useState(null); // { msg, modelName } | null
+
+  const TOAST_MS = 3000;
+  // Remembers what was just shown so a repeated message refreshes the toast
+  // already on screen rather than stacking another copy underneath it.
+  const toastSeenRef = useRef(new Map());
+
+  /* Declared here, immediately after state, because several hooks below list
+     it in their dependency arrays. Dependency arrays are evaluated during
+     render, so a `const notify` further down would be in its temporal dead
+     zone and throw on every render. */
+  const notify = useCallback((msg, type = "ok") => {
+    const now = Date.now();
+    const key = `${type}:${msg}`;
+
+    // Same message still on screen → restart its timer, don't add another.
+    const existing = toastSeenRef.current.get(key);
+    if (existing && now - existing.at < TOAST_MS) {
+      existing.at = now;
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => {
+        setToasts(p => p.filter(t => t.id !== existing.id));
+        toastSeenRef.current.delete(key);
+      }, TOAST_MS);
+      return;
+    }
+
+    const id = now + Math.random();
+    setToasts(p => {
+      // Hard ceiling: never let a burst push a column of toasts up the screen.
+      const next = [...p, { id, msg, type }];
+      return next.length > 3 ? next.slice(next.length - 3) : next;
+    });
+    const timer = setTimeout(() => {
+      setToasts(p => p.filter(t => t.id !== id));
+      toastSeenRef.current.delete(key);
+    }, TOAST_MS);
+    toastSeenRef.current.set(key, { id, at: now, timer });
+  }, []);
   const [darkMode, setDarkMode] = useState(false);
 
   // ── Student profile (name + photo) — stored in sessionStorage ──
@@ -6211,34 +7448,76 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
     if (!sb || !courseId) return;
 
+    let cancelled = false;
+
+    // Paint immediately from the local mirror so a refresh never shows an
+    // empty calendar while the network round-trip is still in flight.
+    const snap = snapRead(courseId);
+    if (snap) {
+      if (snap.planText)  setPlanText(snap.planText);
+      if (Array.isArray(snap.planDays) && snap.planDays.length) { setPlanDays(snap.planDays); setPageRaw(p => p === "setup" ? "calendar" : p); }
+      if (snap.startDate) setStartDate(snap.startDate);
+      if (snap.monfri !== undefined) setMonfri(snap.monfri);
+      if (snap.dayOverrides) setDayOverrides(snap.dayOverrides);
+      if (snap.calYear) setCalYear(snap.calYear);
+      if (snap.calMonth !== undefined) setCalMonth(snap.calMonth);
+      if (!studentMode && snap.dayStatus) setDayStatus(snap.dayStatus);
+      if (snap.dayData) setDayData(snap.dayData);
+      if (snap.courseSettings) setCourseSettings(snap.courseSettings);
+    }
+
     const loadCourse = async () => {
       const course = await sbGetCourseData(sb, courseId);
-      if (!course) return;
+      if (!course || cancelled) return false;
       if (course.planText)  setPlanText(typeof course.planText === "string" ? course.planText : String(course.planText ?? ""));
-      // FIX: use planDays.length > 0 check so empty array doesn't block calendar navigation
-      if (Array.isArray(course.planDays) && course.planDays.length > 0) {
-        setPlanDays(course.planDays);
-        setPage("calendar");
-      } else if (course.planDays) {
-        setPlanDays(course.planDays);
+
+      // FIX #4: Load AI content from lms_day_content table (not day_data JSONB)
+      const contentByDay = await sbGetAllDayContent(sb, courseId);
+      if (cancelled) return false;
+
+      // The plan lives in lms_courses while the content lives in
+      // lms_day_content, so a wiped plan_days column leaves orphaned
+      // content behind. Rebuild the plan rather than showing an empty course.
+      let planDaysToUse = Array.isArray(course.planDays) ? course.planDays : [];
+      let startDateToUse = course.startDate;
+      if (!planDaysToUse.length) {
+        const fromSnap = (snap && Array.isArray(snap.planDays) && snap.planDays.length) ? snap.planDays : null;
+        const rebuilt  = fromSnap ? null : recoverPlanFromContent(contentByDay);
+        if (fromSnap) {
+          planDaysToUse = fromSnap;
+          if (!startDateToUse && snap.startDate) startDateToUse = snap.startDate;
+          setPlanText(prev => prev || snap.planText || "");
+          notify("Day plan restored from this device's backup — it will re-save automatically", "warn");
+        } else if (rebuilt) {
+          planDaysToUse  = rebuilt.planDays;
+          startDateToUse = startDateToUse || rebuilt.startDate;
+          setPlanText(prev => prev || rebuilt.planText);
+          notify(`Rebuilt ${rebuilt.recoveredDays} days from saved content — check the dates, then re-save`, "warn");
+        }
       }
-      if (course.startDate) setStartDate(course.startDate);
+
+      if (planDaysToUse.length > 0) {
+        setPlanDays(planDaysToUse);
+        setPageRaw(prev => (prev === "setup" && !studentMode) ? "calendar" : prev);
+      } else {
+        setPlanDays([]);
+      }
+      if (startDateToUse) setStartDate(startDateToUse);
       if (course.monfri !== undefined) setMonfri(course.monfri);
+
+      // Course-level settings (download lock) — stored beside day content.
+      const settings = await sbGetCourseSettings(sb, courseId).catch(() => ({}));
+      if (!cancelled) setCourseSettings(settings || {});
+
       // Trainer: load course-level day status. Student: load their own personal status.
       if (studentMode && studentId) {
         const studentStatus = await sbLoadStudentDayStatus(sb, studentId, courseId).catch(() => ({}));
         // Only apply DB result if it has actual entries — never wipe in-memory status with an empty result
-        // (guards against table-not-yet-created, RLS block, or race with the debounced save)
         if (Object.keys(studentStatus).length > 0) setDayStatus(studentStatus);
-        // Also store trainer's day_status for read-only display to student
         if (course.dayStatus) setTrainerDayStatus(course.dayStatus);
-        // Load student's own activity record from lms_student_activity
         const act = await sbLoadMyActivity(sb, studentId, courseId).catch(() => ({}));
-        // ── QUIZ SOURCE OF TRUTH: load from lms_quiz_attempts (dedicated table, never lost) ──
-        // lms_student_activity.quizScores may be stale/empty if the upsert failed silently.
-        // lms_quiz_attempts is always written first on submit, so always wins.
+        // lms_quiz_attempts is written first on submit, so it always wins.
         const quizFromDb = await sbLoadQuizAttempts(sb, studentId, courseId).catch(() => ({}));
-        // Merge: dedicated table overrides anything in activity cache
         const mergedQuizScores = { ...(act.quizScores || {}), ...quizFromDb };
         const withJoin = {
           ...act,
@@ -6248,7 +7527,6 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         };
         setStudentActivity(withJoin);
         studentActivityRef.current = withJoin;
-        // Also hydrate dayData.quizScore so "Last score" badge survives refresh
         if (Object.keys(mergedQuizScores).length > 0) {
           setDayData(prev => {
             const next = { ...prev };
@@ -6265,18 +7543,14 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       if (course.calYear)   setCalYear(course.calYear);
       if (course.calMonth !== undefined) setCalMonth(course.calMonth);
 
-      // FIX #4: Load AI content from lms_day_content table (not day_data JSONB)
-      const contentByDay = await sbGetAllDayContent(sb, courseId);
-      // Merge with any legacy day_data still in the course row
-      const mergedDayData = { ...(course.dayData || {}) };
-      for (const [k, v] of Object.entries(contentByDay)) {
-        mergedDayData[k] = { ...(mergedDayData[k] || {}), ...v };
-      }
-      // FIX: always set dayData (even if empty) so React state is consistent
+      // Merge order: local snapshot < course row < day-content table.
+      const mergedDayData = {};
+      for (const [k, v] of Object.entries((snap && snap.dayData) || {})) mergedDayData[k] = { ...v };
+      for (const [k, v] of Object.entries(course.dayData || {})) mergedDayData[k] = { ...(mergedDayData[k] || {}), ...v };
+      for (const [k, v] of Object.entries(contentByDay)) mergedDayData[k] = { ...(mergedDayData[k] || {}), ...v };
       setDayData(mergedDayData);
 
-      // Fetch uploaded files per day — use ALL known day keys:
-      // course row + content table + extra/special override days (they may have files but no AI content yet)
+      // Fetch uploaded files per day — use ALL known day keys
       const overrideDayKeys = Object.entries(course.dayOverrides || {})
         .filter(([, ov]) => ov.type === "extra" || ov.type === "special")
         .map(([k]) => k);
@@ -6289,6 +7563,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const results = await Promise.allSettled(
           allDayKeys.map(k => sbGetFilesForDay(sb, courseId, k).then(files => ({ k, files })))
         );
+        if (cancelled) return false;
         setDayData(prev => {
           const next = { ...prev };
           results.forEach(r => {
@@ -6300,10 +7575,46 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           return next;
         });
       }
+      return true;
     };
 
-    loadCourse().catch(e => console.error("Failed to load course:", e));
-  }, [courseId, sb]);
+    /* Auto-save stays disabled until a load actually succeeds. This is the
+       fix for the worst failure mode: the old code started its 1.5s save
+       timer at mount, so a slow first read let an empty planDays:[] land on
+       top of a real course — wiping the plan while the generated content
+       (stored in a different table) stayed behind. */
+    (async () => {
+      for (let attempt = 0; attempt < 4 && !cancelled; attempt++) {
+        try {
+          const ok = await loadCourse();
+          if (cancelled) return;
+          if (ok) {
+            hydratedRef.current = true;
+            setLoadFailed(false);
+            // Replay anything queued from a previous session before we
+            // start writing new state.
+            sbQueueFlush(sb).then(r => {
+              if (r.flushed > 0) notify(`Synced ${r.flushed} pending change${r.flushed > 1 ? "s" : ""} ✓`);
+            }).catch(() => {});
+            return;
+          }
+          // Row genuinely missing — nothing to hydrate from.
+          setLoadFailed(true);
+          return;
+        } catch (e) {
+          console.error(`Course load attempt ${attempt + 1} failed:`, e.message);
+          if (attempt === 3) {
+            setLoadFailed(true);
+            notify("Couldn't load this course. Editing is paused so nothing gets overwritten — check your connection and press Retry.", "err");
+          } else {
+            await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+          }
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [courseId, sb, reloadNonce]);
 
   /* ════ FIX 5: Supabase Realtime sync for students (replaces 10s polling) ════
      Uses Postgres changes subscriptions — instant delivery, zero wasted reads.
@@ -6545,35 +7856,167 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     return () => clearTimeout(timer);
   }, [studentActivity, courseId, sb, studentMode, studentId]);
 
-  /* ════ Debounced save (TRAINER) — full course data → lms_courses ════ */
+  /* ════ Debounced save (TRAINER) — full course data → lms_courses ════
+     Two bugs lived here and between them they cost real course data:
+       1. The timer started before the initial load finished, so an empty
+          planDays could overwrite a populated course row.
+       2. lastSavedAtRef was set to a timestamp generated *before* the write,
+          while the row got a slightly later updated_at. Every later save
+          then read "remote is newer" and skipped itself — silently, forever.
+     Now: saves are gated on hydration, and the conflict check compares
+     against the updated_at the database actually returned. */
   useEffect(() => {
     if (studentMode || !sb || !courseId) return;
+    if (!hydratedRef.current) return;   // never write before we've read
+
+    const payload = {
+      planText, planDays, startDate, monfri, dayStatus, dayOverrides,
+      calYear, calMonth,
+    };
+
     const timer = setTimeout(async () => {
+      setSaveState({ status: "saving", at: Date.now() });
       try {
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, ...light } = v;
           lightDayData[k] = light;
         }
+
+        // Mirror locally first — if the tab dies mid-write nothing is lost.
+        snapWrite(courseId, { ...payload, dayData, courseSettings });
+
         if (lastSavedAtRef.current) {
           const rows = await sb.select("lms_courses", `id=eq.${encodeURIComponent(courseId)}&select=updated_at&limit=1`);
           const dbUpdatedAt = rows?.[0]?.updated_at;
-          if (dbUpdatedAt && new Date(dbUpdatedAt) > new Date(lastSavedAtRef.current)) {
-            console.warn("LMS: skipping save — remote updated_at is newer (possible concurrent edit)");
+          // 2s of slack absorbs clock skew between the browser and Postgres.
+          if (dbUpdatedAt && new Date(dbUpdatedAt).getTime() > new Date(lastSavedAtRef.current).getTime() + 2000) {
+            console.warn("LMS: another session updated this course — reloading instead of overwriting");
+            notify("This course changed in another tab — reloading the latest version", "warn");
+            setReloadNonce(n => n + 1);
+            setSaveState({ status: "idle", at: Date.now() });
             return;
           }
         }
-        const now = new Date().toISOString();
-        await sbSaveCourseData(sb, courseId, {
-          planText, planDays, startDate, monfri, dayStatus, dayOverrides,
-          dayData: lightDayData, calYear, calMonth,
+
+        const savedAt = await sbSaveCourseData(sb, courseId, { ...payload, dayData: lightDayData });
+        lastSavedAtRef.current = savedAt || new Date().toISOString();
+        setSaveState({ status: "saved", at: Date.now() });
+      } catch (e) {
+        console.error("Course save failed:", e.message);
+        // Park it so it replays on reconnect rather than evaporating.
+        const lightDayData = {};
+        for (const [k, v] of Object.entries(dayData)) {
+          if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, ...light } = v;
+          lightDayData[k] = light;
+        }
+        sbQueuePush({
+          kind: "update",
+          table: "lms_courses",
+          filter: `id=eq.${encodeURIComponent(courseId)}`,
+          row: {
+            plan_text: planText, plan_days: planDays, start_date: startDate,
+            monfri, day_status: dayStatus, day_overrides: dayOverrides,
+            day_data: lightDayData, cal_year: calYear, cal_month: calMonth,
+            updated_at: new Date().toISOString(),
+          },
+          dedupeKey: `course:${courseId}`,
         });
-        lastSavedAtRef.current = now;
-      } catch (e) { console.warn("Supabase save error:", e.message); }
-    }, 1500);
+        setSaveState({ status: "queued", at: Date.now() });
+      }
+    }, 1200);
     return () => clearTimeout(timer);
-  }, [planText, planDays, startDate, monfri, dayStatus, dayOverrides, dayData, calYear, calMonth, courseId, sb, studentMode]);
+  }, [planText, planDays, startDate, monfri, dayStatus, dayOverrides, dayData, calYear, calMonth, courseId, sb, studentMode, courseSettings]);
+
+  /* ════ Keep the local mirror fresh for students too ════ */
+  useEffect(() => {
+    if (!courseId || !hydratedRef.current) return;
+    const t = setTimeout(() => {
+      snapWrite(courseId, { planText, planDays, startDate, monfri, dayStatus, dayOverrides, calYear, calMonth, dayData, courseSettings });
+    }, 900);
+    return () => clearTimeout(t);
+  }, [planText, planDays, startDate, monfri, dayStatus, dayOverrides, dayData, calYear, calMonth, courseId, courseSettings]);
+
+  /* ════ Replay queued writes: on reconnect, on a timer, before unload ════ */
+  useEffect(() => {
+    if (!sb) return;
+    const sync = () => {
+      sbQueueFlush(sb)
+        .then(r => { setQueuedWrites(r.remaining); if (r.flushed) setSaveState({ status: "saved", at: Date.now() }); })
+        .catch(() => {});
+    };
+    const onQueueChange = (e) => setQueuedWrites(e.detail?.size ?? sbQueueSize());
+    setQueuedWrites(sbQueueSize());
+    const iv = setInterval(sync, 20000);
+    window.addEventListener("online", sync);
+    window.addEventListener("lms-queue-changed", onQueueChange);
+    return () => {
+      clearInterval(iv);
+      window.removeEventListener("online", sync);
+      window.removeEventListener("lms-queue-changed", onQueueChange);
+    };
+  }, [sb]);
+
+  /* ════ Flush to the local mirror when the tab goes away ════
+     Covers refresh, navigation and mobile backgrounding — the case where a
+     1.2s debounce would otherwise be cut off mid-countdown. */
+  useEffect(() => {
+    if (!courseId) return;
+    const flush = () => {
+      if (!hydratedRef.current) return;
+      snapWrite(courseId, { planText, planDays, startDate, monfri, dayStatus, dayOverrides, calYear, calMonth, dayData, courseSettings });
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [courseId, planText, planDays, startDate, monfri, dayStatus, dayOverrides, calYear, calMonth, dayData, courseSettings]);
+
+  /* ════ Keep the download guard in step with this course ════ */
+  useEffect(() => {
+    setDownloadGuard({
+      locked: !!courseSettings?.downloadLocked,
+      studentMode,
+      notify,
+      courseName: courseSettings?.courseName || "",
+    });
+  }, [courseSettings, studentMode, notify]);
+
+  /* ════ Persist course settings the moment they change (trainer only) ════ */
+  const saveCourseSettings = useCallback(async (patch) => {
+    const next = { ...courseSettings, ...patch };
+    setCourseSettings(next);
+    if (studentMode || !sb || !courseId) return;
+    try {
+      await sbSaveCourseSettings(sb, courseId, next, trainerId);
+      notify(patch.downloadLocked === undefined
+        ? "Course settings saved ✓"
+        : patch.downloadLocked
+          ? "Downloads locked — students can read but not export"
+          : "Downloads unlocked — students can export again");
+    } catch (e) {
+      notify(`Couldn't save that setting: ${e.message}`, "err");
+    }
+  }, [courseSettings, studentMode, sb, courseId, trainerId, notify]);
+
+  /* ════ Students: pick up lock changes without a refresh ════ */
+  useEffect(() => {
+    if (!studentMode || !sb || !courseId) return;
+    let alive = true;
+    const poll = async () => {
+      const s = await sbGetCourseSettings(sb, courseId).catch(() => null);
+      if (alive && s) setCourseSettings(prev => ({ ...prev, ...s }));
+    };
+    const iv = setInterval(poll, 30000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [studentMode, sb, courseId]);
 
   /* ════ Rebuild dayMap ════ */
   useEffect(() => {
@@ -6640,20 +8083,6 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     return () => window.removeEventListener("keydown", handler);
   }, [planDays.length]);
 
-  const notify = useCallback((msg, type="ok") => {
-    const id = Date.now();
-    setToasts(p => [...p, { id, msg, type }]);
-    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 4000);
-    // Show a persistent banner for rate-limit events so they're visible during long batches
-    if (type === "warn" && (msg.includes("Rate limit") || msg.includes("rate limit") || msg.includes("pausing") || msg.includes("switched model"))) {
-      const modelName = rlGetCurrentModel();
-      setRlBanner({ msg, modelName });
-      // Auto-clear banner 8s after the last rate-limit event
-      clearTimeout(window.__rlBannerTimer);
-      window.__rlBannerTimer = setTimeout(() => setRlBanner(null), 8000);
-    }
-  }, []);
-
   const setBusyKey = useCallback((k, v) => setBusy(p => {
     if (v) return { ...p, [k]: true };
     const next = { ...p }; delete next[k]; return next;
@@ -6668,13 +8097,32 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       const existing = prev[key] || {};
       return { ...prev, [key]: { ...existing, ...patch } };
     });
-    // Persist each AI content field to lms_day_content immediately (trainer only)
+    // Persist each AI content field to lms_day_content immediately (trainer only).
+    // A failure here used to be swallowed by console.warn, so a generation
+    // could look successful and be gone after a refresh. Now the write is
+    // retried, queued for replay if it still can't land, and reported.
     if (!studentMode && sb && courseId) {
-      for (const [field, value] of Object.entries(patch)) {
-        if (AI_CONTENT_TYPES.includes(field) && value !== undefined) {
+      const fields = Object.entries(patch)
+        .filter(([field, value]) => AI_CONTENT_TYPES.includes(field) && value !== undefined);
+      if (fields.length) {
+        setSaveState({ status: "saving", at: Date.now() });
+        Promise.all(fields.map(([field, value]) =>
           sbSaveDayContent(sb, courseId, key, field, value, trainerId)
-            .catch(e => console.warn(`Failed to save ${field} for ${key}:`, e.message));
-        }
+            .then(res => ({ field, ...res }))
+            .catch(e => ({ field, ok: false, queued: false, error: e }))
+        )).then(results => {
+          const queued = results.filter(r => r.queued);
+          const failed = results.filter(r => !r.ok && !r.queued);
+          if (failed.length) {
+            setSaveState({ status: "error", at: Date.now() });
+            notify(`Couldn't save ${failed.map(f => f.field).join(", ")} — ${failed[0].error?.message || "rejected by the database"}`, "err");
+          } else if (queued.length) {
+            setSaveState({ status: "queued", at: Date.now() });
+            notify(`Saved on this device — ${queued.length} item(s) will upload when the connection returns`, "warn");
+          } else {
+            setSaveState({ status: "saved", at: Date.now() });
+          }
+        });
       }
     }
     // FIX: Student quiz score — updateDay only updates in-memory dayData (not persisted for students).
@@ -6693,35 +8141,53 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         return next;
       });
     }
-  }, [studentMode, sb, courseId, trainerId, studentId]);
+  }, [studentMode, sb, courseId, trainerId, studentId, notify]);
 
-  /* ════ AI caller ════ */
-  // On first mount, sync _rlState model index to the trainer's chosen model
-  const callAI = useCallback(async (messages) => {
+  /* ════ AI caller ════
+     Every generate button in the app funnels through here, so the retry
+     behaviour is uniform: a rate limit rotates to the next API key, then
+     to the next model, then waits out the cooldown and tries again. The
+     promise stays pending while that happens, which keeps the button in
+     its loading state and finishes the job without a second click. */
+  /* The engine reports every key switch, model switch and pause. Turning each
+     of those into a toast produced a column of popups marching up the corner
+     — most visibly when a model was rejected and the engine walked the whole
+     list in under a second. They all describe one ongoing operation, so they
+     belong in one line that rewrites itself. */
+  const aiEvent = useCallback((ev) => {
+    const msg = aiEventMessage(ev);
+    if (!msg) return;
+    setRlBanner({ msg, modelName: rlGetCurrentModel() });
+    clearTimeout(window.__rlBannerTimer);
+    window.__rlBannerTimer = setTimeout(() => setRlBanner(null), 5000);
+  }, []);
+
+  const runAI = useCallback(async (messages, extra = {}) => {
     if (aiProvider === "groq") {
-      if (!isOnline) throw new Error("You're offline — connect to the internet to use Groq");
-      if (!groqKey) throw new Error("Enter Groq API key in Settings");
-      // Use the resilience engine's current model (may have been auto-rotated after rate-limit)
-      const modelToUse = rlGetCurrentModel();
-      return withRetry(() => callGroq(groqKey, modelToUse, messages));
+      const keys = aiEffectiveKeys(groqKey);
+      if (!keys.length) throw new Error("Add a Groq API key in Settings › AI keys");
+      if (!isOnline) throw new Error("You're offline — reconnect to generate");
+      return aiRun(messages, {
+        keys,
+        preferredModel: groqModel,
+        onEvent: aiEvent,
+        ...extra,
+      });
     }
     return withRetry(() => callOllama(ollamaUrl, ollamaModel, messages));
-  }, [aiProvider, groqKey, groqModel, ollamaUrl, ollamaModel, isOnline]);
+  }, [aiProvider, groqKey, groqModel, ollamaUrl, ollamaModel, isOnline, aiEvent]);
 
-  // ── Resilient AI caller for batch operations (genAll / genWeek) ──────────────────
-  // 429 → pauses 5s and retries; 2 consecutive 429s → auto-rotates to next model
-  // Never pops up an error toast during a batch — keeps going until done or truly fatal
-  const callAIResilient = useCallback(async (messages) => {
-    if (aiProvider === "groq") {
-      if (!isOnline) throw new Error("You're offline");
-      if (!groqKey) throw new Error("Enter Groq API key in Settings");
-      return withRLResilience(
-        () => callGroq(groqKey, rlGetCurrentModel(), messages),
-        { notifyFn: notify }
-      );
+  const callAI = useCallback(async (messages, extra) => {
+    try {
+      return await runAI(messages, extra);
+    } finally {
+      // Whatever the engine was reporting is over now.
+      clearTimeout(window.__rlBannerTimer);
+      window.__rlBannerTimer = setTimeout(() => setRlBanner(null), 1200);
     }
-    return withRetry(() => callOllama(ollamaUrl, ollamaModel, messages));
-  }, [aiProvider, groqKey, ollamaUrl, ollamaModel, isOnline, notify]);
+  }, [runAI]);
+  // Kept as a distinct name for the batch call sites; same guarantees.
+  const callAIResilient = callAI;
 
   const genNotebook = async (day, opts={}) => {
     const k = day.key;
@@ -7718,6 +9184,8 @@ Hard rules:
           @keyframes lms-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
           @keyframes lms-slide{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
           @keyframes lms-toast{0%{opacity:0;transform:translateY(8px)}100%{opacity:1;transform:translateY(0)}}
+          @keyframes lms-toast-life{0%{opacity:0;transform:translateY(8px) scale(.97)}7%{opacity:1;transform:none}85%{opacity:1;transform:none}100%{opacity:0;transform:translateY(-4px) scale(.98)}}
+          @media (prefers-reduced-motion: reduce){[data-lms-toast]{animation:none !important}}
           @keyframes lms-pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
           /* ── Scrollbar ── */
@@ -8621,6 +10089,8 @@ Hard rules:
                   setStartDate={setStartDate} setMonfri={setMonfri}
                   setDayStatus={setDayStatus} setDayData={setDayData}
                   setDayOverrides={setDayOverrides}
+                  courseSettings={courseSettings} saveCourseSettings={saveCourseSettings}
+                  courseName={courseSettings?.courseName || ""}
                 />
               )}
               {/* ── STUDENT AI SETTINGS PAGE ── */}
@@ -8716,13 +10186,8 @@ Hard rules:
         {/* FIX: pass auth directly (not an inline object) so the handler's
             useEffect dep [sb, auth?.id] stays stable across re-renders.
             Also guard on studentId so it only shows when the student is ready. */}
-        {attScanActive && studentMode && sb && auth && studentId && (
-          <AttendanceScanHandler
-            sb={sb}
-            auth={auth}
-            onDismiss={() => setAttScanActive(false)}
-          />
-        )}
+        {/* Handled at the top level in LMSApp so a QR works from any course.
+            Mounting it here too would fire a second mark and fail as a duplicate. */}
 
         {/* Search overlay */}
         {searchOpen && (
@@ -8788,7 +10253,7 @@ Hard rules:
         {/* Toasts */}
         <div style={{ position:"fixed", bottom:22, right:22, display:"flex", flexDirection:"column", gap:8, zIndex:9999, maxWidth:360 }}>
           {toasts.map(t => (
-            <div key={t.id} style={{ padding:"12px 20px", borderRadius:14, animation:"lms-toast .25s ease", display:"flex", alignItems:"center", gap:10, fontSize:13.5, fontWeight:700, background: t.type==="err" ? "linear-gradient(135deg,rgba(244,63,94,.15),rgba(232,121,249,.08))" : t.type==="warn" ? "linear-gradient(135deg,rgba(245,158,11,.15),rgba(249,115,22,.08))" : "linear-gradient(135deg,rgba(20,184,166,.15),rgba(94,234,212,.08))", border: `1.5px solid ${t.type==="err"?"rgba(244,63,94,.4)":t.type==="warn"?"rgba(245,158,11,.4)":"rgba(20,184,166,.4)"}`, color: t.type==="err"?"#f43f5e":t.type==="warn"?"#f59e0b":"#14B8A6", boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff", backdropFilter:"blur(18px)", WebkitBackdropFilter:"blur(18px)" }}>
+            <div key={t.id} data-lms-toast style={{ padding:"12px 20px", borderRadius:14, animation:"lms-toast-life 3s ease forwards", display:"flex", alignItems:"center", gap:10, fontSize:13.5, fontWeight:700, background: t.type==="err" ? "linear-gradient(135deg,rgba(244,63,94,.15),rgba(232,121,249,.08))" : t.type==="warn" ? "linear-gradient(135deg,rgba(245,158,11,.15),rgba(249,115,22,.08))" : "linear-gradient(135deg,rgba(20,184,166,.15),rgba(94,234,212,.08))", border: `1.5px solid ${t.type==="err"?"rgba(244,63,94,.4)":t.type==="warn"?"rgba(245,158,11,.4)":"rgba(20,184,166,.4)"}`, color: t.type==="err"?"#f43f5e":t.type==="warn"?"#f59e0b":"#14B8A6", boxShadow:"12px 12px 28px #C4CDD9,-8px -8px 20px #fff", backdropFilter:"blur(18px)", WebkitBackdropFilter:"blur(18px)" }}>
               <Ic n={t.type==="err"?"x":t.type==="warn"?"bell":"check"} s={15}/>
               {t.msg}
             </div>
@@ -8934,6 +10399,8 @@ Day 10: Modules and Packages - import, pip`;
   const [brochureGenerating,setBrochureGenerating]= useState(false);
   const [brochureResult,    setBrochureResult]    = useState(null);   // { plan, suggestedDays, summary }
   const [brochureError,     setBrochureError]     = useState("");
+  const [brochureSource,    setBrochureSource]    = useState(null);   // { text, via }
+  const [brochureStage,     setBrochureStage]     = useState("");     // progress label
   const [brochureDragOver,  setBrochureDragOver]  = useState(false);
 
   const handleBrochureFile = (file) => {
@@ -8965,177 +10432,180 @@ Day 10: Modules and Packages - import, pip`;
     if (file) handleBrochureFile(file);
   };
 
+  /* ── Step 1: get the real words out of the file ──────────────────
+     Images go to a vision model for verbatim transcription; PDFs are read
+     locally with pdf.js. Either way the plan is built from text that
+     actually exists in the brochure, never from the filename. */
+  const extractBrochureText = async () => {
+    const isPdf   = brochureFile.type === "application/pdf";
+    const isImage = brochureFile.type.startsWith("image/");
+
+    if (isPdf) {
+      setBrochureStage("Reading the PDF…");
+      const text = await extractPdfText(brochureFile.dataUrl);
+      if (text && text.length > 120) return { text, via: "pdf" };
+      // Scanned PDF — no text layer to read.
+      throw new Error(
+        "This PDF has no selectable text (it looks like a scan). Export a screenshot of the pages and upload that instead — the reader handles images."
+      );
+    }
+
+    if (isImage) {
+      setBrochureStage("Reading the brochure image…");
+      const transcript = await callAI(
+        [
+          { role: "system", content: "You transcribe documents. You copy out text exactly as it appears. You never summarise, infer, or add anything that is not visibly written." },
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: brochureFile.dataUrl } },
+              { type: "text", text: "Transcribe every piece of text in this course brochure: the course title, all module and topic names, section headings, durations, bullet points and learning outcomes. Preserve the original order and grouping. Output the text only — no commentary, no interpretation. If the image contains no readable text, reply with exactly: NO_TEXT_FOUND" },
+            ],
+          },
+        ],
+        { models: GROQ_VISION_MODELS, maxTokens: 3000, temperature: 0 }
+      );
+      if (/NO_TEXT_FOUND/i.test(transcript) || transcript.trim().length < 60) {
+        throw new Error("Couldn't read any text in that image. Try a sharper or larger screenshot of the brochure.");
+      }
+      return { text: transcript.trim(), via: "vision" };
+    }
+
+    throw new Error("Upload a PDF or an image of the brochure.");
+  };
+
   const generatePlanFromBrochure = async () => {
     if (!brochureFile) { notify("Upload a brochure first", "err"); return; }
     if (!callAI) { notify("Configure AI provider in Settings first", "err"); return; }
     setBrochureGenerating(true);
     setBrochureError("");
     setBrochureResult(null);
+    setBrochureSource(null);
     try {
       const userDays = parseInt(brochureDays) || 0;
+
+      // ── Step 1: source text ──
+      const { text: sourceText, via } = await extractBrochureText();
+      setBrochureSource({ text: sourceText, via });
+
+      // ── Step 2: build the plan from that text and nothing else ──
+      setBrochureStage("Building the day plan…");
       const dayInstruction = userDays > 0
-        ? `The user wants exactly ${userDays} days. Create a plan with exactly ${userDays} days.`
-        : `First estimate the ideal number of days needed to cover all content thoroughly (typically 1 topic per day). State your recommendation clearly.`;
+        ? `Produce exactly ${userDays} days. If the source has more topics than that, group related ones; if it has fewer, split the larger topics into their named sub-parts — but never introduce a subject the source does not mention.`
+        : `Decide the number of days from the amount of material in the source: roughly one focused topic per day. State the number you chose.`;
 
-      const isPdf   = brochureFile.type === "application/pdf";
-      const isImage = brochureFile.type.startsWith("image/");
-
-      let messages;
-
-      if (isImage) {
-        // Images: send as vision message (works with Groq llava/vision models)
-        // Non-vision Groq models will reject it → caught below → text fallback kicks in
-        messages = [
+      const raw = await callAI(
+        [
           {
             role: "system",
-            content: `You are an expert curriculum designer. Analyze course brochures and create structured day-wise teaching plans. Always respond in the exact format requested.`
+            content:
+              "You convert a course brochure into a day-wise teaching plan. You work strictly from the supplied brochure text. " +
+              "Every day topic must be traceable to a specific word or phrase in that text. " +
+              "You never add popular or 'standard' topics for the subject area, never pad the plan to reach a number, " +
+              "and never invent modules that the brochure does not name. Fidelity to the source matters more than completeness.",
           },
           {
             role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: { url: brochureFile.dataUrl }
-              },
-              {
-                type: "text",
-                text: `This is a course brochure image. Analyze all text, topics, modules, and learning objectives visible in it.
+            content: `Here is the complete text extracted from a course brochure. It is the only source you may use.
+
+--- BROCHURE TEXT START ---
+${sourceText.slice(0, 12000)}
+--- BROCHURE TEXT END ---
 
 ${dayInstruction}
 
-Respond with EXACTLY this structure — no deviations:
+Respond in EXACTLY this structure:
 
 SUGGESTED_DAYS: [number]
 
 SUMMARY:
-[2-3 sentences describing what this course covers]
+[2-3 sentences describing what this specific brochure covers, using its own terminology]
 
 PLAN:
-Day 1: [Topic title - be specific]
-Day 2: [Topic title]
-Day 3: [Topic title]
-[continue for all days...]
+Day 1: [topic taken from the brochure]
+Day 2: [topic taken from the brochure]
+[continue for every day]
 
 Rules:
-- Each day must have ONE focused topic
-- Topics must directly come from the brochure content
-- Day titles should be concise (under 60 chars)
-- Cover all modules/sections from the brochure
-- Order topics logically (fundamentals before advanced)`
-              }
-            ]
-          }
-        ];
-      } else {
-        // PDF or fallback — send as text description prompt
-        // Most Groq/Ollama models can't read raw PDFs, so we ask the user to describe
-        // BUT we still try by embedding base64 in a document block for models that support it
-        messages = [
-          {
-            role: "system",
-            content: `You are an expert curriculum designer. Analyze course brochures and create structured day-wise teaching plans. Always respond in the exact format requested.`
+- One focused topic per day, under 60 characters
+- Use the brochure's own vocabulary for topic names
+- Order the days the way the brochure orders its modules, unless a prerequisite clearly comes later
+- Cover the brochure's modules and nothing beyond them
+- If the text is too sparse to build a plan, reply with exactly: INSUFFICIENT_SOURCE`,
           },
-          {
-            role: "user",
-            content: `I'm sharing a course brochure PDF (base64 encoded). The filename is: "${brochureFile.name}".
+        ],
+        { maxTokens: 4000, temperature: 0.15 }
+      );
 
-Even if you cannot decode the PDF directly, use the filename and any context to infer the course subject, then generate a comprehensive day-wise teaching plan for it.
-
-${dayInstruction}
-
-Respond with EXACTLY this structure — no deviations:
-
-SUGGESTED_DAYS: [number]
-
-SUMMARY:
-[2-3 sentences describing what this course covers based on the filename/content]
-
-PLAN:
-Day 1: [Topic title - be specific]
-Day 2: [Topic title]
-Day 3: [Topic title]
-[continue for all days...]
-
-Rules:
-- Each day must have ONE focused topic
-- Topics must be relevant to the course subject
-- Day titles should be concise (under 60 chars)
-- Order topics logically (fundamentals before advanced)
-- Cover beginner to advanced progression`
-          }
-        ];
+      if (/INSUFFICIENT_SOURCE/i.test(raw)) {
+        throw new Error("That brochure doesn't list enough topics to build a plan from. Upload a page that shows the module or syllabus breakdown.");
       }
 
-      const raw = await callAI(messages);
-
-      // Parse the structured response
       const suggestedDaysMatch = raw.match(/SUGGESTED_DAYS:\s*(\d+)/i);
       const suggestedDays = suggestedDaysMatch ? parseInt(suggestedDaysMatch[1]) : (userDays || null);
-
       const summaryMatch = raw.match(/SUMMARY:\s*([\s\S]*?)(?=PLAN:|$)/i);
       const summary = summaryMatch ? summaryMatch[1].trim() : "";
-
       const planMatch = raw.match(/PLAN:\s*([\s\S]+)/i);
       const planRaw = planMatch ? planMatch[1].trim() : raw;
 
-      // Extract only valid "Day N: Topic" lines
       const planLines = planRaw.split("\n")
         .map(l => l.trim())
         .filter(l => l.match(/^(?:day\s*)?\d+\s*[:\-\.]\s*.+/i));
 
-      if (planLines.length === 0) throw new Error("AI did not return a valid day plan — try again or switch to a larger model");
+      if (planLines.length === 0) throw new Error("The model didn't return a usable day list — try again.");
+
+      // ── Step 3: check the plan against the source ──
+      // Any day whose wording shares nothing with the brochure is flagged so
+      // the trainer can see drift rather than discover it three weeks in.
+      const sourceWords = new Set(
+        sourceText.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 3)
+      );
+      const drifted = planLines.filter(line => {
+        const topic = line.replace(/^(?:day\s*)?\d+\s*[:\-\.]\s*/i, "");
+        const words = topic.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 3);
+        if (!words.length) return false;
+        return !words.some(w => sourceWords.has(w));
+      });
 
       const planText2 = planLines.join("\n");
-      setBrochureResult({ plan: planText2, suggestedDays, summary, lineCount: planLines.length });
-      notify(`Plan generated! ${planLines.length} days from brochure ✓`);
-    } catch(e) {
-      // Trigger text-only fallback for: vision-unsupported errors, image format rejections,
-      // or any 400/422 from sending array content to a text model
-      const isVisionError = e.message?.toLowerCase().match(/image|vision|content|unsupported|multimodal|400|422/);
-      if (isVisionError && brochureFile?.type?.startsWith("image/")) {
-        try {
-          const userDays = parseInt(brochureDays) || 0;
-          const dayInstruction = userDays > 0
-            ? `Create a plan with exactly ${userDays} days.`
-            : `Recommend the ideal number of days.`;
-          const fallback = await callAI([
-            { role:"system", content:"You are an expert curriculum designer creating structured teaching plans." },
-            { role:"user", content:`Generate a day-wise teaching plan for a course titled "${brochureFile.name.replace(/\.[^.]+$/,"")}".
+      setBrochureResult({
+        plan: planText2,
+        suggestedDays,
+        summary,
+        lineCount: planLines.length,
+        via,
+        drifted: drifted.length,
+      });
 
-${dayInstruction}
-
-Respond with EXACTLY this structure:
-
-SUGGESTED_DAYS: [number]
-
-SUMMARY:
-[2-3 sentences about this course]
-
-PLAN:
-Day 1: [Topic]
-Day 2: [Topic]
-[continue...]` }
-          ]);
-          const suggestedDaysMatch2 = fallback.match(/SUGGESTED_DAYS:\s*(\d+)/i);
-          const suggestedDays2 = suggestedDaysMatch2 ? parseInt(suggestedDaysMatch2[1]) : (userDays || null);
-          const summaryMatch2 = fallback.match(/SUMMARY:\s*([\s\S]*?)(?=PLAN:|$)/i);
-          const summary2 = summaryMatch2 ? summaryMatch2[1].trim() : "";
-          const planMatch2 = fallback.match(/PLAN:\s*([\s\S]+)/i);
-          const planLines2 = (planMatch2?.[1] || fallback).split("\n").map(l=>l.trim()).filter(l=>l.match(/^(?:day\s*)?\d+\s*[:\-\.]\s*.+/i));
-          if (planLines2.length === 0) throw new Error("Could not parse plan from AI response");
-          setBrochureResult({ plan: planLines2.join("\n"), suggestedDays: suggestedDays2, summary: summary2, lineCount: planLines2.length, fallback: true });
-          notify(`Plan generated (text mode)! ${planLines2.length} days ✓`);
-        } catch(e2) {
-          setBrochureError(e2.message);
-          notify(`Brochure AI error: ${e2.message}`, "err");
-        }
+      if (drifted.length) {
+        notify(`Plan ready — ${drifted.length} of ${planLines.length} topics don't match the brochure wording. Check them before using.`, "warn");
       } else {
-        setBrochureError(e.message);
-        notify(`Brochure AI error: ${e.message}`, "err");
+        notify(`Plan generated from the brochure — ${planLines.length} days ✓`);
       }
+    } catch (e) {
+      setBrochureError(e.message);
+      notify(e.message, "err");
     }
+    setBrochureStage("");
     setBrochureGenerating(false);
   };
+
+  const brochureSourcePanel = brochureSource ? (
+    <div style={{ marginTop:14, border:"1.5px solid #ddd6fe", borderRadius:12, overflow:"hidden" }}>
+      <div style={{ background:"#f5f3ff", padding:"9px 14px", display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+        <span style={{ fontSize:12.5, fontWeight:700, color:"#5b21b6" }}>
+          {brochureSource.via === "pdf" ? "Text read from the PDF" : "Text read from the image"}
+        </span>
+        <span style={{ fontSize:11, color:"#7c6aa8" }}>
+          {brochureSource.text.length.toLocaleString()} characters — this is the only thing the plan was built from
+        </span>
+      </div>
+      <textarea
+        readOnly value={brochureSource.text}
+        style={{ width:"100%", height:110, padding:"10px 13px", border:"none", outline:"none", resize:"vertical", fontSize:12, lineHeight:1.55, color:"#475569", fontFamily:"ui-monospace,monospace", boxSizing:"border-box" }}
+      />
+    </div>
+  ) : null;
 
   const usePlanInSetup = () => {
     if (!brochureResult?.plan) return;
@@ -9237,13 +10707,23 @@ Day 2: [Topic]
               onClick={generatePlanFromBrochure}
             >
               {brochureGenerating
-                ? <><Spin s={15}/>Analyzing brochure…</>
+                ? <><Spin s={15}/>{brochureStage || "Reading the brochure…"}</>
                 : <><Ic n="brain" s={15}/>Generate Plan from Brochure</>}
             </button>
+
+            {/* What was actually read out of the file — shown so the plan can
+                be checked against its source rather than taken on trust. */}
+            {brochureSourcePanel}
 
             {brochureError && (
               <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#dc2626" }} className="stp-error-box">
                 ❌ {brochureError}
+              </div>
+            )}
+
+            {brochureResult?.drifted > 0 && (
+              <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:9, padding:"10px 12px", fontSize:12.5, color:"#92400e", lineHeight:1.55 }}>
+                {brochureResult.drifted} of {brochureResult.lineCount} topics use wording that doesn't appear in the brochure. Read those lines before you map the plan.
               </div>
             )}
 
@@ -10059,22 +11539,15 @@ function NotebookSubtopicsPanel({ dayKey, dayData, updateDay, notify, groqKey, g
 
   /* ── Shared Groq POST helper ── */
   const callGroqForSubtopics = async (messages) => {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
-      body: JSON.stringify({
-        model: groqModel || "llama-3.1-8b-instant",
-        temperature: 0.2,
-        max_tokens: 300,
-        messages,
-      })
+    // Uses the shared engine: rotates through every saved key, then models,
+    // and waits out rate limits instead of surfacing an error.
+    return aiRun(messages, {
+      keys: aiEffectiveKeys(groqKey),
+      preferredModel: groqModel,
+      temperature: 0.2,
+      maxTokens: 600,
+      onEvent: (ev) => { const m = aiEventMessage(ev); if (m) notify(m, "warn"); },
     });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => res.statusText);
-      throw new Error(`Groq API error ${res.status}: ${errText.slice(0, 200)}`);
-    }
-    const json = await res.json();
-    return (json.choices?.[0]?.message?.content || "").trim();
   };
 
   /* ── Normalise raw AI output to comma-separated list ── */
@@ -11934,7 +13407,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
                         </div>
                         {isImg && f.dataUrl && <img src={f.dataUrl} alt={f.name} style={{ width:40, height:40, objectFit:"cover", borderRadius:6, flexShrink:0 }}/>}
                         {f.dataUrl ? (
-                          <a href={f.dataUrl} download={f.name} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
+                          <a href={f.dataUrl} download={f.name} onClick={e => { if (!canDownload()) e.preventDefault(); }} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
                             <Ic n="download" s={13}/>Download
                           </a>
                         ) : (
@@ -11981,7 +13454,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
                       </div>
                       {isImg && f.dataUrl && <img src={f.dataUrl} alt={f.name} style={{ width:40, height:40, objectFit:"cover", borderRadius:6, flexShrink:0 }}/>}
                       {f.dataUrl ? (
-                        <a href={f.dataUrl} download={f.name} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
+                        <a href={f.dataUrl} download={f.name} onClick={e => { if (!canDownload()) e.preventDefault(); }} className="lms-btn lms-btn-ghost" style={{ padding:"5px 10px", fontSize:12, textDecoration:"none" }}>
                           <Ic n="download" s={13}/>Download
                         </a>
                       ) : (
@@ -13053,18 +14526,170 @@ function StudentApiKeyPage({ studentGroqKey, setStudentGroqKey, studentGroqModel
   );
 }
 
-function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqModel, setGroqModel, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel, callAI, notify, sb, courseId, trainerId, setPlanText, setPlanDays, setStartDate, setMonfri, setDayStatus, setDayData, setDayOverrides }) {
+/* ═══════════════════════════════════════════════════════════════════
+   API KEY POOL
+   Add as many Groq keys as you like. Generation walks the list in order:
+   when one hits its limit the next one picks the job up straight away,
+   and the cycle repeats until the content is produced.
+═══════════════════════════════════════════════════════════════════ */
+function ApiKeysManager({ notify, legacyKey, onAdoptLegacy }) {
+  const [keys, setKeys]       = useState(() => aiLoadKeys());
+  const [draft, setDraft]     = useState("");
+  const [label, setLabel]     = useState("");
+  const [reveal, setReveal]   = useState({});
+  const [testing, setTesting] = useState(null);
+  const [status, setStatus]   = useState({});   // id → "ok" | "bad" | "limit"
+
+  const persist = (next) => { setKeys(next); aiSaveKeys(next); };
+
+  const add = () => {
+    const k = draft.trim();
+    if (!k) { notify("Paste a key first", "err"); return; }
+    if (!/^gsk_/.test(k)) notify("That doesn't look like a Groq key (they start with gsk_) — added anyway", "warn");
+    if (keys.some(x => x.key === k)) { notify("That key is already in the list", "warn"); return; }
+    persist([...keys, { id: `k_${Date.now()}_${k.slice(-6)}`, key: k, label: label.trim() || `Key ${keys.length + 1}` }]);
+    setDraft(""); setLabel("");
+    notify("Key added — it joins the rotation immediately");
+  };
+
+  const remove = (id) => {
+    persist(keys.filter(k => k.id !== id));
+    notify("Key removed");
+  };
+
+  const move = (id, dir) => {
+    const idx = keys.findIndex(k => k.id === id);
+    const to  = idx + dir;
+    if (idx < 0 || to < 0 || to >= keys.length) return;
+    const next = keys.slice();
+    [next[idx], next[to]] = [next[to], next[idx]];
+    persist(next);
+  };
+
+  const test = async (entry) => {
+    setTesting(entry.id);
+    try {
+      await callGroq(entry.key, GROQ_MODELS[0], [{ role: "user", content: "ping" }], { maxTokens: 5, timeoutMs: 20000 });
+      setStatus(s => ({ ...s, [entry.id]: "ok" }));
+      notify(`${entry.label} works ✓`);
+    } catch (e) {
+      const limited = e._httpStatus === 429;
+      setStatus(s => ({ ...s, [entry.id]: limited ? "limit" : "bad" }));
+      notify(limited ? `${entry.label} is at its limit right now — it will be skipped until it resets` : `${entry.label}: ${e.message}`, limited ? "warn" : "err");
+    }
+    setTesting(null);
+  };
+
+  const mask = (k) => k.length <= 12 ? k : `${k.slice(0, 6)}${"•".repeat(10)}${k.slice(-4)}`;
+  const legacyNotInPool = legacyKey && !keys.some(k => k.key === legacyKey.trim());
+
+  const dot = { ok: "#22c55e", bad: "#ef4444", limit: "#f59e0b" };
+
+  return (
+    <div className="lms-card" style={{ padding:22, marginBottom:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+        <div style={{ width:30, height:30, background:"#eef2ff", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <Ic n="key" s={16} c="#6366f1"/>
+        </div>
+        <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a" }}>AI keys</p>
+        <span style={{ marginLeft:"auto", fontSize:12, fontWeight:700, color:"#6366f1", background:"#eef2ff", borderRadius:99, padding:"3px 10px" }}>
+          {keys.length} in rotation
+        </span>
+      </div>
+      <p style={{ fontSize:12.5, color:"#64748b", lineHeight:1.65, marginBottom:14 }}>
+        Generation starts at the top of this list. When a key hits its rate limit the next one takes over
+        within the same click, and the list loops until the content is finished. Keys stay on this device
+        and are never uploaded.
+      </p>
+
+      {legacyNotInPool && (
+        <div style={{ background:"#fffbeb", border:"1.5px solid #fde68a", borderRadius:10, padding:"10px 13px", marginBottom:12, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+          <span style={{ fontSize:12.5, color:"#92400e", flex:1 }}>Your existing key isn't in the rotation list yet.</span>
+          <button className="lms-btn lms-btn-ghost" style={{ padding:"5px 12px", fontSize:12 }}
+            onClick={() => { const next = [{ id:`k_legacy_${Date.now()}`, key: legacyKey.trim(), label:"Primary key" }, ...keys]; persist(next); onAdoptLegacy?.(); notify("Added to the rotation"); }}>
+            Add it
+          </button>
+        </div>
+      )}
+
+      {keys.length === 0 ? (
+        <div style={{ border:"1.5px dashed #cbd5e1", borderRadius:12, padding:"18px 16px", textAlign:"center", marginBottom:14 }}>
+          <p style={{ fontSize:13, color:"#64748b" }}>No keys yet. Add one below to start generating.</p>
+        </div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:14 }}>
+          {keys.map((k, i) => (
+            <div key={k.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", border:"1.5px solid #e2e8f0", borderRadius:11, background:"#fff", flexWrap:"wrap" }}>
+              <span style={{ width:22, height:22, borderRadius:7, background:"#f1f5f9", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:"#475569", flexShrink:0 }}>{i + 1}</span>
+              {status[k.id] && <span title={status[k.id]} style={{ width:8, height:8, borderRadius:99, background:dot[status[k.id]], flexShrink:0 }}/>}
+              <div style={{ minWidth:0, flex:1 }}>
+                <p style={{ fontSize:13, fontWeight:600, color:"#0f172a", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{k.label}</p>
+                <p style={{ fontSize:11.5, color:"#94a3b8", fontFamily:"ui-monospace,monospace" }}>{reveal[k.id] ? k.key : mask(k.key)}</p>
+              </div>
+              <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 9px", fontSize:11 }} onClick={() => setReveal(r => ({ ...r, [k.id]: !r[k.id] }))}>{reveal[k.id] ? "Hide" : "Show"}</button>
+              <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 9px", fontSize:11 }} disabled={testing === k.id} onClick={() => test(k)}>{testing === k.id ? "Testing…" : "Test"}</button>
+              <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 8px", fontSize:11 }} disabled={i === 0} onClick={() => move(k.id, -1)} title="Move up">↑</button>
+              <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 8px", fontSize:11 }} disabled={i === keys.length - 1} onClick={() => move(k.id, 1)} title="Move down">↓</button>
+              <button className="lms-btn lms-btn-ghost" style={{ padding:"4px 9px", fontSize:11, color:"#dc2626" }} onClick={() => remove(k.id)}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+        <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Label (optional)"
+          style={{ width:150, padding:"10px 12px", border:"1.5px solid #e2e8f0", borderRadius:10, fontSize:13, outline:"none" }} />
+        <input value={draft} onChange={e => setDraft(e.target.value)} placeholder="gsk_…" type="password"
+          onKeyDown={e => { if (e.key === "Enter") add(); }}
+          style={{ flex:1, minWidth:180, padding:"10px 12px", border:"1.5px solid #e2e8f0", borderRadius:10, fontSize:13, outline:"none", fontFamily:"ui-monospace,monospace" }} />
+        <button className="lms-btn lms-btn-green" onClick={add}>Add key</button>
+      </div>
+      <p style={{ fontSize:11.5, color:"#94a3b8", marginTop:9 }}>
+        Free keys: <a href="https://console.groq.com" target="_blank" rel="noreferrer" style={{ color:"#3b82f6" }}>console.groq.com</a> — each Groq account has its own limit, so several accounts multiply your headroom.
+      </p>
+    </div>
+  );
+}
+
+function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqModel, setGroqModel, ollamaUrl, setOllamaUrl, ollamaModel, setOllamaModel, callAI, notify, sb, courseId, trainerId, setPlanText, setPlanDays, setStartDate, setMonfri, setDayStatus, setDayData, setDayOverrides, courseSettings = {}, saveCourseSettings, courseName = "" }) {
   const [testing,     setTesting]     = useState(false);
   const [testSb,      setTestSb]      = useState(false);
   const [sbStatus,    setSbStatus]    = useState(null);
   const [confirmClear, setConfirmClear] = useState(false);
 
+  /* A connection test answers one question: does this key work on this model?
+     Routing it through the retry engine meant a bad key set off the whole
+     failover cascade — key rotation, model rotation, a popup for each step —
+     and then reported a success from some other model entirely. This is a
+     single request with no rotation, so the result describes what you typed. */
   const testAI = async () => {
     setTesting(true);
     try {
-      const r = await callAI([{ role:"user", content:"Reply with exactly: Connection successful!" }]);
-      notify(`AI: ${r.slice(0,80)}`);
-    } catch(e) { notify(e.message, "err"); }
+      if (aiProvider !== "groq") {
+        const r = await callOllama(ollamaUrl, ollamaModel, [{ role:"user", content:"Reply with exactly: Connection successful!" }]);
+        notify(`${ollamaModel} replied: ${r.trim().slice(0, 60)}`);
+      } else {
+        const key = (groqKey || "").trim() || aiLoadKeys()[0]?.key || "";
+        if (!key) throw new Error("Add a key above, or in AI keys, before testing");
+        const r = await callGroq(
+          key, groqModel,
+          [{ role:"user", content:"Reply with exactly: Connection successful!" }],
+          { maxTokens: 20, timeoutMs: 20000 }
+        );
+        notify(`${groqModel} replied: ${r.trim().slice(0, 60)}`);
+      }
+    } catch (e) {
+      const status = e._httpStatus;
+      if (status === 401 || status === 403) {
+        notify("That key was rejected. Check you copied all of it from console.groq.com.", "err");
+      } else if (status === 429) {
+        notify(`This key is at its limit on ${groqModel} right now. It still works — generation will wait it out or move to your next key.`, "warn");
+      } else if (status === 404 || status === 400) {
+        notify(`Your key is fine, but ${groqModel} didn't accept the request. Pick a different model above.`, "err");
+      } else {
+        notify(e.message, "err");
+      }
+    }
     setTesting(false);
   };
 
@@ -13213,6 +14838,53 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
           {testing?<><Spin/>Testing...</>:<><Ic n="zap" s={14}/>Test AI Connection</>}
         </button>
       </div>
+
+      {/* Student access — download lock */}
+      <div className="lms-card" style={{ padding:22, marginBottom:16 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
+          <div style={{ width:30, height:30, background:"#fff7ed", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15 }}>
+            {courseSettings.downloadLocked ? "🔒" : "🔓"}
+          </div>
+          <p style={{ fontWeight:700, fontSize:14.5, color:"#0f172a" }}>Student downloads</p>
+        </div>
+        <p style={{ fontSize:12.5, color:"#64748b", lineHeight:1.65, marginBottom:14 }}>
+          Locking keeps every notebook, dataset and resource visible to students — they just can't
+          export or re-download the files. Traffic out of Supabase Storage drops to almost nothing
+          while the course stays fully readable. Your own downloads are unaffected.
+        </p>
+        <div style={{
+          display:"flex", alignItems:"center", gap:14, flexWrap:"wrap",
+          background: courseSettings.downloadLocked ? "#fff7ed" : "#f0fdf4",
+          border:`1.5px solid ${courseSettings.downloadLocked ? "#fed7aa" : "#bbf7d0"}`,
+          borderRadius:12, padding:"13px 16px",
+        }}>
+          <div style={{ flex:1, minWidth:180 }}>
+            <p style={{ fontSize:13.5, fontWeight:700, color: courseSettings.downloadLocked ? "#9a3412" : "#15803d" }}>
+              {courseSettings.downloadLocked ? "Locked" : "Unlocked"}
+              {courseName ? ` · ${courseName}` : ""}
+            </p>
+            <p style={{ fontSize:12, color:"#78716c", marginTop:2 }}>
+              {courseSettings.downloadLocked
+                ? "Students can read everything, download nothing."
+                : "Students can download and export course content."}
+            </p>
+          </div>
+          <button
+            className="lms-btn"
+            onClick={() => saveCourseSettings?.({ downloadLocked: !courseSettings.downloadLocked })}
+            style={{
+              background: courseSettings.downloadLocked ? "linear-gradient(135deg,#22c55e,#16a34a)" : "linear-gradient(135deg,#f97316,#ea580c)",
+              color:"#fff", border:"none",
+            }}>
+            {courseSettings.downloadLocked ? "Unlock downloads" : "Lock downloads"}
+          </button>
+        </div>
+      </div>
+
+      {/* Key pool — unlimited keys, automatic failover */}
+      {aiProvider === "groq" && (
+        <ApiKeysManager notify={notify} legacyKey={groqKey} onAdoptLegacy={() => {}} />
+      )}
 
       {/* Supabase status */}
       <div className="lms-card" style={{ padding:22, marginBottom:16 }}>
@@ -15175,6 +16847,8 @@ export default function LMSApp() {
   const [auth, setAuth]                       = useState(getAuthState());
   const [currentCourseId, setCurrentCourseId] = useState(null);
   const [courseView, setCourseView]           = useState(false);
+  // A pending QR scan, captured at module load so it survives remounts.
+  const [attScan, setAttScan]                 = useState(() => !!readAttParams());
 
   // ── Detect QR attendance URL params once on mount ──────────────
   // ?att=TOKEN&course=COURSE_ID — set by trainer's QR display
@@ -15293,7 +16967,20 @@ export default function LMSApp() {
   // ── Student view ──────────────────────────────────────────────
   if (isStudent) {
     // FIX #10: don't pass currentCourseId — student derives their course from enrollment
-    return <StudentCourseView sb={sb} auth={auth} handleLogout={handleLogout} />;
+    // The scan handler sits above the course view: a QR must work from the
+    // course list, from a different course, from anywhere the student is.
+    return (
+      <>
+        {sb && attScan && (
+          <AttendanceScanHandler
+            sb={sb}
+            auth={auth}
+            onDismiss={() => setAttScan(false)}
+          />
+        )}
+        <StudentCourseView sb={sb} auth={auth} handleLogout={handleLogout} />
+      </>
+    );
   }
 
   return null;
