@@ -12889,7 +12889,7 @@ function CalendarPage({ planDays, dayMap, dayStatus, setDayStatus, trainerDaySta
    auto-fills the sub-topics field. The file is also saved to Supabase
    resources (lms_day_files) so students can access it.
 ═══════════════════════════════════════════════════════════════════ */
-function NotebookSubtopicsPanel({ dayKey, dayData, updateDay, notify, groqKey, groqModel, sb, courseId, trainerId, onFileUpload }) {
+export function NotebookSubtopicsPanel({ dayKey, day, dayData, updateDay, notify, groqKey, groqModel, sb, courseId, trainerId, onFileUpload }) {
   const [extracting, setExtracting] = useState(false);
   const [dragOver,   setDragOver]   = useState(false);
   const [lastFile,   setLastFile]   = useState(null); // { name, size, saved, type } for display
@@ -12931,6 +12931,45 @@ Rules:
 - Output ONLY the comma-separated list — no numbering, no bullet points, no preamble, no explanation
 - Focus on concrete ML / data-science / programming concepts demonstrated, not on generic words like "introduction", "overview", or "summary"
 Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression, cross_validation, GridSearchCV`;
+
+  /* ── Suggest sub-topics from the day's topic alone ──
+     For when the trainer hasn't typed anything or uploaded a file: ask the
+     model what a lesson on this topic should cover, and fill the field. */
+  const [suggesting, setSuggesting] = useState(false);
+  const suggestSubtopicsFromTopic = async () => {
+    const topic = (day?.topic || dayData?.topic || "").trim();
+    if (!topic) { notify("Add a topic for the day first, then I can suggest sub-topics.", "warn"); return; }
+    if (suggesting) return;
+    setSuggesting(true);
+    try {
+      const existing = (dayData?.subTopics || "").trim();
+      const raw = await callGroqForSubtopics([
+        { role: "system", content: SUBTOPIC_SYSTEM },
+        { role: "user", content:
+`Topic for today's lesson: "${topic}".
+
+List the specific sub-topics, techniques or concepts a thorough lesson on "${topic}" should cover.
+Choose the concrete building blocks a teacher would actually work through — the named methods,
+formulas, algorithms or steps — not generic words like "introduction" or "overview".
+${existing ? `The trainer already has these, so suggest DIFFERENT ones that complement them: ${existing}\n` : ""}
+Output ONLY the comma-separated list.` },
+      ]);
+      const suggested = normaliseSubtopics(raw);
+      // Merge with anything already there rather than overwriting the
+      // trainer's own list.
+      const merged = existing
+        ? Array.from(new Set(
+            (existing + ", " + suggested).split(/\s*,\s*/).map(x => x.trim()).filter(Boolean)
+          )).join(", ")
+        : suggested;
+      updateDay(dayKey, { subTopics: merged });
+      notify(existing ? "Added AI sub-topic suggestions" : "Filled sub-topics with AI suggestions", "success");
+    } catch (e) {
+      notify(`Couldn't suggest sub-topics: ${e.message}`, "err");
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   /* ── Extract subtopics from .ipynb JSON via Groq ── */
   const extractSubtopicsFromNotebook = async (notebookJson, filename) => {
@@ -13094,6 +13133,25 @@ Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression
         <span style={{ fontSize:16 }}>📌</span>
         <span style={{ fontSize:11.5, fontWeight:700, color:"#92400e", textTransform:"uppercase", letterSpacing:".07em" }}>Sub-topics / Focus areas</span>
         <span style={{ fontSize:12, fontWeight:500, color:"#b45309", textTransform:"none", letterSpacing:"normal" }}>— applied to every generator for this day</span>
+        <button
+          onClick={suggestSubtopicsFromTopic}
+          disabled={suggesting || extracting}
+          className="ios-press"
+          title="Let AI suggest sub-topics from the day's topic"
+          style={{
+            marginLeft:"auto", display:"inline-flex", alignItems:"center", gap:6,
+            padding:"5px 12px", borderRadius:99, cursor: (suggesting || extracting) ? "default" : "pointer",
+            border:"1px solid #fcd34d",
+            background: suggesting ? "#fde68a" : "linear-gradient(135deg,#f59e0b,#d97706)",
+            color: suggesting ? "#92400e" : "#fff", fontSize:12, fontWeight:700,
+            boxShadow: suggesting ? "none" : "0 3px 10px rgba(217,119,6,.35)",
+            transition:"all .2s var(--ios-ease,ease)",
+          }}
+        >
+          {suggesting
+            ? <><Spin s={12}/> Thinking…</>
+            : <>✨ AI sub-topics</>}
+        </button>
       </div>
 
       {/* Sub-topics text input */}
@@ -13102,7 +13160,7 @@ Example output: MinMaxScaler, StandardScaler, train_test_split, LinearRegression
         className="lms-input"
         value={dayData.subTopics || ""}
         onChange={e => updateDay(dayKey, { subTopics: e.target.value })}
-        placeholder="e.g. list comprehension, lambda functions, map/filter — or upload a file below to auto-fill"
+        placeholder="e.g. list comprehension, lambda functions, map/filter — type your own, tap ✨ AI sub-topics, or upload a file below"
         style={{ fontSize:12.5,  marginBottom:10 }}
       />
 
@@ -15702,6 +15760,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
       {!studentMode && (
         <NotebookSubtopicsPanel
           dayKey={k}
+          day={day}
           dayData={dayData}
           updateDay={updateDay}
           notify={notify}
