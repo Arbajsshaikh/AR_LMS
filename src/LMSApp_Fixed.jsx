@@ -1919,7 +1919,7 @@ Material:
 ${sources}
 
 List the entries that belong in this section — roughly ${section.entryCount}, but follow the material rather than the number.
-
+${/formula|derivation|worked|intuition/i.test(section.kind) ? "This is a mathematical section: list EVERY formula, equation or quantity the topic uses — do not stop at the most famous one or two. If the material names five formulas, list five. Completeness matters more than the suggested count.\n" : ""}
 Return:
 {
   "entries": [
@@ -1928,7 +1928,7 @@ Return:
 }
 
 Every entry must trace to something in the material. Invent nothing. JSON only.` },
-  ], { maxTokens: 1200, temperature: 0.3 });
+  ], { maxTokens: 1600, temperature: 0.3 });
 
   const p = lmJson(out);
   const entries = Array.isArray(p?.entries) ? p.entries.filter(e => e && e.name).slice(0, 20) : [];
@@ -1942,7 +1942,7 @@ async function fsAgentWriter({ topic, section, entries, sheetType, sources, call
   const list = entries.map((e, i) => `${i + 1}. ${e.name}${e.why ? ` — ${e.why}` : ""}`).join("\n");
 
   const kindGuide = {
-    formulas:        "For each formula: the expression in a fenced code block; a symbol table (| Symbol | Meaning | Units / range | Example value |); what the whole expression measures in one plain sentence; when to use it and when not to; and a full worked calculation with real numbers, every intermediate value shown.",
+    formulas:        "Write EVERY formula for the topic in full — do not skip any. For each one, in this exact order: (1) the formula name as a bold sub-heading; (2) the expression itself in a fenced code block, written clearly; (3) a plain-sentence statement of what the whole expression computes; (4) a component table naming every symbol — | Symbol | Meaning | Units / range | Typical value | — with one row per symbol, nothing left unexplained; (5) a fully worked calculation: pick real input numbers, substitute them in, and show EVERY intermediate step of arithmetic down to the final result, each step on its own line in a fenced code block; (6) one line on when to use it and one common mistake. Do not just state a formula and move on — the worked arithmetic is the point.",
     derivation:      "Derive each result from its starting point. One line of algebra per step in a fenced code block, and under every step a sentence saying what was done and WHY it was legal or useful. Never skip a step as 'obvious'. End each derivation with a sanity check: substitute simple numbers and confirm the result behaves as expected.",
     "worked-example": "One continuous example carried end to end with real values. Show every intermediate result, and after each one say in words what that number now represents.",
     "reference-table": "A markdown table. Choose columns that make the rows genuinely comparable.",
@@ -1954,11 +1954,23 @@ async function fsAgentWriter({ topic, section, entries, sheetType, sources, call
     intuition:       "This is the section that makes the mathematics make sense, so write it properly. For EVERY formula or quantity in this lesson, answer all six of these under its own sub-heading: (1) What is this actually measuring? Say it in one sentence with no notation. (2) Why this form and not something simpler — what would break if you just used a count, a sum or an average instead? Show the failure with a small concrete counter-example. (3) What do high and low values mean in the real world? Give the range or units. (4) How does each symbol pull the result up or down — walk one symbol at a time. (5) A numeric feel: two or three contrasting inputs with their outputs in a small table, so the reader sees the behaviour rather than being told it. (6) An everyday analogy that a beginner would recognise. Use ASCII sketches where a picture helps.",
   }[section.kind] || "Clear markdown with tables or code blocks wherever they make the content easier to scan.";
 
-  const out = await callAI([
-    { role: "system", content:
-      "You write reference material in markdown. Precise and complete, but readable by someone new to the " +
+  // Maths-bearing sections get a specialist brief and more room, so the
+  // symbol tables, step-by-step derivations and worked arithmetic have space
+  // to appear in full rather than being cut off.
+  const isMaths = /formula|derivation|worked|intuition/i.test(section.kind);
+  const sysPrompt = isMaths
+    ? "You are a mathematics teacher writing the mathematical core of a reference sheet. Show the real " +
+      "mathematics: every formula written out, every symbol defined, and every worked example computed " +
+      "step by step with actual numbers — never state a result without showing the arithmetic that led " +
+      "to it. Define notation the first time it appears. Put formulas and each line of working in fenced " +
+      "code blocks, and use tables for symbol breakdowns. Output markdown only — no preamble, no JSON, no " +
+      "outer code fence."
+    : "You write reference material in markdown. Precise and complete, but readable by someone new to the " +
       "topic: define notation the first time it appears. Use tables, fenced code blocks and ASCII diagrams " +
-      "where they help. Output markdown only — no preamble, no JSON, no code fence around the whole answer." },
+      "where they help. Output markdown only — no preamble, no JSON, no code fence around the whole answer.";
+
+  const out = await callAI([
+    { role: "system", content: sysPrompt },
     { role: "user", content:
 `Lesson: "${topic}"
 
@@ -1970,13 +1982,13 @@ Cover exactly these entries, in this order:
 ${list}
 
 Style for this section type: ${kindGuide}
-
+${isMaths ? "\nThis section is the mathematics itself. Do not summarise or gesture at the maths — write it out: the formulae, the named components, and worked calculations with real numbers showing every step. If an entry has a formula, it must appear here in full.\n" : ""}
 Material to work from:
 ${sources}
 
 Start with "## ${section.title}" as the heading and write the section body. Do not write any other
 top-level sections. Everything must come from the material above.` },
-  ], { maxTokens: 4000, temperature: 0.3 });
+  ], { maxTokens: isMaths ? 8000 : 4000, temperature: 0.3 });
 
   const md = typeof out === "string" ? out.trim() : "";
   if (!md) return null;
@@ -2032,15 +2044,19 @@ async function runFormulaSheetAgents({ topic, sources, callAI, onProgress = () =
      gap this was meant to close. Anything missing is added here. */
   if (plan.hasQuantitativeContent !== false) {
     const have = new Set(plan.sections.map(s => s.kind));
+    // The full mathematical spine, in reading order: understand it, see the
+    // formulae themselves with every component named, see where they come
+    // from, then follow one all the way through on real numbers.
     const required = [
       { kind: "intuition", title: "Mathematical intuition — what these formulas actually mean", purpose: "Understand every quantity before using it", at: 0 },
+      { kind: "formulas", title: "The formulae — every symbol explained", purpose: "Each formula written out with its components and a worked calculation", at: 1 },
       { kind: "derivation", title: "Where the formulas come from", purpose: "See each result built up step by step", at: 2 },
       { kind: "worked-example", title: "End-to-end worked example", purpose: "Follow the whole calculation on real numbers", at: 3 },
     ];
     required.forEach(r => {
       if (!have.has(r.kind)) {
         plan.sections.splice(Math.min(r.at, plan.sections.length), 0, {
-          title: r.title, kind: r.kind, purpose: r.purpose, entryCount: 4,
+          title: r.title, kind: r.kind, purpose: r.purpose, entryCount: 6,
         });
       }
     });
