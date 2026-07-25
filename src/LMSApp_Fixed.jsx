@@ -1903,10 +1903,55 @@ JSON only.` },
   return plan;
 }
 
+/* Decide, from the material itself, whether a topic carries real
+   mathematics — regardless of how the Surveyor labelled it. Many topics
+   are both "code" and deeply mathematical (decision trees have entropy,
+   Gini and information gain; k-means has distance and centroids; neural
+   nets have gradients). The Surveyor often sees the code and marks these
+   non-quantitative, so the maths never gets written. This catches that. */
+function fsDetectMath(topic, sources) {
+  const hay = `${topic}\n${sources || ""}`.toLowerCase();
+
+  // Named mathematical concepts that always imply formulas + calculation.
+  const CONCEPTS = [
+    "entropy","gini","information gain","impurity","log loss","cross entropy",
+    "gradient","derivative","partial derivative","backpropagation","chain rule",
+    "variance","standard deviation","covariance","correlation","distribution",
+    "probability","bayes","likelihood","posterior","prior","expected value",
+    "euclidean","manhattan","cosine similarity","distance metric","norm",
+    "eigenvalue","eigenvector","matrix","dot product","vector","dimension",
+    "sigmoid","softmax","activation","loss function","cost function","objective",
+    "regression","least squares","gradient descent","learning rate","convergence",
+    "centroid","cluster","k-means","silhouette","tf-idf","idf","cosine",
+    "precision","recall","f1","confusion matrix","roc","auc","accuracy",
+    "sum of squares","mean squared","rmse","mae","r-squared","p-value",
+    "convolution","pooling","weight","bias term","perceptron","threshold",
+    "support vector","kernel","margin","hyperplane","lagrangian","regularization",
+    "logarithm","exponential","summation","factorial","combination","permutation",
+  ];
+  const conceptHits = CONCEPTS.filter(c => hay.includes(c));
+
+  // Structural signs of maths in the source text.
+  const signals = [];
+  if (/\$[^$]+\$|\\frac|\\sum|\\sqrt|\\log|\\sigma|\\theta/.test(sources || "")) signals.push("latex");
+  if (/[=><]\s*[-\d(]/.test(sources || "") && /\b(sum|log|sqrt|mean|prob)\b/i.test(sources || "")) signals.push("equation");
+  if (/\b\d+(\.\d+)?\s*[×x*/÷+\-]\s*\d/.test(sources || "")) signals.push("arithmetic");
+  if (/\bΣ|∑|√|∫|π|θ|σ|μ|λ|≈|≤|≥|∇\b/.test(sources || "")) signals.push("mathsymbols");
+  if (/\blog2?\b|\blogarithm\b|\bexp\b/i.test(hay)) signals.push("log");
+
+  const score = conceptHits.length + signals.length;
+  return {
+    isMath: score >= 2 || conceptHits.length >= 1,
+    concepts: conceptHits.slice(0, 12),
+    signals,
+    score,
+  };
+}
+
 /* ── AGENT 2: PLANNER ──────────────────────────────────────────────
    Names the entries before anything is written, so the writer never has
    to decide scope and prose at the same time. */
-async function fsAgentPlanner({ topic, section, sheetType, sources, callAI }) {
+async function fsAgentPlanner({ topic, section, sheetType, sources, callAI, mathConcepts = [] }) {
   const out = await callAI([
     { role: "system", content:
       "You plan the contents of one section of a reference sheet. Names and types only, no prose. Return ONLY JSON." },
@@ -1919,7 +1964,7 @@ Material:
 ${sources}
 
 List the entries that belong in this section — roughly ${section.entryCount}, but follow the material rather than the number.
-${/formula|derivation|worked|intuition/i.test(section.kind) ? "This is a mathematical section: list EVERY formula, equation or quantity the topic uses — do not stop at the most famous one or two. If the material names five formulas, list five. Completeness matters more than the suggested count.\n" : ""}
+${/formula|derivation|worked|intuition/i.test(section.kind) ? "This is a mathematical section: list EVERY formula, equation or quantity the topic uses — do not stop at the most famous one or two. If the material names five formulas, list five. Completeness matters more than the suggested count.\n" : ""}${(/formula|derivation|worked|intuition/i.test(section.kind) && mathConcepts.length) ? `The material covers these mathematical quantities — make sure each one that fits this section is listed as its own entry: ${mathConcepts.join(", ")}.\n` : ""}
 Return:
 {
   "entries": [
@@ -1938,7 +1983,7 @@ Every entry must trace to something in the material. Invent nothing. JSON only.`
 /* ── AGENT 3: WRITER ───────────────────────────────────────────────
    Writes markdown, because that is what the tab renders, exports and
    searches — the format the rest of the app already speaks. */
-async function fsAgentWriter({ topic, section, entries, sheetType, sources, callAI }) {
+async function fsAgentWriter({ topic, section, entries, sheetType, sources, callAI, mathConcepts = [] }) {
   const list = entries.map((e, i) => `${i + 1}. ${e.name}${e.why ? ` — ${e.why}` : ""}`).join("\n");
 
   const kindGuide = {
@@ -1982,7 +2027,7 @@ Cover exactly these entries, in this order:
 ${list}
 
 Style for this section type: ${kindGuide}
-${isMaths ? "\nThis section is the mathematics itself. Do not summarise or gesture at the maths — write it out: the formulae, the named components, and worked calculations with real numbers showing every step. If an entry has a formula, it must appear here in full.\n" : ""}
+${isMaths ? "\nThis section is the mathematics itself. Do not summarise or gesture at the maths — write it out: the formulae, the named components, and worked calculations with real numbers showing every step. If an entry has a formula, it must appear here in full. Give the actual formula (not a description of it), then plug in real example numbers and show every line of arithmetic to the final result.\n" : ""}${(isMaths && mathConcepts.length) ? `\nThe topic specifically involves: ${mathConcepts.join(", ")}. For each of these that belongs in this section, show its formula and a full worked calculation on real example data — e.g. if entropy appears, take a concrete set of class counts and compute it step by step; if information gain appears, compute the parent entropy, each child's entropy, and the weighted subtraction, all with real numbers.\n` : ""}
 Material to work from:
 ${sources}
 
@@ -2038,6 +2083,23 @@ async function runFormulaSheetAgents({ topic, sources, callAI, onProgress = () =
   }
   if (!plan) throw new Error("The Surveyor couldn't find enough in this day's content to build a sheet from — generate the notebook first.");
 
+  /* Trust the material over the label. The Surveyor frequently marks
+     algorithmic-but-mathematical topics (decision trees, k-means, gradient
+     descent) as non-quantitative because it sees the code, and the maths
+     then never gets written. If the material clearly contains mathematics,
+     force the quantitative path on. */
+  const mathInfo = fsDetectMath(topic, sources);
+  if (mathInfo.isMath && plan.hasQuantitativeContent === false) {
+    plan.hasQuantitativeContent = true;
+    if (plan.sheetType === "code-reference" || plan.sheetType === "procedural" || plan.sheetType === "conceptual") {
+      plan.sheetType = "mixed";
+    }
+    say("surveyor", `Detected mathematics in the material (${mathInfo.concepts.slice(0, 4).join(", ")}${mathInfo.concepts.length > 4 ? "…" : ""}) — adding the full working`);
+  }
+  // Remember the detected concepts so the Planner and Writer can be told to
+  // cover them explicitly (entropy, Gini, information gain, …).
+  plan._mathConcepts = mathInfo.isMath ? mathInfo.concepts : [];
+
   /* Backstop. The Surveyor is told to include the mathematical spine on a
      quantitative topic, but a prompt instruction is a request, not a
      guarantee — and a formula sheet with no intuition section is the exact
@@ -2071,14 +2133,14 @@ async function runFormulaSheetAgents({ topic, sources, callAI, onProgress = () =
     say("planner", `Planning "${s.title}"`, i, plan.sections.length);
     let entries = null;
     try {
-      entries = await fsAgentPlanner({ topic, section: s, sheetType: plan.sheetType, sources, callAI });
+      entries = await fsAgentPlanner({ topic, section: s, sheetType: plan.sheetType, sources, callAI, mathConcepts: plan._mathConcepts });
     } catch (e) { console.warn("Planner failed:", s.title, e.message); }
     if (!entries) entries = [{ name: s.title, why: s.purpose, needsExample: true }];
 
     say("writer", `Writing "${s.title}"`, i, plan.sections.length);
     let md = null;
     try {
-      md = await fsAgentWriter({ topic, section: s, entries, sheetType: plan.sheetType, sources, callAI });
+      md = await fsAgentWriter({ topic, section: s, entries, sheetType: plan.sheetType, sources, callAI, mathConcepts: plan._mathConcepts });
     } catch (e) { console.warn("Writer failed:", s.title, e.message); }
 
     // A section that could not be written is skipped rather than left as
