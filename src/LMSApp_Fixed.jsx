@@ -26,6 +26,15 @@ const GROQ_MODELS = [
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
 ];
+/* ═══════════════════════════════════════════════════════════════════
+   BRAND
+   Change these three lines and the name updates everywhere: sidebar,
+   landing page, exports, page titles. Nothing else hardcodes it.
+═══════════════════════════════════════════════════════════════════ */
+const APP_NAME    = "AR-LMS";
+const APP_FULL    = "AR-LMS";
+const APP_TAGLINE = "Learning, mapped";
+
 const OLLAMA_MODELS = ["llama3","llama3.1","mistral"];
 
 /* Vision-capable Groq models, best first. Groq rotates its multimodal
@@ -1231,6 +1240,7 @@ function dbRowToStudent(row) {
     requestedCourseName: row.requested_course_name,
     requestedAt: row.requested_at,
     createdAt: row.created_at,
+    profile: (typeof row.profile === "string" ? (() => { try { return JSON.parse(row.profile); } catch { return {}; } })() : (row.profile || {})),
   };
 }
 
@@ -1493,6 +1503,11 @@ async function sbLoadStudentDayStatus(sb, studentId, courseId) {
 // in the existing lms_day_content table — no schema migration required.
 const COURSE_SETTINGS_KEY = "__course_settings__";
 
+// Content types stored as JSON rather than markdown/plain text. Anything
+// listed here is parsed back into an object on load; anything not listed
+// comes back as the string it was saved as.
+const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap"]);
+
 async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
   const payload = typeof content === "object" ? JSON.stringify(content) : (content ?? "");
@@ -1540,7 +1555,7 @@ async function sbGetDayContent(sb, courseId, dayKey) {
   const result = {};
   for (const row of (rows || [])) {
     try {
-      result[row.content_type] = (row.content_type === "quiz" || row.content_type === "dataGenerator")
+      result[row.content_type] = JSON_CONTENT_TYPES.has(row.content_type)
         ? JSON.parse(row.content)
         : row.content;
     } catch {
@@ -1561,7 +1576,7 @@ async function sbGetAllDayContent(sb, courseId) {
     if (row.day_key === COURSE_SETTINGS_KEY) continue;
     if (!byDay[row.day_key]) byDay[row.day_key] = {};
     try {
-      byDay[row.day_key][row.content_type] = (row.content_type === "quiz" || row.content_type === "dataGenerator")
+      byDay[row.day_key][row.content_type] = JSON_CONTENT_TYPES.has(row.content_type)
         ? JSON.parse(row.content)
         : row.content;
     } catch {
@@ -1665,6 +1680,64 @@ function recoverPlanFromContent(contentByDay) {
      create index if not exists idx_notif_student
        on lms_notifications(student_id, created_at desc);
 ═══════════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════
+   PROFILES
+   Name, photo, bio, phone and a few preferences for both roles. Stored
+   in a JSON `profile` column on the row the account already has, so no
+   new table — just:
+
+     alter table lms_students add column if not exists profile jsonb;
+     alter table lms_trainers add column if not exists profile jsonb;
+
+   A localStorage mirror paints the profile instantly and covers the
+   case where the column doesn't exist yet.
+═══════════════════════════════════════════════════════════════════ */
+const PROFILE_LS = (role, id) => `lms_profile_${role}_${id}`;
+
+function profileMirrorRead(role, id) {
+  try { return JSON.parse(localStorage.getItem(PROFILE_LS(role, id)) || "null"); }
+  catch { return null; }
+}
+function profileMirrorWrite(role, id, profile) {
+  try { localStorage.setItem(PROFILE_LS(role, id), JSON.stringify(profile || {})); } catch {}
+}
+
+const PROFILE_TABLE = { student: "lms_students", trainer: "lms_trainers" };
+
+async function sbGetProfile(sb, role, id) {
+  const mirror = profileMirrorRead(role, id) || {};
+  if (!sb || !id) return mirror;
+  try {
+    const rows = await sb.select(PROFILE_TABLE[role], `id=eq.${encodeURIComponent(id)}&select=profile&limit=1`);
+    const remote = rows?.[0]?.profile;
+    const parsed = typeof remote === "string" ? JSON.parse(remote) : (remote || null);
+    if (parsed) { profileMirrorWrite(role, id, parsed); return parsed; }
+  } catch (e) {
+    // Column may not exist yet — fall back to the mirror rather than error.
+    console.warn("Profile load fell back to local mirror:", e.message);
+  }
+  return mirror;
+}
+
+async function sbSaveProfile(sb, role, id, profile) {
+  // Mirror first: the edit is already safe locally even if the network is
+  // down, so a durable-write failure must never lose the user's change.
+  profileMirrorWrite(role, id, profile);
+  try {
+    return await sbDurableWrite(sb, {
+      kind: "update",
+      table: PROFILE_TABLE[role],
+      filter: `id=eq.${encodeURIComponent(id)}`,
+      row: { profile },
+      dedupeKey: `profile:${role}:${id}`,
+    });
+  } catch (e) {
+    // Queue it and report "queued", not "failed" — the mirror already holds it.
+    try { sbQueuePush({ kind: "update", table: PROFILE_TABLE[role], filter: `id=eq.${encodeURIComponent(id)}`, row: { profile } }); } catch {}
+    return { ok: false, queued: true, error: e };
+  }
+}
+
 async function sbCreateNotification(sb, { studentId, courseId = null, type = "info", title, body = "" }) {
   if (!sb || !studentId || !title) return { ok: false };
   const row = {
@@ -1680,6 +1753,45 @@ async function sbCreateNotification(sb, { studentId, courseId = null, type = "in
   // Durable: a missed notification should not be lost because the network
   // blinked while the trainer was clicking Approve.
   return sbDurableWrite(sb, { kind: "upsert", table: "lms_notifications", row });
+}
+
+/* Broadcast a trainer announcement to every enrolled student as a
+   notification. Reuses lms_notifications, so students receive it exactly
+   like an approval — on whatever device they next open. */
+async function sbBroadcastAnnouncement(sb, { courseId, courseName, title, body }) {
+  if (!sb || !courseId || !title) return { sent: 0 };
+  // Everyone whose enrolment includes this course.
+  let students = [];
+  try {
+    const rows = await sb.select("lms_students", `select=id,enrolled_course_ids,requested_course_id,approved`);
+    students = (rows || []).map(dbRowToStudent).filter(Boolean).filter(s => {
+      const enrolled = getStudentEnrolledCourses(s).some(e => e.courseId === courseId);
+      const legacy = s.approved && s.requestedCourseId === courseId;
+      return enrolled || legacy;
+    });
+  } catch (e) {
+    throw new Error(`Couldn't load the class list: ${e.message}`);
+  }
+  if (!students.length) return { sent: 0 };
+
+  const rows = students.map(s => ({
+    id: "ntf_" + generateId(),
+    student_id: s.id,
+    course_id: courseId,
+    type: "announcement",
+    title: courseName ? `${courseName}: ${title}` : title,
+    body: body || "",
+    read: false,
+    created_at: new Date().toISOString(),
+  }));
+
+  // One bulk insert; fall back to the durable queue if it fails.
+  try {
+    await sb.upsertMany("lms_notifications", rows);
+  } catch (e) {
+    rows.forEach(r => sbQueuePush({ kind: "upsert", table: "lms_notifications", row: r }));
+  }
+  return { sent: rows.length };
 }
 
 async function sbGetNotifications(sb, studentId, limit = 30) {
@@ -1701,6 +1813,882 @@ async function sbMarkNotificationsRead(sb, ids) {
   if (!sb || !ids?.length) return;
   const filter = `id=in.(${ids.map(i => `"${i}"`).join(",")})`;
   await sbDurableWrite(sb, { kind: "update", table: "lms_notifications", filter, row: { read: true } });
+}
+
+/* Models wrap JSON in fences, add a preamble, or trail a stray comma.
+   This pulls out the object and repairs the usual damage rather than
+   throwing the whole generation away. */
+/* ═══════════════════════════════════════════════════════════════════
+   FORMULA SHEET — AGENT PIPELINE
+   The old sheet was one prompt with ten numbered sections baked into it,
+   so a Git lesson and a regression lesson both came back with
+   "Mathematical Intuition Builder" whether or not there was any
+   mathematics to build intuition about. Sections are now chosen for the
+   topic, and each one is planned before it is written.
+
+     1. SURVEYOR  reads the material and decides which sections this
+                  particular sheet should have, and in what order.
+     2. PLANNER   runs per section, listing the entries that belong in
+                  it — formulas, signatures, rules, whatever fits.
+     3. WRITER    runs per section, writing it out in full from the plan.
+     4. AUDITOR   reads the whole sheet: removes duplication, fixes the
+                  order, and writes the "how to use this" opener.
+     5. BINDER    local, no model call: table of contents, assembly.
+═══════════════════════════════════════════════════════════════════ */
+
+const FS_AGENTS = [
+  { id: "surveyor", name: "Surveyor", icon: "🧭", role: "Deciding which sections this topic needs" },
+  { id: "planner",  name: "Planner",  icon: "📋", role: "Listing what goes in each section" },
+  { id: "writer",   name: "Writer",   icon: "✍️", role: "Writing each section out in full" },
+  { id: "auditor",  name: "Auditor",  icon: "🔍", role: "Removing duplication and fixing the order" },
+  { id: "binder",   name: "Binder",   icon: "📕", role: "Assembling the finished sheet" },
+];
+
+/* ── AGENT 1: SURVEYOR ─────────────────────────────────────────────
+   The only stage that decides what sections exist. */
+async function fsAgentSurveyor({ topic, sources, callAI }) {
+  const out = await callAI([
+    { role: "system", content:
+      "You design reference sheets. You read teaching material and decide what sections that specific " +
+      "sheet needs — never a preset list. A statistics lesson needs distributions and assumptions; a " +
+      "command-line lesson needs flags and worked invocations; a design lesson may need no formulas at " +
+      "all. Choose sections that fit this material. Return ONLY JSON." },
+    { role: "user", content:
+`Lesson topic: "${topic}"
+
+Material:
+${sources}
+
+Decide what this reference sheet should contain.
+
+Return:
+{
+  "sheetType": "mathematical" | "statistical" | "algorithmic" | "code-reference" | "procedural" | "conceptual" | "mixed",
+  "hasQuantitativeContent": true or false,
+  "audience": "one line on who is reading this and what they know",
+  "reasoning": "one line on why these sections and not others",
+  "sections": [
+    {
+      "title": "section heading, under 50 characters",
+      "kind": "formulas" | "derivation" | "worked-example" | "reference-table" | "syntax" | "decision-guide" | "pitfalls" | "glossary" | "cheatsheet" | "intuition",
+      "purpose": "what a reader gets from this section",
+      "entryCount": roughly how many entries belong in it
+    }
+  ]
+}
+
+Rules:
+- Choose only sections this material actually supports. Three good sections beat ten padded ones
+- If the topic has no mathematics, do not invent formula sections — use syntax, reference tables or decision guides instead
+- If hasQuantitativeContent is true, the sheet MUST include all four of: an "intuition" section, a
+  "derivation" section, a "formulas" section and a "worked-example" section. A reference sheet that
+  states formulas without explaining what they mean is not usable for teaching
+- Order sections the way a reader would use them: intuition before formulas, derivation before use,
+  worked example after, quick lookup last
+- Always end with a scannable cheatsheet section if there is anything worth condensing
+JSON only.` },
+  ], { maxTokens: 1800, temperature: 0.25 });
+
+  const plan = lmJson(out);
+  if (!plan || !Array.isArray(plan.sections) || !plan.sections.length) return null;
+  plan.sections = plan.sections
+    .filter(s => s && s.title)
+    .map(s => ({
+      title: String(s.title).slice(0, 90),
+      kind: String(s.kind || "reference-table"),
+      purpose: String(s.purpose || ""),
+      entryCount: Math.max(1, Math.min(20, Number(s.entryCount) || 4)),
+    }))
+    .slice(0, 12);
+  return plan;
+}
+
+/* ── AGENT 2: PLANNER ──────────────────────────────────────────────
+   Names the entries before anything is written, so the writer never has
+   to decide scope and prose at the same time. */
+async function fsAgentPlanner({ topic, section, sheetType, sources, callAI }) {
+  const out = await callAI([
+    { role: "system", content:
+      "You plan the contents of one section of a reference sheet. Names and types only, no prose. Return ONLY JSON." },
+    { role: "user", content:
+`Lesson: "${topic}" (${sheetType})
+Section: "${section.title}" — ${section.purpose}
+Type: ${section.kind}
+
+Material:
+${sources}
+
+List the entries that belong in this section — roughly ${section.entryCount}, but follow the material rather than the number.
+
+Return:
+{
+  "entries": [
+    { "name": "what this entry is called", "why": "why it belongs here", "needsExample": true or false }
+  ]
+}
+
+Every entry must trace to something in the material. Invent nothing. JSON only.` },
+  ], { maxTokens: 1200, temperature: 0.3 });
+
+  const p = lmJson(out);
+  const entries = Array.isArray(p?.entries) ? p.entries.filter(e => e && e.name).slice(0, 20) : [];
+  return entries.length ? entries : null;
+}
+
+/* ── AGENT 3: WRITER ───────────────────────────────────────────────
+   Writes markdown, because that is what the tab renders, exports and
+   searches — the format the rest of the app already speaks. */
+async function fsAgentWriter({ topic, section, entries, sheetType, sources, callAI }) {
+  const list = entries.map((e, i) => `${i + 1}. ${e.name}${e.why ? ` — ${e.why}` : ""}`).join("\n");
+
+  const kindGuide = {
+    formulas:        "For each formula: the expression in a fenced code block; a symbol table (| Symbol | Meaning | Units / range | Example value |); what the whole expression measures in one plain sentence; when to use it and when not to; and a full worked calculation with real numbers, every intermediate value shown.",
+    derivation:      "Derive each result from its starting point. One line of algebra per step in a fenced code block, and under every step a sentence saying what was done and WHY it was legal or useful. Never skip a step as 'obvious'. End each derivation with a sanity check: substitute simple numbers and confirm the result behaves as expected.",
+    "worked-example": "One continuous example carried end to end with real values. Show every intermediate result, and after each one say in words what that number now represents.",
+    "reference-table": "A markdown table. Choose columns that make the rows genuinely comparable.",
+    syntax:          "For each: a fenced code block with the exact syntax, its arguments in a table, and a runnable example with its output.",
+    "decision-guide": "A decision table or flow: given a situation, which option to reach for and why.",
+    pitfalls:        "For each: the mistake, why it is tempting, what goes wrong, and the correction.",
+    glossary:        "A two-column table: term, and a one-sentence plain definition.",
+    cheatsheet:      "Tight and scannable. One block per item: the essential line, input to output, and one gotcha.",
+    intuition:       "This is the section that makes the mathematics make sense, so write it properly. For EVERY formula or quantity in this lesson, answer all six of these under its own sub-heading: (1) What is this actually measuring? Say it in one sentence with no notation. (2) Why this form and not something simpler — what would break if you just used a count, a sum or an average instead? Show the failure with a small concrete counter-example. (3) What do high and low values mean in the real world? Give the range or units. (4) How does each symbol pull the result up or down — walk one symbol at a time. (5) A numeric feel: two or three contrasting inputs with their outputs in a small table, so the reader sees the behaviour rather than being told it. (6) An everyday analogy that a beginner would recognise. Use ASCII sketches where a picture helps.",
+  }[section.kind] || "Clear markdown with tables or code blocks wherever they make the content easier to scan.";
+
+  const out = await callAI([
+    { role: "system", content:
+      "You write reference material in markdown. Precise and complete, but readable by someone new to the " +
+      "topic: define notation the first time it appears. Use tables, fenced code blocks and ASCII diagrams " +
+      "where they help. Output markdown only — no preamble, no JSON, no code fence around the whole answer." },
+    { role: "user", content:
+`Lesson: "${topic}"
+
+Write this one section of the reference sheet.
+
+## ${section.title}
+
+Cover exactly these entries, in this order:
+${list}
+
+Style for this section type: ${kindGuide}
+
+Material to work from:
+${sources}
+
+Start with "## ${section.title}" as the heading and write the section body. Do not write any other
+top-level sections. Everything must come from the material above.` },
+  ], { maxTokens: 4000, temperature: 0.3 });
+
+  const md = typeof out === "string" ? out.trim() : "";
+  if (!md) return null;
+  // Strip a fence wrapping the whole answer, if the model added one.
+  return md.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```$/, "").trim();
+}
+
+/* ── AGENT 4: AUDITOR ──────────────────────────────────────────────
+   Only sees problems that exist across sections: repetition, bad order,
+   a missing orientation paragraph. */
+async function fsAgentAuditor({ topic, sections, callAI }) {
+  const outline = sections.map((s, i) => `${i}. ${s.title} (${s.kind}) — ${(s.markdown || "").length} chars`).join("\n");
+  const out = await callAI([
+    { role: "system", content: "You review reference sheets for order and redundancy. Return ONLY JSON." },
+    { role: "user", content:
+`Lesson: "${topic}"
+
+Sections as written:
+${outline}
+
+Return:
+{
+  "order": [section numbers above, in the order a reader should meet them],
+  "intro": "2-3 sentences: what this sheet covers and how to use it during and after the lesson",
+  "drop": [numbers of any section that is genuinely redundant, usually empty],
+  "verdict": "one line"
+}
+JSON only.` },
+  ], { maxTokens: 800, temperature: 0.2 });
+  return lmJson(out);
+}
+
+/* ── ORCHESTRATOR ────────────────────────────────────────────────── */
+async function runFormulaSheetAgents({ topic, sources, callAI, onProgress = () => {} }) {
+  const say = (agentId, detail, done, total) => {
+    const a = FS_AGENTS.find(x => x.id === agentId);
+    onProgress({ agent: a, detail, done, total });
+  };
+
+  // ── 1. Surveyor
+  say("surveyor", "Reading the material…");
+  let plan;
+  try {
+    plan = await fsAgentSurveyor({ topic, sources, callAI });
+  } catch (e) {
+    throw new Error(`The Surveyor couldn't reach the model (${e.message}). Nothing was generated — try again in a moment.`);
+  }
+  if (!plan) throw new Error("The Surveyor couldn't find enough in this day's content to build a sheet from — generate the notebook first.");
+
+  /* Backstop. The Surveyor is told to include the mathematical spine on a
+     quantitative topic, but a prompt instruction is a request, not a
+     guarantee — and a formula sheet with no intuition section is the exact
+     gap this was meant to close. Anything missing is added here. */
+  if (plan.hasQuantitativeContent !== false) {
+    const have = new Set(plan.sections.map(s => s.kind));
+    const required = [
+      { kind: "intuition", title: "Mathematical intuition — what these formulas actually mean", purpose: "Understand every quantity before using it", at: 0 },
+      { kind: "derivation", title: "Where the formulas come from", purpose: "See each result built up step by step", at: 2 },
+      { kind: "worked-example", title: "End-to-end worked example", purpose: "Follow the whole calculation on real numbers", at: 3 },
+    ];
+    required.forEach(r => {
+      if (!have.has(r.kind)) {
+        plan.sections.splice(Math.min(r.at, plan.sections.length), 0, {
+          title: r.title, kind: r.kind, purpose: r.purpose, entryCount: 4,
+        });
+      }
+    });
+  }
+  say("surveyor", `${plan.sections.length} sections chosen · ${plan.sheetType}${plan.reasoning ? ` · ${plan.reasoning}` : ""}`);
+
+  // ── 2 & 3. Planner then Writer, section by section
+  const written = [];
+  for (let i = 0; i < plan.sections.length; i++) {
+    const s = plan.sections[i];
+
+    say("planner", `Planning "${s.title}"`, i, plan.sections.length);
+    let entries = null;
+    try {
+      entries = await fsAgentPlanner({ topic, section: s, sheetType: plan.sheetType, sources, callAI });
+    } catch (e) { console.warn("Planner failed:", s.title, e.message); }
+    if (!entries) entries = [{ name: s.title, why: s.purpose, needsExample: true }];
+
+    say("writer", `Writing "${s.title}"`, i, plan.sections.length);
+    let md = null;
+    try {
+      md = await fsAgentWriter({ topic, section: s, entries, sheetType: plan.sheetType, sources, callAI });
+    } catch (e) { console.warn("Writer failed:", s.title, e.message); }
+
+    // A section that could not be written is skipped rather than left as
+    // an empty heading the reader has to scroll past.
+    if (md) written.push({ ...s, markdown: md, entryNames: entries.map(e => e.name) });
+  }
+
+  if (!written.length) throw new Error("No sections could be written — try again.");
+
+  // ── 4. Auditor
+  say("auditor", "Checking order and removing duplication…");
+  let ordered = written;
+  let intro = "";
+  try {
+    const review = await fsAgentAuditor({ topic, sections: written, callAI });
+    if (review) {
+      const drop = new Set((Array.isArray(review.drop) ? review.drop : []).map(Number));
+      if (Array.isArray(review.order) && review.order.length) {
+        const seen = new Set();
+        const next = [];
+        review.order.forEach(idx => {
+          const n = Number(idx);
+          if (drop.has(n)) return;
+          const sec = written[n];
+          if (sec && !seen.has(sec.title)) { next.push(sec); seen.add(sec.title); }
+        });
+        written.forEach(sec => { if (!seen.has(sec.title) && !drop.has(written.indexOf(sec))) next.push(sec); });
+        if (next.length) ordered = next;
+      }
+      if (review.intro) intro = String(review.intro);
+      say("auditor", review.verdict || `${ordered.length} sections kept`);
+    }
+  } catch {
+    say("auditor", "Review skipped — keeping the planned order");
+  }
+
+  // ── 5. Binder (local)
+  say("binder", "Assembling…");
+  const toc = ordered.map((s, i) => `${i + 1}. [${s.title}](#${String(s.title).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")})`).join("\n");
+  const md = [
+    `# ${topic} — Reference Sheet`,
+    intro || plan.audience || "",
+    "",
+    "**Contents**",
+    toc,
+    "",
+    "---",
+    "",
+    ordered.map(s => s.markdown).join("\n\n---\n\n"),
+    "",
+    "---",
+    `<sub>Built by ${FS_AGENTS.length} agents from this day's material · ${ordered.length} sections · ${new Date().toLocaleDateString("en-IN")}</sub>`,
+  ].filter(l => l !== null && l !== undefined).join("\n");
+
+  say("binder", `${ordered.length} sections ✓`);
+  return { markdown: md, sections: ordered.map(s => ({ title: s.title, kind: s.kind })), sheetType: plan.sheetType };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LEARNING MAP — AGENT PIPELINE
+   One prompt asking for "5 to 7 branches" forces every subject into the
+   same shape. A three-hour statistics lesson and a twenty-minute git
+   walkthrough are not the same tree. So the structure is decided by the
+   material instead: a scoping agent reads the day's content and designs
+   the blueprint — how many branches, how deep each one goes, what each
+   needs to emphasise — and the later agents build to that blueprint.
+
+     1. SCOUT      reads the material, classifies the topic, designs
+                   the blueprint. Decides the counts.
+     2. ARCHITECT  runs once per branch, expanding it to the depth the
+                   blueprint asked for. Titles and node kinds only.
+     3. TEACHER    runs once per branch, writing the teaching content
+                   for every node in it.
+     4. EXAMINER   reads the finished branch titles, fixes the teaching
+                   order and names prerequisites that were missed.
+     5. ASSEMBLER  local, no model call: normalises, dedupes, validates.
+
+   Each stage degrades rather than fails: a branch that cannot be
+   outlined is written straight from its blueprint entry, a branch that
+   cannot be written keeps its titles, and a failed review leaves the
+   order as the scout planned it.
+═══════════════════════════════════════════════════════════════════ */
+
+const LM_AGENTS = [
+  { id: "scout",     name: "Scout",     icon: "🔍", role: "Reading the material and designing the structure" },
+  { id: "architect", name: "Architect", icon: "🧱", role: "Expanding each branch to the depth it needs" },
+  { id: "teacher",   name: "Teacher",   icon: "🧑‍🏫", role: "Writing the explanations, examples and board work" },
+  { id: "examiner",  name: "Examiner",  icon: "🔬", role: "Checking the teaching order and filling gaps" },
+  { id: "assembler", name: "Assembler", icon: "🧩", role: "Validating and assembling the finished map" },
+];
+
+function lmJson(text, fallback = null) {
+  if (typeof text !== "string") return fallback;
+  let s = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const objStart = s.indexOf("{"), arrStart = s.indexOf("[");
+  const useArr = arrStart !== -1 && (objStart === -1 || arrStart < objStart);
+  const start = useArr ? arrStart : objStart;
+  const end = useArr ? s.lastIndexOf("]") : s.lastIndexOf("}");
+  if (start === -1 || end <= start) return fallback;
+  s = s.slice(start, end + 1);
+  try { return JSON.parse(s); }
+  catch {
+    try { return JSON.parse(s.replace(/,\s*([}\]])/g, "$1")); }
+    catch { return fallback; }
+  }
+}
+
+/* ── AGENT 1: SCOUT ────────────────────────────────────────────────
+   The only stage that decides size. Everything downstream builds to
+   what it returns, so a dense topic gets a wide deep tree and a small
+   one gets a small tree. */
+async function lmAgentScout({ topic, sources, callAI }) {
+  const out = await callAI([
+    { role: "system", content:
+      "You are a curriculum scout. You read teaching material and design the shape of a lesson map. " +
+      "You decide how many branches and how deep each goes, based only on how much the material actually " +
+      "contains — never a preset number. A thin topic gets a small map; a dense one gets a large map. " +
+      "Return ONLY JSON." },
+    { role: "user", content:
+`Lesson topic: "${topic}"
+
+Material to work from:
+${sources}
+
+Study how much distinct teachable content is really here, then design the map.
+
+Return:
+{
+  "topicType": "conceptual" | "procedural" | "mathematical" | "tool" | "analytical" | "mixed",
+  "audience": "one line on who is being taught and what they already know",
+  "overview": "2 sentences on what this lesson covers and why it matters",
+  "estimatedMinutes": total teaching minutes for the whole lesson,
+  "reasoning": "one line on why you chose this many branches and these depths",
+  "branches": [
+    {
+      "title": "branch name, under 40 characters",
+      "purpose": "what a learner can do after this branch",
+      "depth": how many levels BELOW this branch are needed (1, 2, 3 or 4),
+      "breadth": how many direct children this branch should have,
+      "emphasis": "concept" | "steps" | "formula" | "practice" | "pitfall",
+      "prereq": "the title of the branch that must come first, or empty string"
+    }
+  ]
+}
+
+Rules on sizing — follow the material, not a template:
+- Use as many branches as the material genuinely supports. Two is fine. Twelve is fine.
+- Give depth 3 or 4 to branches with real internal structure; depth 1 to simple ones
+- breadth should reflect how many distinct sub-ideas that branch really has
+- Order branches so nothing depends on something later
+- Every branch must trace to something in the material. Invent nothing
+JSON only.` },
+  ], { maxTokens: 2600, temperature: 0.25 });
+
+  const bp = lmJson(out);
+  if (!bp || !Array.isArray(bp.branches) || !bp.branches.length) return null;
+  bp.branches = bp.branches
+    .filter(b => b && b.title)
+    .map(b => ({
+      title: String(b.title).slice(0, 90),
+      purpose: String(b.purpose || ""),
+      depth: Math.max(1, Math.min(4, Number(b.depth) || 2)),
+      breadth: Math.max(1, Math.min(9, Number(b.breadth) || 3)),
+      emphasis: ["concept","steps","formula","practice","pitfall"].includes(b.emphasis) ? b.emphasis : "concept",
+      prereq: String(b.prereq || ""),
+    }))
+    .slice(0, 14);
+  return bp;
+}
+
+/* ── AGENT 2: ARCHITECT ────────────────────────────────────────────
+   Structure only. Keeping titles separate from content stops the model
+   spending its budget writing prose before it has decided the shape. */
+async function lmAgentArchitect({ topic, branch, topicType, sources, callAI }) {
+  const out = await callAI([
+    { role: "system", content:
+      "You design the skeleton of one branch of a lesson map: titles and node types only, no explanations. " +
+      "Return ONLY JSON." },
+    { role: "user", content:
+`Lesson: "${topic}" (${topicType})
+Branch: "${branch.title}" — ${branch.purpose}
+Emphasis: ${branch.emphasis}
+
+Material:
+${sources}
+
+Break this branch into a tree ${branch.depth} level(s) deep, with about ${branch.breadth} direct children.
+Go deeper where a sub-idea genuinely splits further; stop where it does not. Leaf nodes must be the
+smallest thing that can be taught in one go.
+
+Return:
+{
+  "title": "${branch.title}",
+  "kind": "concept" | "step" | "formula" | "example" | "pitfall" | "practice",
+  "children": [ { "title": "...", "kind": "...", "children": [ ... ] } ]
+}
+
+Only include sub-topics the material supports. Titles under 45 characters. JSON only.` },
+  ], { maxTokens: 1800, temperature: 0.3 });
+
+  const sk = lmJson(out);
+  if (!sk || !sk.title) return null;
+  return sk;
+}
+
+/* ── AGENT 3: TEACHER ──────────────────────────────────────────────
+   Writes for the person who has to stand up and deliver it. */
+async function lmAgentTeacher({ topic, skeleton, emphasis, topicType, sources, callAI }) {
+  const titles = [];
+  (function walk(n, d) { titles.push(`${"  ".repeat(d)}- ${n.title}`); (n.children || []).forEach(c => walk(c, d + 1)); })(skeleton, 0);
+
+  const out = await callAI([
+    { role: "system", content:
+      "You write teaching content. Your reader has never taught this topic and your student has never met it. " +
+      "Plain language, short sentences, every technical term defined the moment it appears. " +
+      "Everything must come from the supplied material. Return ONLY JSON." },
+    { role: "user", content:
+`Lesson: "${topic}" (${topicType}). This branch emphasises ${emphasis}.
+
+Fill in every node of this skeleton, keeping the exact same titles and nesting:
+${titles.join("\n")}
+
+Material:
+${sources}
+
+Return the same tree with each node as:
+{
+  "title": "unchanged from the skeleton",
+  "kind": "concept" | "step" | "formula" | "example" | "pitfall" | "practice",
+  "summary": "one line under 90 characters",
+  "whyItMatters": "1-2 sentences: what stays impossible without this",
+  "explain": "4-6 short sentences. Assume no prior knowledge. Define every term as you use it",
+  "keyTerms": [{"term":"word","definition":"one plain sentence"}],
+  "board": "what to draw or write on the whiteboard: plain text, arrows as ->, under 12 lines, under 60 characters wide",
+  "steps": ["3-6 complete instructions"],
+  "example": "a fully worked example: real input values, the working, the result",
+  "formula": "the formula, then each symbol named on its own line, or empty string",
+  "analogy": "an everyday comparison, or empty string",
+  "teachTip": "a short script: what to say first, what to show, what to write",
+  "askClass": "a question to put to the room, and the answer you are listening for",
+  "misconception": "the mistake beginners make here, and the correction",
+  "timeMin": realistic minutes to teach this node,
+  "children": [ ... same shape ... ]
+}
+
+${emphasis === "formula" ? "Every node that involves a calculation must have formula and board filled in.\n" : ""}${emphasis === "steps" ? "Every node must have concrete, followable steps.\n" : ""}${emphasis === "practice" ? "Examples must be exercises the learner can attempt themselves.\n" : ""}Escape newlines inside strings as \\n. JSON only.` },
+  ], { maxTokens: 8000, temperature: 0.3 });
+
+  return lmJson(out);
+}
+
+/* ── AGENT 3b: FINISHER ────────────────────────────────────────────
+   The Teacher writes a whole branch in one pass, and on a deep tree the
+   nested leaves sometimes come back with only a title. Rather than let
+   those show as blanks (or fall through to generic scaffolding), the
+   Finisher takes just the thin nodes and writes real content for them,
+   in context, from the same material. It works in small batches so one
+   big prompt never has to carry too much. */
+function lmNodeIsThin(n) {
+  return !n || !n.explain || n.explain.trim().length < 25
+    || !n.example || n.example.trim().length < 15;
+}
+
+async function lmAgentFinisher({ topic, thinNodes, sources, callAI }) {
+  // thinNodes: [{ id, title, kind, path }]
+  const list = thinNodes.map((t, i) =>
+    `${i + 1}. "${t.title}" (${t.kind})${t.path ? ` — under ${t.path}` : ""}`).join("\n");
+
+  const out = await callAI([
+    { role: "system", content:
+      "You write teaching content for specific lesson points. Your reader has never taught this and " +
+      "your student has never met it. Plain language, define every term as it appears, and use ONLY the " +
+      "supplied material — real facts, real examples, never a placeholder or an instruction to write one. " +
+      "Return ONLY a JSON array." },
+    { role: "user", content:
+`Lesson: "${topic}"
+
+Write full teaching content for each of these points, using the material below. Give real, specific
+content — actual explanations and actual worked examples with real values — not descriptions of what
+should go there.
+
+Points:
+${list}
+
+Material:
+${sources}
+
+Return a JSON array, one object per point IN THE SAME ORDER:
+[
+  {
+    "explain": "4-6 short sentences. No prior knowledge assumed. Define every term as you use it",
+    "whyItMatters": "1-2 sentences on what this unlocks",
+    "keyTerms": [{"term":"word","definition":"one plain sentence"}],
+    "board": "what to draw/write on the board: plain text, arrows as ->, or empty string",
+    "steps": ["concrete instructions, or an empty array if not a procedure"],
+    "example": "a real worked example with actual values and the result",
+    "formula": "the formula with symbols named, or empty string",
+    "analogy": "an everyday comparison, or empty string",
+    "teachTip": "a short script: what to say and show, in order",
+    "askClass": "a real question to put to the room, with the answer to listen for",
+    "misconception": "a real mistake beginners make here and its correction, or empty string"
+  }
+]
+Return exactly ${thinNodes.length} objects, in order. JSON array only.` },
+  ], { maxTokens: 6000, temperature: 0.3 });
+
+  const arr = lmJson(out);
+  return Array.isArray(arr) ? arr : null;
+}
+
+/* ── AGENT 4: EXAMINER ─────────────────────────────────────────────
+   Reads the finished structure and fixes what only becomes visible
+   once the whole thing exists: order, and missing prerequisites. */
+async function lmAgentExaminer({ topic, branches, callAI }) {
+  const outline = branches
+    .map((b, i) => `${i}. ${b.title}${(b.children || []).length ? ` (covers: ${b.children.map(c => c.title).join(", ")})` : ""}`)
+    .join("\n");
+
+  const out = await callAI([
+    { role: "system", content:
+      "You review lesson structure for teaching order and gaps. Return ONLY JSON." },
+    { role: "user", content:
+`Lesson: "${topic}"
+
+Branches as currently built:
+${outline}
+
+Check two things:
+1. Order — can each branch be taught using only what came before it?
+2. Gaps — is anything referenced that is never introduced?
+
+Return:
+{
+  "order": [the branch numbers above, in the order they should be taught],
+  "overview": "2 sentences describing the finished lesson",
+  "gaps": ["title of a missing prerequisite topic", ...],
+  "verdict": "one line on the state of the sequence"
+}
+
+Only list a gap if a learner would genuinely be stuck without it. An empty list is a fine answer. JSON only.` },
+  ], { maxTokens: 900, temperature: 0.2 });
+
+  return lmJson(out);
+}
+
+/* ── ORCHESTRATOR ─────────────────────────────────────────────────
+   Sequential by design: each agent needs the previous one's output.
+   Every stage is wrapped so a failure degrades the map instead of
+   losing it. */
+async function runLearningMapAgents({ topic, sources, callAI, onProgress = () => {} }) {
+  const log = [];
+  const say = (agentId, detail, done, total) => {
+    const a = LM_AGENTS.find(x => x.id === agentId);
+    log.push({ agent: agentId, detail, at: Date.now() });
+    onProgress({ agent: a, detail, done, total, log: [...log] });
+  };
+
+  // ── 1. Scout
+  say("scout", "Reading the day's material…");
+  let bp;
+  try {
+    bp = await lmAgentScout({ topic, sources, callAI });
+  } catch (e) {
+    // Name the stage. In a five-stage pipeline a bare "rate limit" leaves
+    // the trainer with no idea what actually broke.
+    throw new Error(`The Scout couldn't reach the model (${e.message}). Nothing was generated — try again in a moment.`);
+  }
+  if (!bp) throw new Error("The Scout couldn't find enough structure in this day's content — generate the notebook first, then rebuild.");
+  say("scout", `${bp.branches.length} branches planned · ${bp.topicType} topic${bp.reasoning ? ` · ${bp.reasoning}` : ""}`);
+
+  // ── 2 & 3. Architect then Teacher, branch by branch
+  const built = [];
+  for (let i = 0; i < bp.branches.length; i++) {
+    const b = bp.branches[i];
+
+    say("architect", `Structuring "${b.title}"`, i, bp.branches.length);
+    let skeleton = null;
+    try {
+      skeleton = await lmAgentArchitect({ topic, branch: b, topicType: bp.topicType, sources, callAI });
+    } catch (e) { console.warn("Architect failed:", b.title, e.message); }
+    if (!skeleton) skeleton = { title: b.title, kind: b.emphasis === "formula" ? "formula" : "concept", children: [] };
+
+    say("teacher", `Writing "${b.title}"`, i, bp.branches.length);
+    let filled = null;
+    try {
+      filled = await lmAgentTeacher({ topic, skeleton, emphasis: b.emphasis, topicType: bp.topicType, sources, callAI });
+    } catch (e) { console.warn("Teacher failed:", b.title, e.message); }
+
+    // Keep the skeleton rather than dropping the branch entirely.
+    const node = filled && filled.title ? filled : { ...skeleton, summary: b.purpose };
+    if (!node.summary) node.summary = b.purpose;
+    built.push(node);
+  }
+
+  if (!built.length) throw new Error("No branches could be built — try again.");
+
+  // ── 3b. Finisher: fill any node the Teacher left thin, with real content.
+  const thin = [];
+  const collectThin = (nodes, path) => {
+    for (const n of nodes) {
+      if (lmNodeIsThin(n)) thin.push({ node: n, title: n.title, kind: n.kind || "concept", path });
+      if (Array.isArray(n.children) && n.children.length) {
+        collectThin(n.children, path ? `${path} › ${n.title}` : n.title);
+      }
+    }
+  };
+  collectThin(built, "");
+
+  if (thin.length) {
+    say("teacher", `Completing ${thin.length} node${thin.length > 1 ? "s" : ""} in detail…`);
+    // Batches of 6 keep each prompt focused and within budget.
+    for (let start = 0; start < thin.length; start += 6) {
+      const batch = thin.slice(start, start + 6);
+      try {
+        const filled = await lmAgentFinisher({
+          topic,
+          thinNodes: batch.map(b => ({ title: b.title, kind: b.kind, path: b.path })),
+          sources, callAI,
+        });
+        if (Array.isArray(filled)) {
+          batch.forEach((b, i) => {
+            const f = filled[i];
+            if (!f || typeof f !== "object") return;
+            // Only write fields the node is actually missing; never clobber
+            // real content the Teacher already produced.
+            const fields = ["explain","whyItMatters","board","example","formula","analogy","teachTip","askClass","misconception"];
+            fields.forEach(k => {
+              if (typeof f[k] === "string" && f[k].trim() && (!b.node[k] || String(b.node[k]).trim().length < 15)) {
+                b.node[k] = f[k];
+              }
+            });
+            if (Array.isArray(f.keyTerms) && (!b.node.keyTerms || !b.node.keyTerms.length)) {
+              b.node.keyTerms = f.keyTerms.filter(t => t && t.term).map(t => ({ term: String(t.term).slice(0,60), definition: String(t.definition||"") })).slice(0,5);
+            }
+            if (Array.isArray(f.steps) && (!b.node.steps || !b.node.steps.length)) {
+              b.node.steps = f.steps.map(String).filter(Boolean).slice(0,8);
+            }
+          });
+        }
+      } catch (e) {
+        console.warn("Finisher batch failed:", e.message);
+        // Left-over thin nodes fall to the local backfill, which is fine.
+      }
+    }
+  }
+
+  // ── 4. Examiner
+  say("examiner", "Checking the teaching order…");
+  let ordered = built;
+  let overview = bp.overview || "";
+  try {
+    const review = await lmAgentExaminer({ topic, branches: built, callAI });
+    if (review) {
+      if (Array.isArray(review.order) && review.order.length) {
+        const seen = new Set();
+        const reordered = [];
+        review.order.forEach(idx => {
+          const n = built[Number(idx)];
+          if (n && !seen.has(n.title)) { reordered.push(n); seen.add(n.title); }
+        });
+        built.forEach(n => { if (!seen.has(n.title)) reordered.push(n); });
+        if (reordered.length === built.length) ordered = reordered;
+      }
+      if (review.overview) overview = review.overview;
+      const gaps = Array.isArray(review.gaps) ? review.gaps.filter(Boolean).slice(0, 3) : [];
+      say("examiner", gaps.length ? `Order set · flagged ${gaps.length} gap(s): ${gaps.join(", ")}` : (review.verdict || "Order confirmed"));
+    }
+  } catch (e) {
+    say("examiner", "Review skipped — keeping the planned order");
+  }
+
+  // ── 5. Assembler (local)
+  say("assembler", "Validating and assembling…");
+  const map = parseLearningMap(JSON.stringify({
+    title: topic,
+    overview,
+    children: ordered,
+  }));
+  if (!map) throw new Error("The assembled map failed validation — try again.");
+
+  // No empty tiles. A node the Teacher skipped or thinned out would show a
+  // near-blank card and a bare screen in Teach Mode, so every node is
+  // guaranteed a usable minimum before the map is handed back.
+  lmBackfillContent(map.children, topic, map.overview);
+  map.agentMeta = {
+    topicType: bp.topicType,
+    audience: bp.audience || "",
+    estimatedMinutes: Number(bp.estimatedMinutes) || 0,
+    reasoning: bp.reasoning || "",
+    branchCount: map.children.length,
+    builtAt: new Date().toISOString(),
+  };
+  say("assembler", `${lmCountNodes(map.children)} nodes across ${map.children.length} branches ✓`);
+  return map;
+}
+
+/* Guarantees teaching content on every node. The generator usually fills
+   these in, but a dropped Teacher call or a terse model response can leave
+   a node with just a title — which reads as an empty card and, worse, an
+   empty Teach Mode screen. This derives a sensible minimum from whatever
+   the node and its neighbours do have, so there is always something to
+   read. It never overwrites content that already exists. */
+function lmBackfillContent(nodes, topic, overview, parentTitle = "") {
+  if (!Array.isArray(nodes)) return;
+  const KIND_WORD = {
+    concept: "idea", step: "step", formula: "formula",
+    example: "example", pitfall: "common mistake", practice: "practice point",
+  };
+  for (const n of nodes) {
+    const title = n.title || "this idea";
+    const word = KIND_WORD[n.kind] || "idea";
+    const ctx = parentTitle ? `${parentTitle} — ` : "";
+
+    if (!n.summary || !n.summary.trim()) {
+      n.summary = `${ctx}${title}`.slice(0, 90);
+    }
+    /* This only runs if the Finisher couldn't reach a node (a full model
+       outage, say). It marks the node as needing detail rather than
+       pretending to teach it — an honest gap the trainer can fill by
+       hitting Rebuild, not filler dressed up as content. */
+    if (!n.explain || n.explain.trim().length < 12) {
+      n._needsDetail = true;
+      n.explain = parentTitle
+        ? `${title} sits under ${parentTitle} in ${topic}. Detailed content for this point couldn't be generated — press Rebuild to try again, or edit this node to add the explanation yourself.`
+        : `${title} is one of the main parts of ${topic}. Detailed content couldn't be generated — press Rebuild to try again, or edit this node to add it yourself.`;
+    }
+    if (!n.whyItMatters || !n.whyItMatters.trim()) n.whyItMatters = "";
+    if (!n.teachTip || !n.teachTip.trim()) n.teachTip = "";
+    if (!n.example || !n.example.trim()) n.example = "";
+    if (!n.askClass || !n.askClass.trim()) n.askClass = "";
+    if (!Array.isArray(n.keyTerms)) n.keyTerms = [];
+    if (!Array.isArray(n.steps)) n.steps = [];
+
+    if (Array.isArray(n.children) && n.children.length) {
+      lmBackfillContent(n.children, topic, overview, title);
+    }
+  }
+}
+
+function parseLearningMap(text, singleNode = false) {
+  if (!text || typeof text !== "string") return null;
+  let s = text.trim();
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  s = s.slice(start, end + 1);
+
+  let obj = null;
+  try { obj = JSON.parse(s); }
+  catch {
+    try { obj = JSON.parse(s.replace(/,\s*([}\]])/g, "$1")); }   // trailing commas
+    catch { return null; }
+  }
+  if (!obj || typeof obj !== "object") return null;
+
+  let counter = 0;
+  const clean = (n, depth) => {
+    if (!n || typeof n !== "object") return null;
+    const title = String(n.title || n.name || "").trim();
+    if (!title) return null;
+    const kids = Array.isArray(n.children) && depth < 5
+      ? n.children.map(c => clean(c, depth + 1)).filter(Boolean)
+      : [];
+    const terms = Array.isArray(n.keyTerms)
+      ? n.keyTerms
+          .map(t => (t && typeof t === "object")
+            ? { term: String(t.term || "").slice(0, 60), definition: String(t.definition || "") }
+            : { term: String(t || "").slice(0, 60), definition: "" })
+          .filter(t => t.term)
+          .slice(0, 5)
+      : [];
+    const mins = Number(n.timeMin);
+    return {
+      id: n.id || `lm${Date.now().toString(36)}${(counter++).toString(36)}`,
+      title: title.slice(0, 90),
+      kind: ["concept","step","formula","example","pitfall","practice"].includes(n.kind) ? n.kind : "concept",
+      summary: String(n.summary || "").slice(0, 200),
+      whyItMatters: String(n.whyItMatters || ""),
+      explain: String(n.explain || ""),
+      keyTerms: terms,
+      board: String(n.board || ""),
+      steps: Array.isArray(n.steps) ? n.steps.map(String).filter(Boolean).slice(0, 8) : [],
+      example: String(n.example || ""),
+      formula: String(n.formula || ""),
+      analogy: String(n.analogy || ""),
+      teachTip: String(n.teachTip || ""),
+      askClass: String(n.askClass || ""),
+      misconception: String(n.misconception || ""),
+      timeMin: Number.isFinite(mins) ? Math.max(1, Math.min(60, Math.round(mins))) : 5,
+      // Preserved so a saved-then-reloaded map still shows the "needs detail"
+      // marker rather than silently looking complete.
+      ...(n._needsDetail ? { _needsDetail: true } : {}),
+      children: kids,
+    };
+  };
+
+  if (singleNode) return clean(obj, 0);
+
+  const children = Array.isArray(obj.children) ? obj.children.map(c => clean(c, 1)).filter(Boolean) : [];
+  if (!children.length) return null;
+  return {
+    version: 1,
+    title: String(obj.title || "").slice(0, 120),
+    overview: String(obj.overview || ""),
+    children,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+// Depth-first walk helpers used by the trainer's edit controls.
+function lmUpdateNode(nodes, id, fn) {
+  return nodes.map(n => {
+    if (n.id === id) return fn(n);
+    return { ...n, children: lmUpdateNode(n.children || [], id, fn) };
+  });
+}
+
+function lmRemoveNode(nodes, id) {
+  return nodes
+    .filter(n => n.id !== id)
+    .map(n => ({ ...n, children: lmRemoveNode(n.children || [], id) }));
+}
+
+function lmCountNodes(nodes) {
+  return nodes.reduce((acc, n) => acc + 1 + lmCountNodes(n.children || []), 0);
 }
 
 function getCourseStats(course) {
@@ -2023,7 +3011,7 @@ async function buildDayZip(day, dayData, selection) {
   if (selection.dataGenerator && dataGenerator) files.push("🗃️ dataset (.csv + preprocessing .py + .ipynb)");
 
   folder.file("README.md",
-    `# Day ${day.dayNum}: ${day.topic}\n\nExported from AI With ARBAJ LMS — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
+    `# Day ${day.dayNum}: ${day.topic}\n\nExported from ${APP_FULL} — ${new Date().toLocaleDateString()}\n\n## Contents\n${files.map(f => `- ${f}`).join("\n")}\n`);
 
   return zip.generateAsync({ type: "blob" });
 }
@@ -3561,9 +4549,10 @@ function courseMonogram(name) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, onBack, onSubmit, loading, error, studentName }) {
-  const [query, setQuery]     = useState("");
+export function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, onBack, onSubmit, loading, error, studentName }) {
+  const [query, setQuery] = useState("");
   const [trainerFilter, setTrainerFilter] = useState("all");
+  const [hovered, setHovered] = useState(null);
 
   const trainerNames = useMemo(() => {
     const m = new Map();
@@ -3584,128 +4573,224 @@ function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, o
     });
   }, [courses, query, trainerFilter, trainersMap]);
 
-  const toggle = (id) => {
-    setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-  };
-
+  const toggle = (id) => setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   const selectedCourses = courses.filter(c => selectedIds.includes(c.id));
+  const totalDays = selectedCourses.reduce((s, c) => s + (Array.isArray(c.planDays) ? c.planDays.length : 0), 0);
 
   return (
-    <div style={{
-      minHeight:"100vh",
-      background:"linear-gradient(170deg,#faf8ff 0%,#f4f0ff 55%,#ece6ff 100%)",
-      fontFamily:"'Segoe UI','Helvetica Neue',system-ui,sans-serif",
-      paddingBottom:128,
-    }}>
+    <div className="csp">
       <style>{`
-        @keyframes csp-rise { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
-        .csp-card { animation: csp-rise .32s ease both; }
-        .csp-card:hover { transform: translateY(-3px); box-shadow: 0 14px 32px rgba(76,29,149,.14); }
-        .csp-card:focus-visible { outline:3px solid #7c3aed; outline-offset:3px; }
-        @media (prefers-reduced-motion: reduce) { .csp-card { animation:none; } .csp-card:hover { transform:none; } }
-        @media (max-width: 640px) { .csp-grid { grid-template-columns: 1fr !important; } .csp-head { padding:24px 18px 18px !important; } .csp-body { padding:0 18px !important; } }
+        .csp{min-height:100vh;position:relative;overflow-x:hidden;padding-bottom:150px;
+          font-family:'Segoe UI','Helvetica Neue',system-ui,sans-serif;
+          background:#0d0a1a;}
+        /* Slow-drifting colour wash behind everything */
+        .csp::before{content:"";position:fixed;inset:-30%;z-index:0;pointer-events:none;
+          background:
+            radial-gradient(620px 620px at 18% 12%,rgba(124,58,237,.34),transparent 62%),
+            radial-gradient(560px 560px at 82% 26%,rgba(56,189,248,.2),transparent 60%),
+            radial-gradient(680px 680px at 50% 92%,rgba(236,72,153,.17),transparent 62%);
+          animation:csp-drift 22s ease-in-out infinite alternate;}
+        @keyframes csp-drift{
+          0%{transform:translate3d(0,0,0) scale(1);}
+          100%{transform:translate3d(-3%,-2%,0) scale(1.1);}
+        }
+        .csp::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.35;
+          background-image:radial-gradient(rgba(255,255,255,.07) 1px,transparent 1px);
+          background-size:26px 26px;}
+        .csp-in{position:relative;z-index:1;max-width:1120px;margin:0 auto;padding:0 28px;}
+
+        .csp-back{background:none;border:none;color:#a78bfa;font-weight:600;font-size:13.5px;cursor:pointer;padding:0;margin-bottom:22px;transition:color .16s;}
+        .csp-back:hover{color:#ddd4ff;}
+        .csp-step{display:inline-flex;align-items:center;gap:9px;padding:6px 14px;border-radius:99px;
+          background:rgba(167,139,250,.14);border:1px solid rgba(167,139,250,.3);margin-bottom:16px;}
+        .csp-dot{width:6px;height:6px;border-radius:99px;background:#a78bfa;box-shadow:0 0 10px #a78bfa;}
+        .csp-steptext{font-size:11.5px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#c4b5fd;}
+        .csp-h1{font-size:clamp(30px,5vw,50px);font-weight:800;color:#fff;letter-spacing:-1.2px;line-height:1.08;margin-bottom:13px;}
+        .csp-h1 em{font-style:normal;background:linear-gradient(105deg,#c4b5fd,#7dd3fc 45%,#f0abfc);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+        .csp-lead{font-size:15.5px;color:#a79fc4;max-width:620px;line-height:1.68;}
+
+        .csp-controls{display:flex;gap:11px;flex-wrap:wrap;align-items:center;margin:30px 0 22px;}
+        .csp-searchwrap{position:relative;flex:1 1 280px;}
+        .csp-searchicon{position:absolute;left:17px;top:50%;transform:translateY(-50%);color:#7c6aa8;font-size:15px;pointer-events:none;}
+        .csp-search{width:100%;padding:14px 18px 14px 42px;border-radius:14px;font-size:14.5px;box-sizing:border-box;
+          background:rgba(255,255,255,.05);border:1.5px solid rgba(255,255,255,.11);color:#eee;outline:none;
+          backdrop-filter:blur(10px);transition:border-color .18s,background .18s;}
+        .csp-search::placeholder{color:#6f6592;}
+        .csp-search:focus{border-color:#8b5cf6;background:rgba(255,255,255,.08);box-shadow:0 0 0 4px rgba(139,92,246,.16);}
+        .csp-pill{padding:10px 16px;border-radius:99px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap;transition:all .18s;}
+
+        .csp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(272px,1fr));gap:16px;}
+        .csp-card{position:relative;cursor:pointer;border-radius:20px;padding:20px;overflow:hidden;
+          background:linear-gradient(155deg,rgba(255,255,255,.075),rgba(255,255,255,.028));
+          border:1.5px solid rgba(255,255,255,.09);backdrop-filter:blur(14px);
+          animation:csp-rise .42s cubic-bezier(.2,.85,.3,1) both;
+          transition:transform .24s cubic-bezier(.2,.85,.3,1),box-shadow .24s,border-color .24s;
+          transform-style:preserve-3d;}
+        .csp-card::before{content:"";position:absolute;inset:0;opacity:0;transition:opacity .28s;pointer-events:none;
+          background:radial-gradient(360px 180px at 50% 0%,var(--wash),transparent 72%);}
+        .csp-card:hover::before,.csp-card.on::before{opacity:1;}
+        .csp-card:hover{transform:translateY(-6px) scale(1.018);border-color:var(--edge);
+          box-shadow:0 24px 52px rgba(0,0,0,.5),0 0 44px var(--glow);}
+        .csp-card:focus-visible{outline:3px solid var(--edge);outline-offset:3px;}
+        .csp-card.on{border-color:var(--edge);box-shadow:0 18px 44px rgba(0,0,0,.46),0 0 0 2px var(--edge),0 0 46px var(--glow);}
+        @keyframes csp-rise{from{opacity:0;transform:translateY(16px) scale(.96);}to{opacity:1;transform:none;}}
+
+        .csp-mono{width:56px;height:56px;border-radius:17px;display:flex;align-items:center;justify-content:center;
+          font-size:19px;font-weight:800;letter-spacing:.4px;color:#fff;margin-bottom:15px;position:relative;
+          box-shadow:0 10px 26px var(--glow),inset 0 1px 0 rgba(255,255,255,.32);}
+        .csp-name{font-size:16.5px;font-weight:750;color:#f4f1ff;line-height:1.32;margin-bottom:7px;letter-spacing:-.2px;}
+        .csp-by{display:flex;align-items:center;gap:7px;margin-bottom:14px;}
+        .csp-byav{width:19px;height:19px;border-radius:99px;background:rgba(255,255,255,.12);display:flex;align-items:center;
+          justify-content:center;font-size:9.5px;font-weight:800;color:#c9c1e8;flex-shrink:0;}
+        .csp-byname{font-size:12.5px;color:#9b92bd;}
+        .csp-meta{display:flex;gap:7px;flex-wrap:wrap;}
+        .csp-tag{font-size:11px;font-weight:700;padding:5px 11px;border-radius:99px;}
+        .csp-check{position:absolute;top:17px;right:17px;width:27px;height:27px;border-radius:99px;
+          display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#fff;
+          animation:csp-pop .32s cubic-bezier(.2,1.5,.4,1);}
+        @keyframes csp-pop{from{transform:scale(0) rotate(-90deg);}to{transform:none;}}
+        .csp-ghost{position:absolute;top:17px;right:17px;width:27px;height:27px;border-radius:99px;
+          border:1.5px dashed rgba(255,255,255,.24);transition:all .2s;}
+        .csp-card:hover .csp-ghost{border-color:var(--edge);transform:scale(1.1);}
+
+        .csp-tray{position:fixed;left:0;right:0;bottom:0;z-index:40;padding:16px 24px;
+          background:linear-gradient(180deg,rgba(13,10,26,.5),rgba(13,10,26,.94));
+          backdrop-filter:blur(20px);border-top:1px solid rgba(255,255,255,.1);}
+        .csp-trayin{max-width:1120px;margin:0 auto;display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+        .csp-chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:650;padding:7px 13px;
+          border-radius:99px;cursor:pointer;transition:all .16s;animation:csp-pop .26s ease;}
+        .csp-chip:hover{transform:translateY(-1px);}
+        .csp-go{padding:15px 34px;border-radius:15px;border:none;font-weight:750;font-size:15px;cursor:pointer;
+          transition:transform .18s,box-shadow .18s,background .18s;white-space:nowrap;}
+        .csp-go:not(:disabled):hover{transform:translateY(-2px);box-shadow:0 14px 36px rgba(124,58,237,.55);}
+        .csp-go:disabled{cursor:not-allowed;}
+
+        .csp-empty{text-align:center;padding:74px 24px;border-radius:22px;
+          background:rgba(255,255,255,.035);border:1.5px dashed rgba(255,255,255,.13);}
+
+        @media (max-width:640px){
+          .csp-in{padding:0 18px;}
+          .csp-grid{grid-template-columns:1fr;}
+          .csp-go{width:100%;}
+          .csp-trayin{gap:11px;}
+        }
+        @media (prefers-reduced-motion:reduce){
+          .csp::before{animation:none;}
+          .csp-card,.csp-check,.csp-chip{animation:none;}
+          .csp-card:hover{transform:none;}
+        }
       `}</style>
 
-      {/* Header */}
-      <div className="csp-head" style={{ maxWidth:1080, margin:"0 auto", padding:"40px 28px 22px" }}>
-        <button onClick={onBack} style={{ background:"none", border:"none", color:"#7c3aed", fontWeight:600, fontSize:13.5, cursor:"pointer", padding:0, marginBottom:18 }}>
-          ← Back to your details
-        </button>
-        <p style={{ fontSize:12, fontWeight:800, letterSpacing:".14em", textTransform:"uppercase", color:"#a78bfa", marginBottom:8 }}>
-          Step 2 of 2
-        </p>
-        <h1 style={{ fontSize:34, fontWeight:800, color:"#2e1065", letterSpacing:"-.8px", lineHeight:1.15, marginBottom:8 }}>
-          {studentName ? `What are you studying, ${studentName.split(" ")[0]}?` : "Choose your courses"}
-        </h1>
-        <p style={{ fontSize:14.5, color:"#6b7280", maxWidth:560, lineHeight:1.6 }}>
-          Pick everything you want to join. Each request goes to that course's trainer for approval —
-          you'll get a notification the moment one is accepted.
-        </p>
-      </div>
+      <div className="csp-in" style={{ paddingTop:44 }}>
+        <button className="csp-back" onClick={onBack}>← Back to your details</button>
 
-      {/* Controls */}
-      <div className="csp-body" style={{ maxWidth:1080, margin:"0 auto", padding:"0 28px" }}>
-        <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center", marginBottom:18 }}>
-          <div style={{ position:"relative", flex:"1 1 260px" }}>
-            <span style={{ position:"absolute", left:15, top:"50%", transform:"translateY(-50%)", color:"#a78bfa", fontSize:14, pointerEvents:"none" }}>⌕</span>
-            <input
-              value={query} onChange={e => setQuery(e.target.value)}
-              placeholder="Search courses or trainers"
-              style={{ width:"100%", padding:"12px 16px 12px 38px", border:"1.5px solid #e9e2ff", borderRadius:50, fontSize:14, background:"#fff", outline:"none", color:"#2d3748", boxSizing:"border-box" }}
-            />
+        <div className="csp-step">
+          <span className="csp-dot" />
+          <span className="csp-steptext">Step 2 of 2 · Choose courses</span>
+        </div>
+
+        <h1 className="csp-h1">
+          {studentName ? <>What are you here to <em>learn</em>, {studentName.split(" ")[0]}?</> : <>What are you here to <em>learn</em>?</>}
+        </h1>
+        <p className="csp-lead">
+          Pick everything you want to join — you can choose more than one. Each request goes to that
+          course's trainer for approval, and you'll get a notification the moment one comes back.
+        </p>
+
+        <div className="csp-controls">
+          <div className="csp-searchwrap">
+            <span className="csp-searchicon">⌕</span>
+            <input className="csp-search" value={query} onChange={e => setQuery(e.target.value)}
+              placeholder={`Search ${courses.length} course${courses.length === 1 ? "" : "s"} or trainers…`} />
           </div>
           {trainerNames.length > 1 && (
-            <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
-              <button onClick={() => setTrainerFilter("all")} style={pill(trainerFilter === "all")}>All trainers</button>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              <button className="csp-pill" style={pillStyle(trainerFilter === "all")} onClick={() => setTrainerFilter("all")}>
+                All trainers
+              </button>
               {trainerNames.map(([id, name]) => (
-                <button key={id} onClick={() => setTrainerFilter(id)} style={pill(trainerFilter === id)}>{name}</button>
+                <button key={id} className="csp-pill" style={pillStyle(trainerFilter === id)} onClick={() => setTrainerFilter(id)}>
+                  {name}
+                </button>
               ))}
             </div>
           )}
         </div>
 
         {error && (
-          <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:12, padding:"11px 15px", marginBottom:16 }}>
-            <p style={{ color:"#dc2626", fontSize:13.5, fontWeight:600 }}>{error}</p>
+          <div style={{ background:"rgba(239,68,68,.13)", border:"1.5px solid rgba(248,113,113,.36)", borderRadius:14, padding:"13px 17px", marginBottom:18 }}>
+            <p style={{ color:"#fca5a5", fontSize:13.5, fontWeight:600 }}>{error}</p>
           </div>
         )}
 
-        {/* Grid */}
         {visible.length === 0 ? (
-          <div style={{ textAlign:"center", padding:"60px 20px", background:"#fff", borderRadius:18, border:"1.5px dashed #ddd6fe" }}>
-            <p style={{ fontSize:15, fontWeight:700, color:"#4c1d95", marginBottom:6 }}>
-              {courses.length === 0 ? "No courses are open for enrolment yet" : "Nothing matches that search"}
+          <div className="csp-empty">
+            <div style={{ fontSize:40, marginBottom:14, opacity:.65 }}>{courses.length === 0 ? "🗓" : "⌕"}</div>
+            <p style={{ fontSize:17, fontWeight:750, color:"#e8e3fa", marginBottom:8 }}>
+              {courses.length === 0 ? "No courses are open for enrolment yet" : `Nothing matches "${query}"`}
             </p>
-            <p style={{ fontSize:13.5, color:"#8b7fa8" }}>
-              {courses.length === 0 ? "Check back once a trainer publishes one." : "Try a different word, or clear the filter."}
+            <p style={{ fontSize:14, color:"#8f86b3", lineHeight:1.6 }}>
+              {courses.length === 0
+                ? "Check back once a trainer publishes one."
+                : "Try a different word, or clear the trainer filter."}
             </p>
+            {courses.length > 0 && (
+              <button className="csp-pill" style={{ ...pillStyle(false), marginTop:18 }}
+                onClick={() => { setQuery(""); setTrainerFilter("all"); }}>
+                Clear filters
+              </button>
+            )}
           </div>
         ) : (
-          <div className="csp-grid" style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(268px,1fr))", gap:14 }}>
+          <div className="csp-grid">
             {visible.map((c, i) => {
               const on = selectedIds.includes(c.id);
-              const a  = courseAccent(c.name);
+              const a = courseAccent(c.name);
               const tName = trainersMap[c.trainerId]?.name || "Unknown trainer";
               const dayCount = Array.isArray(c.planDays) ? c.planDays.length : 0;
+              const weeks = dayCount > 0 ? Math.max(1, Math.round(dayCount / 5)) : 0;
               return (
                 <div
                   key={c.id}
-                  className="csp-card"
-                  role="checkbox"
-                  aria-checked={on}
-                  tabIndex={0}
+                  className={`csp-card${on ? " on" : ""}`}
+                  role="checkbox" aria-checked={on} tabIndex={0}
                   onClick={() => toggle(c.id)}
+                  onMouseEnter={() => setHovered(c.id)}
+                  onMouseLeave={() => setHovered(null)}
                   onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(c.id); } }}
                   style={{
-                    position:"relative", cursor:"pointer", background:"#fff",
-                    border:`2px solid ${on ? a.edge : "#efeaff"}`,
-                    borderRadius:16, padding:"16px 16px 14px",
-                    boxShadow: on ? `0 10px 26px ${a.soft}` : "0 2px 10px rgba(76,29,149,.05)",
-                    transition:"transform .16s ease, box-shadow .16s ease, border-color .16s",
-                    animationDelay:`${Math.min(i * 24, 300)}ms`,
+                    "--edge": a.edge, "--glow": `hsla(${a.hue ?? 268} 85% 60% / .3)`,
+                    "--wash": `hsla(${a.hue ?? 268} 85% 62% / .16)`,
+                    animationDelay: `${Math.min(i * 45, 420)}ms`,
                   }}
                 >
-                  {on && (
-                    <span style={{
-                      position:"absolute", top:12, right:12, width:23, height:23, borderRadius:99,
-                      background:`linear-gradient(135deg,${a.from},${a.to})`, color:"#fff",
-                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:800,
-                    }}>✓</span>
-                  )}
-                  <div style={{
-                    width:44, height:44, borderRadius:13, marginBottom:12,
-                    background:`linear-gradient(135deg,${a.from},${a.to})`,
-                    display:"flex", alignItems:"center", justifyContent:"center",
-                    color:"#fff", fontWeight:800, fontSize:15, letterSpacing:".5px",
-                  }}>{courseMonogram(c.name)}</div>
-                  <p style={{ fontSize:15, fontWeight:700, color:"#1e1b3a", lineHeight:1.35, marginBottom:5, paddingRight:on ? 26 : 0 }}>{c.name}</p>
-                  <p style={{ fontSize:12.5, color:"#8b7fa8", marginBottom:10 }}>{tName}</p>
-                  <span style={{
-                    display:"inline-block", fontSize:11.5, fontWeight:700, padding:"3px 9px", borderRadius:99,
-                    background:a.soft, color:a.ink,
-                  }}>
-                    {dayCount > 0 ? `${dayCount} days` : "Schedule coming soon"}
-                  </span>
+                  {on
+                    ? <span className="csp-check" style={{ background:`linear-gradient(135deg,${a.from},${a.to})`, boxShadow:`0 4px 16px hsla(${a.hue ?? 268} 85% 55% / .55)` }}>✓</span>
+                    : <span className="csp-ghost" />}
+
+                  <div className="csp-mono" style={{ background:`linear-gradient(140deg,${a.from},${a.to})` }}>
+                    {courseMonogram(c.name)}
+                  </div>
+
+                  <p className="csp-name">{c.name}</p>
+                  <div className="csp-by">
+                    <span className="csp-byav">{(tName[0] || "?").toUpperCase()}</span>
+                    <span className="csp-byname">{tName}</span>
+                  </div>
+
+                  <div className="csp-meta">
+                    <span className="csp-tag" style={{ background:`hsla(${a.hue ?? 268} 70% 55% / .18)`, color:a.edge }}>
+                      {dayCount > 0 ? `${dayCount} days` : "Starting soon"}
+                    </span>
+                    {weeks > 0 && (
+                      <span className="csp-tag" style={{ background:"rgba(255,255,255,.07)", color:"#a79fc4" }}>
+                        ≈{weeks} week{weeks > 1 ? "s" : ""}
+                      </span>
+                    )}
+                    {on && (
+                      <span className="csp-tag" style={{ background:"rgba(34,197,94,.17)", color:"#86efac" }}>Selected</span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -3713,48 +4798,46 @@ function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, o
         )}
       </div>
 
-      {/* Sticky selection tray */}
-      <div style={{
-        position:"fixed", left:0, right:0, bottom:0, zIndex:40,
-        background:"rgba(255,255,255,.94)", backdropFilter:"blur(12px)",
-        borderTop:"1.5px solid #ece6ff", boxShadow:"0 -8px 28px rgba(76,29,149,.09)",
-        padding:"13px 20px",
-      }}>
-        <div style={{ maxWidth:1080, margin:"0 auto", display:"flex", alignItems:"center", gap:14, flexWrap:"wrap" }}>
-          <div style={{ flex:"1 1 200px", minWidth:0 }}>
+      <div className="csp-tray">
+        <div className="csp-trayin">
+          <div style={{ flex:"1 1 220px", minWidth:0 }}>
             {selectedCourses.length === 0 ? (
-              <p style={{ fontSize:13.5, color:"#8b7fa8" }}>Nothing selected yet — tap a course to add it.</p>
+              <p style={{ fontSize:14, color:"#8f86b3" }}>Tap a course to add it — pick as many as you like.</p>
             ) : (
-              <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
-                <span style={{ fontSize:13, fontWeight:700, color:"#4c1d95" }}>{selectedCourses.length} selected:</span>
-                {selectedCourses.slice(0, 3).map(c => {
-                  const a = courseAccent(c.name);
-                  return (
-                    <span key={c.id} onClick={() => toggle(c.id)} title="Remove"
-                      style={{ cursor:"pointer", fontSize:12, fontWeight:600, padding:"4px 10px", borderRadius:99, background:a.soft, color:a.ink, border:`1px solid ${a.edge}` }}>
-                      {c.name} ×
+              <>
+                <p style={{ fontSize:12.5, fontWeight:700, color:"#c4b5fd", marginBottom:7 }}>
+                  {selectedCourses.length} selected{totalDays > 0 ? ` · ${totalDays} days of material` : ""}
+                </p>
+                <div style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
+                  {selectedCourses.slice(0, 4).map(c => {
+                    const a = courseAccent(c.name);
+                    return (
+                      <span key={c.id} className="csp-chip" onClick={() => toggle(c.id)} title="Remove"
+                        style={{ background:`hsla(${a.hue ?? 268} 70% 55% / .2)`, color:a.edge, border:`1px solid ${a.edge}` }}>
+                        {c.name} <span style={{ opacity:.7 }}>×</span>
+                      </span>
+                    );
+                  })}
+                  {selectedCourses.length > 4 && (
+                    <span style={{ fontSize:12.5, color:"#8f86b3", fontWeight:650, alignSelf:"center" }}>
+                      +{selectedCourses.length - 4} more
                     </span>
-                  );
-                })}
-                {selectedCourses.length > 3 && (
-                  <span style={{ fontSize:12, color:"#8b7fa8", fontWeight:600 }}>+{selectedCourses.length - 3} more</span>
-                )}
-              </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
+
           <button
+            className="csp-go"
             onClick={onSubmit}
             disabled={loading || selectedCourses.length === 0}
             style={{
-              padding:"13px 30px", borderRadius:50, border:"none",
-              background: selectedCourses.length === 0 ? "#e2e0ee" : "linear-gradient(135deg,#7c3aed,#6d28d9)",
-              color: selectedCourses.length === 0 ? "#a9a4bd" : "#fff",
-              fontWeight:700, fontSize:14.5,
-              cursor: selectedCourses.length === 0 ? "not-allowed" : "pointer",
-              boxShadow: selectedCourses.length === 0 ? "none" : "0 6px 20px rgba(124,58,237,.38)",
-              transition:"background .2s",
+              background: selectedCourses.length === 0 ? "rgba(255,255,255,.08)" : "linear-gradient(135deg,#8b5cf6,#6d28d9)",
+              color: selectedCourses.length === 0 ? "#6f6592" : "#fff",
+              boxShadow: selectedCourses.length === 0 ? "none" : "0 8px 26px rgba(124,58,237,.45)",
             }}>
-            {loading ? "Creating account…" : "Create account"}
+            {loading ? "Creating your account…" : selectedCourses.length === 0 ? "Choose at least one" : `Create account · ${selectedCourses.length}`}
           </button>
         </div>
       </div>
@@ -3762,15 +4845,15 @@ function CourseSelectPage({ courses, trainersMap, selectedIds, setSelectedIds, o
   );
 }
 
-function pill(active) {
+function pillStyle(active) {
   return {
-    padding:"8px 14px", borderRadius:50, fontSize:12.5, fontWeight:700, cursor:"pointer",
-    border:`1.5px solid ${active ? "#7c3aed" : "#e9e2ff"}`,
-    background: active ? "#7c3aed" : "#fff",
-    color: active ? "#fff" : "#6b5b95",
-    transition:"all .15s",
+    border: `1.5px solid ${active ? "#8b5cf6" : "rgba(255,255,255,.12)"}`,
+    background: active ? "linear-gradient(135deg,#8b5cf6,#6d28d9)" : "rgba(255,255,255,.05)",
+    color: active ? "#fff" : "#a79fc4",
+    boxShadow: active ? "0 6px 20px rgba(124,58,237,.4)" : "none",
   };
 }
+
 
 function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
   const [mode, setMode] = useState(initialMode);
@@ -4009,7 +5092,6 @@ function LoginScreen({ onLogin, sb, initialMode = "select", onBackToLanding }) {
           <div style={{ position:"absolute", bottom:40, left:28, width:18, height:18, borderRadius:"50%", border:"2px solid rgba(255,255,255,.3)" }} />
 
           <div style={{ position:"relative", zIndex:1 }}>
-            <div style={{ color:"white", fontSize:23, fontWeight:600, letterSpacing:".01em", textTransform:"uppercase", margin:"0 0 24px 0", opacity:.8 }}>ARBAJ's</div>
             <h2 style={{ color:"white", fontSize:33, fontWeight:600, letterSpacing:".08em", textTransform:"uppercase", margin:"0 0 24px 0", opacity:.8 }}>LMS Portal</h2>
           </div>
           <div style={{ position:"relative", zIndex:1 }}>
@@ -7131,112 +8213,276 @@ function AttendanceScanHandler({ sb, auth, onDismiss }) {
 /* ═══════════════════════════════════════════════════════════════════
    STUDENT PROFILE PANEL — edit name and profile photo
 ═══════════════════════════════════════════════════════════════════ */
-function StudentProfilePanel({ profile, authName, onSave, onClose, darkMode }) {
+export function ProfilePanel({ role, profile, authName, authEmail, onSave, onClose, darkMode, extraStats = null }) {
+  const isTrainer = role === "trainer";
   const [displayName, setDisplayName] = useState(profile.displayName || authName || "");
-  const [photoUrl, setPhotoUrl] = useState(profile.photoUrl || "");
+  const [photoUrl, setPhotoUrl]       = useState(profile.photoUrl || "");
   const [photoPreview, setPhotoPreview] = useState(profile.photoUrl || "");
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [bio, setBio]         = useState(profile.bio || "");
+  const [phone, setPhone]     = useState(profile.phone || "");
+  const [headline, setHeadline] = useState(profile.headline || "");
+  const [accent, setAccent]   = useState(profile.accent || "violet");
+  const [saving, setSaving]   = useState(false);
+  const [msg, setMsg]         = useState("");
+  const [dirty, setDirty]     = useState(false);
+  const fileRef = useRef(null);
 
-  const handlePhotoChange = (e) => {
-    const file = e.target.files[0];
+  const touch = (fn) => (v) => { fn(v); setDirty(true); };
+
+  const ACCENTS = {
+    violet: ["#8B5CF6", "#6366F1"], teal: ["#14B8A6", "#0EA5E9"],
+    rose:   ["#F43F5E", "#EC4899"], amber: ["#F59E0B", "#EF4444"],
+    green:  ["#22C55E", "#16A34A"], slate: ["#64748B", "#334155"],
+  };
+  const [ac1, ac2] = ACCENTS[accent] || ACCENTS.violet;
+
+  const handlePhoto = (e) => {
+    const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 2 * 1024 * 1024) { setMsg("Photo too large — max 2MB"); return; }
-    if (!file.type.startsWith("image/")) { setMsg("Please select an image file"); return; }
+    if (!file.type.startsWith("image/")) { setMsg("Please choose an image"); return; }
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setPhotoPreview(ev.target.result);
-      setPhotoUrl(ev.target.result); // store as data URL (persisted in sessionStorage)
-    };
+    reader.onload = (ev) => { setPhotoPreview(ev.target.result); setPhotoUrl(ev.target.result); setDirty(true); };
     reader.readAsDataURL(file);
     setMsg("");
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     setSaving(true);
-    onSave({ displayName: displayName.trim() || authName, photoUrl });
-    setMsg("✅ Profile saved!");
-    setTimeout(() => { setSaving(false); setMsg(""); }, 1500);
+    setMsg("");
+    try {
+      await onSave({
+        displayName: displayName.trim() || authName,
+        photoUrl, bio: bio.trim(), phone: phone.trim(),
+        headline: headline.trim(), accent,
+      });
+      setMsg("saved");
+      setDirty(false);
+      setTimeout(() => setMsg(""), 1800);
+    } catch (e) {
+      setMsg("error");
+    }
+    setSaving(false);
   };
 
-  const bg = darkMode ? "#111827" : "#fff";
-  const border = darkMode ? "#1f2937" : "#e2e8f0";
-  const textPrimary = darkMode ? "#f1f5f9" : "#0f172a";
-  const textMuted = darkMode ? "#94a3b8" : "#64748b";
+  const bg      = darkMode ? "#15151a" : "#fff";
+  const bg2     = darkMode ? "#1c1c22" : "#f5f5f7";
+  const border  = darkMode ? "#2a2a32" : "#e5e5ea";
+  const ink     = darkMode ? "#f5f5f7" : "#1c1c1e";
+  const muted   = darkMode ? "#98989f" : "#8e8e93";
+  const initials = (displayName || authName || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+
+  const field = {
+    width: "100%", padding: "12px 14px", borderRadius: 12, fontSize: 15, boxSizing: "border-box",
+    background: bg2, border: `1px solid ${border}`, color: ink, outline: "none", fontFamily: "inherit",
+  };
+  const label = { fontSize: 12, fontWeight: 700, color: muted, letterSpacing: ".02em", margin: "16px 0 7px", display: "block" };
 
   return (
-    <div style={{
-      position:"fixed", inset:0, zIndex:8500,
-      background:"rgba(15,23,42,.65)",
-      display:"flex", alignItems:"center", justifyContent:"center",
-      padding:20,
-    }}
+    <div
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 8500,
+        background: "rgba(0,0,0,.45)", backdropFilter: "blur(14px)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 18,
+        animation: "ios-fade-in .24s ease",
+      }}
     >
-      <div style={{ background:bg, borderRadius:20, padding:28, maxWidth:380, width:"100%", boxShadow:"0 24px 80px rgba(0,0,0,.3)", border:`1.5px solid ${border}` }}>
-        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
-          <p style={{ fontWeight:800, fontSize:16, color:textPrimary, margin:0 }}>👤 My Profile</p>
-          <button onClick={onClose} style={{ background:"none", border:"none", cursor:"pointer", fontSize:18, color:textMuted, lineHeight:1, padding:"2px 6px", borderRadius:6, fontFamily:"inherit" }}>✕</button>
-        </div>
+      <style>{`
+        .pf-modal{ animation: ios-sheet-in .4s var(--ios-spring, cubic-bezier(.34,1.56,.64,1)); }
+        .pf-accent{ width:30px; height:30px; border-radius:99px; cursor:pointer; border:2.5px solid transparent; transition:transform .2s var(--ios-spring,cubic-bezier(.34,1.56,.64,1)),border-color .2s ease; }
+        .pf-accent:hover{ transform:scale(1.12); }
+        .pf-accent.on{ border-color:#fff; box-shadow:0 0 0 2px rgba(0,0,0,.15),0 4px 12px rgba(0,0,0,.2); transform:scale(1.08); }
+        .pf-cam{ transition:transform .2s var(--ios-spring,cubic-bezier(.34,1.56,.64,1)); }
+        .pf-cam:active{ transform:scale(.9); }
+        @media (max-width:560px){ .pf-modal{ max-height:92vh; border-radius:22px 22px 0 0; align-self:flex-end; animation:ios-slide-up .4s var(--ios-ease,cubic-bezier(.32,.72,0,1)); } }
+      `}</style>
 
-        {/* Photo upload */}
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", marginBottom:22 }}>
-          <div style={{ position:"relative", marginBottom:10 }}>
-            {photoPreview ? (
-              <img src={photoPreview} alt="profile"
-                style={{ width:80, height:80, borderRadius:"50%", objectFit:"cover", border:"3px solid #22c55e", boxShadow:"0 4px 16px rgba(34,197,94,.25)" }} />
-            ) : (
-              <div style={{ width:80, height:80, borderRadius:"50%", background:"linear-gradient(135deg,#22c55e,#16a34a)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:32, color:"#fff", fontWeight:800, border:"3px solid #22c55e" }}>
-                {(displayName || authName || "S").charAt(0).toUpperCase()}
+      <div className="pf-modal" onClick={e => e.stopPropagation()}
+        style={{ background: bg, borderRadius: 22, width: "min(430px,100%)", maxHeight: "90vh", overflowY: "auto",
+                 boxShadow: "0 30px 90px rgba(0,0,0,.4)", border: `1px solid ${border}` }}>
+
+        {/* Gradient header with avatar */}
+        <div style={{ position: "relative", height: 118, background: `linear-gradient(135deg,${ac1},${ac2})`, borderRadius: "22px 22px 0 0" }}>
+          <button onClick={onClose}
+            style={{ position: "absolute", top: 14, right: 14, width: 30, height: 30, borderRadius: 99, border: "none",
+                     background: "rgba(255,255,255,.24)", color: "#fff", fontSize: 16, cursor: "pointer",
+                     backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center" }}
+            className="ios-press">✕</button>
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: -44, display: "flex", justifyContent: "center" }}>
+            <div style={{ position: "relative" }}>
+              <div style={{ width: 96, height: 96, borderRadius: 99, border: `4px solid ${bg}`, overflow: "hidden",
+                            background: `linear-gradient(135deg,${ac1},${ac2})`, display: "flex", alignItems: "center",
+                            justifyContent: "center", boxShadow: "0 8px 24px rgba(0,0,0,.25)" }}>
+                {photoPreview
+                  ? <img src={photoPreview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : <span style={{ fontSize: 34, fontWeight: 700, color: "#fff" }}>{initials}</span>}
               </div>
-            )}
-            <label
-              title="Change photo"
-              style={{ position:"absolute", bottom:0, right:0, width:26, height:26, background:"#3b82f6", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", border:"2px solid #fff", boxShadow:"0 2px 8px rgba(59,130,246,.4)" }}>
-              <span style={{ fontSize:13, color:"#fff" }}>📷</span>
-              <input type="file" accept="image/*" style={{ display:"none" }} onChange={handlePhotoChange} />
-            </label>
+              <button className="pf-cam" onClick={() => fileRef.current?.click()}
+                style={{ position: "absolute", right: -2, bottom: -2, width: 32, height: 32, borderRadius: 99,
+                         border: `3px solid ${bg}`, background: "#fff", cursor: "pointer", fontSize: 14,
+                         boxShadow: "0 3px 10px rgba(0,0,0,.2)", display: "flex", alignItems: "center", justifyContent: "center" }}>📷</button>
+              <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+            </div>
           </div>
-          <p style={{ fontSize:12, color:textMuted, margin:0 }}>Click 📷 to change photo (max 2MB)</p>
-          {photoPreview && (
-            <button onClick={() => { setPhotoUrl(""); setPhotoPreview(""); }} style={{ fontSize:11, color:"#ef4444", background:"none", border:"none", cursor:"pointer", marginTop:4, fontFamily:"inherit" }}>
-              Remove photo
-            </button>
+        </div>
+
+        <div style={{ padding: "56px 24px 24px" }}>
+          <div style={{ textAlign: "center", marginBottom: 6 }}>
+            <p style={{ fontSize: 20, fontWeight: 800, color: ink, letterSpacing: "-.3px" }}>{displayName || authName || "Your name"}</p>
+            <p style={{ fontSize: 13.5, color: muted, marginTop: 2 }}>
+              {isTrainer ? "🧑‍🏫 Trainer" : "🎓 Student"}{authEmail ? ` · ${authEmail}` : ""}
+            </p>
+          </div>
+
+          {extraStats && (
+            <div style={{ display: "flex", gap: 10, margin: "18px 0 4px" }}>
+              {extraStats.map((s, i) => (
+                <div key={i} style={{ flex: 1, textAlign: "center", padding: "12px 8px", borderRadius: 14, background: bg2, border: `1px solid ${border}` }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: ink }}>{s.value}</div>
+                  <div style={{ fontSize: 11, color: muted, marginTop: 2, fontWeight: 600 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
           )}
-        </div>
 
-        {/* Display name */}
-        <div style={{ marginBottom:18 }}>
-          <label style={{ fontSize:12.5, fontWeight:600, color:textMuted, display:"block", marginBottom:6 }}>Display Name</label>
-          <input
-            type="text"
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder={authName || "Your name"}
-            className="lms-input"
-            style={{ background: darkMode ? "#1e293b" : "#f8fafc", color:textPrimary, borderColor:border }}
-            onKeyDown={e => { if (e.key === "Enter") handleSave(); }}
-          />
-          <p style={{ fontSize:11, color:textMuted, marginTop:4 }}>This name will be shown in your profile and dashboard.</p>
-        </div>
+          <label style={label}>NAME</label>
+          <input style={field} value={displayName} onChange={e => touch(setDisplayName)(e.target.value)} placeholder="Your full name" />
 
-        {msg && (
-          <div style={{ padding:"8px 12px", borderRadius:8, marginBottom:14, background:msg.startsWith("✅") ? "#f0fdf4" : "#fef2f2", border:`1px solid ${msg.startsWith("✅") ? "#bbf7d0" : "#fecaca"}`, fontSize:13, fontWeight:600, color:msg.startsWith("✅") ? "#15803d" : "#dc2626" }}>
-            {msg}
+          {isTrainer && (
+            <>
+              <label style={label}>HEADLINE</label>
+              <input style={field} value={headline} onChange={e => touch(setHeadline)(e.target.value)} placeholder="e.g. Data Science Instructor" />
+            </>
+          )}
+
+          <label style={label}>{isTrainer ? "ABOUT" : "BIO"}</label>
+          <textarea style={{ ...field, height: 74, resize: "vertical" }} value={bio}
+            onChange={e => touch(setBio)(e.target.value)}
+            placeholder={isTrainer ? "A line or two about what you teach…" : "Tell your trainer a little about you…"} />
+
+          <label style={label}>PHONE <span style={{ fontWeight: 500, color: muted }}>(optional)</span></label>
+          <input style={field} value={phone} onChange={e => touch(setPhone)(e.target.value)} placeholder="+91 …" type="tel" />
+
+          <label style={label}>ACCENT COLOUR</label>
+          <div style={{ display: "flex", gap: 11, flexWrap: "wrap" }}>
+            {Object.entries(ACCENTS).map(([key, [c1, c2]]) => (
+              <div key={key} className={`pf-accent${accent === key ? " on" : ""}`}
+                onClick={() => touch(setAccent)(key)}
+                style={{ background: `linear-gradient(135deg,${c1},${c2})` }} title={key} />
+            ))}
           </div>
-        )}
 
-        <div style={{ display:"flex", gap:10 }}>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="lms-btn lms-btn-blue"
-            style={{ flex:1, justifyContent:"center" }}
-          >
-            {saving ? <><Spin s={13}/>Saving…</> : "Save Profile"}
+          <button onClick={handleSave} disabled={saving || !dirty}
+            className="ios-press"
+            style={{ width: "100%", marginTop: 24, padding: "14px 0", borderRadius: 14, border: "none",
+                     background: (!dirty || saving) ? bg2 : `linear-gradient(135deg,${ac1},${ac2})`,
+                     color: (!dirty || saving) ? muted : "#fff", fontSize: 16, fontWeight: 700, cursor: (!dirty || saving) ? "default" : "pointer",
+                     boxShadow: (!dirty || saving) ? "none" : `0 8px 24px ${ac1}55`, transition: "all .3s var(--ios-ease,cubic-bezier(.32,.72,0,1))" }}>
+            {saving ? "Saving…" : msg === "saved" ? "Saved ✓" : dirty ? "Save changes" : "Saved ✓"}
           </button>
-          <button onClick={onClose} className="lms-btn lms-btn-ghost">Cancel</button>
+          {msg === "error" && <p style={{ textAlign: "center", color: "#ef4444", fontSize: 13, marginTop: 10 }}>Couldn't save — it'll retry automatically</p>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Back-compat wrapper: existing call sites pass the student shape.
+function StudentProfilePanel({ profile, authName, authEmail, onSave, onClose, darkMode, extraStats }) {
+  return (
+    <ProfilePanel role="student" profile={profile} authName={authName} authEmail={authEmail}
+      onSave={onSave} onClose={onClose} darkMode={darkMode} extraStats={extraStats} />
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANNOUNCEMENT BROADCAST (trainer)
+   Type a message; it lands in every enrolled student's notification feed
+   for this course, reaching them on whatever device they next open — the
+   same channel as enrolment approvals.
+═══════════════════════════════════════════════════════════════════ */
+export function AnnouncementComposer({ sb, courseId, courseName, notify, darkMode }) {
+  const [title, setTitle] = useState("");
+  const [body, setBody]   = useState("");
+  const [sending, setSending] = useState(false);
+  const [lastSent, setLastSent] = useState(null);
+
+  const QUICK = [
+    { icon: "📅", label: "Class rescheduled", title: "Class rescheduled" },
+    { icon: "📝", label: "Assignment due",    title: "Assignment reminder" },
+    { icon: "🎥", label: "Recording posted",  title: "Recording is up" },
+    { icon: "❗", label: "Important update",   title: "Important update" },
+  ];
+
+  const send = async () => {
+    if (!title.trim()) { notify("Add a title first", "err"); return; }
+    setSending(true);
+    try {
+      const { sent } = await sbBroadcastAnnouncement(sb, {
+        courseId, courseName, title: title.trim(), body: body.trim(),
+      });
+      if (sent === 0) {
+        notify("No enrolled students to notify yet", "warn");
+      } else {
+        notify(`Sent to ${sent} student${sent > 1 ? "s" : ""} ✓`);
+        setLastSent({ title: title.trim(), count: sent, at: Date.now() });
+        setTitle(""); setBody("");
+      }
+    } catch (e) {
+      notify(e.message, "err");
+    }
+    setSending(false);
+  };
+
+  const bg     = darkMode ? "#15151a" : "#fff";
+  const bg2    = darkMode ? "#1c1c22" : "#f5f5f7";
+  const border = darkMode ? "#2a2a32" : "#e5e5ea";
+  const ink    = darkMode ? "#f5f5f7" : "#1c1c1e";
+  const muted  = darkMode ? "#98989f" : "#8e8e93";
+  const field  = { width: "100%", padding: "13px 15px", borderRadius: 13, fontSize: 15, boxSizing: "border-box",
+                   background: bg2, border: `1px solid ${border}`, color: ink, outline: "none", fontFamily: "inherit" };
+
+  return (
+    <div style={{ background: bg, borderRadius: 20, padding: 22, marginBottom: 18, border: `1px solid ${border}`, boxShadow: "0 4px 20px rgba(0,0,0,.05)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 5 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 12, background: "linear-gradient(135deg,#8B5CF6,#6366F1)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19 }}>📣</div>
+        <div>
+          <p style={{ fontSize: 16, fontWeight: 800, color: ink, letterSpacing: "-.2px" }}>Send an announcement</p>
+          <p style={{ fontSize: 12.5, color: muted }}>Notifies everyone enrolled in {courseName || "this course"}</p>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", margin: "16px 0 14px" }}>
+        {QUICK.map(q => (
+          <button key={q.label} onClick={() => setTitle(q.title)} className="ios-press"
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 99, cursor: "pointer",
+                     background: bg2, border: `1px solid ${border}`, fontSize: 12.5, fontWeight: 600, color: ink }}>
+            <span>{q.icon}</span>{q.label}
+          </button>
+        ))}
+      </div>
+
+      <input style={{ ...field, fontWeight: 600, marginBottom: 10 }} value={title}
+        onChange={e => setTitle(e.target.value)} placeholder="Announcement title" maxLength={100} />
+      <textarea style={{ ...field, height: 88, resize: "vertical" }} value={body}
+        onChange={e => setBody(e.target.value)} placeholder="Add details (optional)…" maxLength={600} />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
+        <button onClick={send} disabled={sending || !title.trim()} className="ios-press"
+          style={{ padding: "13px 26px", borderRadius: 13, border: "none", fontSize: 15, fontWeight: 700,
+                   cursor: (sending || !title.trim()) ? "default" : "pointer",
+                   background: (sending || !title.trim()) ? bg2 : "linear-gradient(135deg,#8B5CF6,#6366F1)",
+                   color: (sending || !title.trim()) ? muted : "#fff",
+                   boxShadow: (sending || !title.trim()) ? "none" : "0 8px 22px rgba(124,58,237,.4)",
+                   transition: "all .3s var(--ios-ease,cubic-bezier(.32,.72,0,1))" }}>
+          {sending ? "Sending…" : "Send to class"}
+        </button>
+        {lastSent && (
+          <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>
+            ✓ "{lastSent.title}" sent to {lastSent.count}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -7298,7 +8544,9 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     if (h?.page && ["calendar","day","setup","settings","performance","attendance","announcements","ai-settings","dashboard"].includes(h.page)) {
       return h.page;
     }
-    return studentMode ? "calendar" : "setup";
+    // Calendar is the landing page for everyone. A course with no plan yet
+    // is redirected to Setup once the load finishes and we know it's empty.
+    return "calendar";
   });
 
   // Wrap setPage to also update the hash
@@ -7330,6 +8578,18 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   // Trainer's day_status — stored separately for read-only display to students
   const [trainerDayStatus, setTrainerDayStatus] = useState({});
   const [selDay,    setSelDayRaw]  = useState(null);
+
+  /* A stale "#day" hash from a previous session points at a day that no
+     longer resolves, and because every render branch is guarded the page
+     came up blank until you clicked Calendar. Once the plan has loaded and
+     there is still no selected day, fall back. */
+  useEffect(() => {
+    if (page !== "day" || selDay) return;
+    if (!planDays.length) return;          // plan still loading — wait
+    setPageRaw("calendar");
+    try { setHashPage("calendar"); } catch {}
+  }, [page, selDay, planDays.length]);
+
   // Wrap setSelDay to update URL hash when navigating to a day
   const setSelDay = (day) => {
     setSelDayRaw(day);
@@ -7362,6 +8622,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   // "saving" | "saved" | "queued" | "error" — surfaced in the header.
   const [saveState, setSaveState] = useState({ status: "idle", at: null });
   const [queuedWrites, setQueuedWrites] = useState(0);
+  // Live status from the learning-map agents.
+  const [lmProgress, setLmProgress] = useState(null);
+  // The name of the course currently open — shown once, in the sidebar.
+  const [courseName, setCourseName] = useState("");
+  // Live status from the formula-sheet agents.
+  const [fsProgress, setFsProgress] = useState(null);
 
   // One line that updates in place while the retry engine works, instead of
   // a toast per internal step.
@@ -7407,18 +8673,26 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   const [darkMode, setDarkMode] = useState(false);
 
   // ── Student profile (name + photo) — stored in sessionStorage ──
-  const [studentProfile, setStudentProfile] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem('lms_student_profile');
-      return saved ? JSON.parse(saved) : { displayName: '', photoUrl: '' };
-    } catch { return { displayName: '', photoUrl: '' }; }
-  });
+  // Seeded from the local mirror so it paints instantly; refreshed from
+  // Supabase on mount. Persisted durably on save.
+  const [studentProfile, setStudentProfile] = useState(() =>
+    (studentId && profileMirrorRead("student", studentId)) || { displayName: "", photoUrl: "" });
   const [profileOpen, setProfileOpen] = useState(false);
 
-  const saveStudentProfile = (updates) => {
+  useEffect(() => {
+    if (!studentMode || !studentId) return;
+    let alive = true;
+    sbGetProfile(sb, "student", studentId).then(p => { if (alive && p) setStudentProfile(prev => ({ ...prev, ...p })); }).catch(() => {});
+    return () => { alive = false; };
+  }, [sb, studentId, studentMode]);
+
+  const saveStudentProfile = async (updates) => {
     const next = { ...studentProfile, ...updates };
     setStudentProfile(next);
-    try { sessionStorage.setItem('lms_student_profile', JSON.stringify(next)); } catch {}
+    if (studentId) {
+      const res = await sbSaveProfile(sb, "student", studentId, next);
+      if (res && !res.ok && !res.queued) throw (res.error || new Error("Save failed"));
+    }
   };
 
   // FIX #12: Scope AI prefs to the auth session (user-level), not per-course
@@ -7428,9 +8702,21 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   /* ════ INIT from Supabase ════ */
   useEffect(() => {
-    // Load AI prefs from sessionStorage (no sensitive data in Supabase)
+    /* AI prefs live in localStorage so they survive closing the browser.
+       They were in sessionStorage, which is wiped on exit — that is why the
+       key had to be typed in again every session, while the student-side key
+       (already on localStorage) persisted fine. Anything still sitting in
+       sessionStorage is migrated across once, then removed. */
     try {
-      const prefs = JSON.parse(sessionStorage.getItem(AI_PREFS_KEY) || "{}");
+      let prefs = JSON.parse(localStorage.getItem(AI_PREFS_KEY) || "{}");
+      const legacy = JSON.parse(sessionStorage.getItem(AI_PREFS_KEY) || "{}");
+      if (legacy && Object.keys(legacy).length) {
+        prefs = { ...legacy, ...prefs };          // anything already migrated wins
+        try {
+          localStorage.setItem(AI_PREFS_KEY, JSON.stringify(prefs));
+          sessionStorage.removeItem(AI_PREFS_KEY);
+        } catch {}
+      }
       if (prefs.groqKey)     setGroqKey(prefs.groqKey);
       if (prefs.aiProvider)  setAiProvider(prefs.aiProvider);
       if (prefs.groqModel)   setGroqModel(prefs.groqModel);
@@ -7469,6 +8755,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     const loadCourse = async () => {
       const course = await sbGetCourseData(sb, courseId);
       if (!course || cancelled) return false;
+      if (course.name) setCourseName(course.name);
       if (course.planText)  setPlanText(typeof course.planText === "string" ? course.planText : String(course.planText ?? ""));
 
       // FIX #4: Load AI content from lms_day_content table (not day_data JSONB)
@@ -7501,6 +8788,8 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         setPageRaw(prev => (prev === "setup" && !studentMode) ? "calendar" : prev);
       } else {
         setPlanDays([]);
+        // Genuinely empty course — send the trainer to Setup to build one.
+        if (!studentMode) setPageRaw(prev => prev === "calendar" ? "setup" : prev);
       }
       if (startDateToUse) setStartDate(startDateToUse);
       if (course.monfri !== undefined) setMonfri(course.monfri);
@@ -7768,10 +9057,44 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     };
   }, [studentMode, sb, courseId]);
 
-  /* ════ Persist AI prefs to sessionStorage ════ */
+  /* ════ Persist AI prefs — localStorage, so they outlive the browser ════ */
   useEffect(() => {
-    try { sessionStorage.setItem(AI_PREFS_KEY, JSON.stringify({ groqKey, aiProvider, groqModel, ollamaUrl, ollamaModel })); } catch {}
+    try { localStorage.setItem(AI_PREFS_KEY, JSON.stringify({ groqKey, aiProvider, groqModel, ollamaUrl, ollamaModel })); } catch {}
   }, [groqKey, aiProvider, groqModel, ollamaUrl, ollamaModel]);
+
+  /* ════ One key list, not two ════
+     A key typed into the single field is folded into the saved pool, so
+     "the key" and "the rotation list" are the same thing and adding a key
+     anywhere means it is kept. */
+  useEffect(() => {
+    const k = (groqKey || "").trim();
+    if (!k || studentMode) return;
+    const pool = aiLoadKeys();
+    if (pool.some(p => p.key === k)) return;
+    aiSaveKeys([...pool, { id: `k_${Date.now()}_${k.slice(-6)}`, key: k, label: `Key ${pool.length + 1}` }]);
+  }, [groqKey, studentMode]);
+
+  /* ════ The key any feature should use ════
+     Features used to read the single field directly, so once that field was
+     empty they reported "add a Groq API key" even with a full pool saved.
+     They now get the first usable key from the pool. */
+  const [keyPoolVersion, setKeyPoolVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setKeyPoolVersion(v => v + 1);
+    window.addEventListener("lms-ai-keys-changed", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("lms-ai-keys-changed", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
+
+  const effectiveGroqKey = useMemo(
+    () => (groqKey || "").trim() || (aiLoadKeys()[0]?.key || ""),
+    // keyPoolVersion re-reads the pool when keys are added or removed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [groqKey, keyPoolVersion]
+  );
 
   // Persist student's own key to localStorage (survives page refresh)
   useEffect(() => {
@@ -7880,7 +9203,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, ...light } = v;
           lightDayData[k] = light;
         }
 
@@ -7909,7 +9232,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, ...light } = v;
           lightDayData[k] = light;
         }
         sbQueuePush({
@@ -8090,7 +9413,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -8522,201 +9845,36 @@ HARD REQUIREMENTS:
     setBusyKey(busyKey, true);
     setPendingGen(p => ({ ...p, [busyKey]: { type: "formulaSheet", topic: day.topic, startedAt: Date.now() } }));
     try {
-      const subTopics = (dayData[k]?.subTopics || "").trim();
-      const subTopicList = subTopics
-        ? subTopics.split("\n").map(s => s.trim()).filter(Boolean)
-        : [];
-      const subTopicsSection = subTopicList.length > 0
-        ? `\n\nSub-topics to cover in full mathematical depth:\n${subTopicList.map((s, i) => `${i + 1}. ${s}`).join("\n")}\n`
-        : "";
+      const d = dayData[k] || {};
+      const clip = (s, n) => (typeof s === "string" ? s.slice(0, n) : "");
+      const sources = [
+        d.notebook   && `---NOTEBOOK---\n${clip(d.notebook, 5000)}`,
+        d.examples   && `---WORKED EXAMPLES---\n${clip(d.examples, 2200)}`,
+        d.subTopics  && `---SUB-TOPICS---\n${clip(d.subTopics, 900)}`,
+        d.assignment && `---ASSIGNMENT---\n${clip(d.assignment, 1200)}`,
+        Array.isArray(d.quiz) && d.quiz.length
+          ? `---QUIZ ASKS ABOUT---\n${d.quiz.slice(0, 10).map(q => q?.q).filter(Boolean).join("\n")}`
+          : "",
+      ].filter(Boolean).join("\n\n");
 
-      const text = await callAI([
-        { role:"system", content:`You are a world-class mathematics educator and data science professor who explains every concept with COMPLETE mathematical rigour, worked examples, diagrams (using ASCII/Unicode art), step-by-step derivations, intuitive explanations, and visual flows. Your explanations are simultaneously mathematically precise AND beginner-friendly. You NEVER skip steps. You ALWAYS show the full calculation on a concrete example, then generalise. You use tables, arrows, boxes, and structured layouts to make abstract maths visible.` },
-        { role:"user", content:`Create a COMPLETE Mathematical Formula Sheet & Visual Explainer for: "${day.topic}".${subTopicsSection}
+      // Falls back to the topic alone when nothing else exists yet, so the
+      // sheet can still be the first thing a trainer generates.
+      const material = sources.trim() || `(No notebook yet — work from the lesson title alone: "${day.topic}")`;
 
-Your output must be the most thorough, visually rich mathematical explanation possible — treat this like a university lecture notes document combined with a visual textbook. Follow EVERY instruction below exactly.
+      const result = await runFormulaSheetAgents({
+        topic: day.topic,
+        sources: material,
+        callAI,
+        onProgress: (p) => setFsProgress({ ...p, dayKey: k }),
+      });
 
----
-
-## 🎯 SECTION 1: TOPIC OVERVIEW & MATHEMATICAL INTUITION
-Write 3 paragraphs:
-1. What problem does this topic solve? What real-world scenario motivates it? Give a CONCRETE example with real numbers.
-2. The core mathematical idea — explain the intuition BEFORE any formula. Use an analogy. 
-3. How ALL the sub-topics relate to each other — draw this as an ASCII hierarchy or flow.
-
----
-
-## 🔢 SECTION 2: COMPLETE FORMULA REFERENCE
-For EVERY formula related to the topic and each sub-topic:
-
-### Formula Name
-**Formula:**  
-\`\`\`
-[Write the full mathematical formula using proper notation — e.g. TF(t,d) = f(t,d) / Σ f(t',d)]
-\`\`\`
-
-**What each symbol means:**
-| Symbol | Meaning | Example value |
-|--------|---------|---------------|
-| [sym1] | [plain English meaning] | [concrete number] |
-| [sym2] | [plain English meaning] | [concrete number] |
-
-**Intuition:** [ONE sentence — what is this formula actually measuring or doing?]
-
-**When to use it:** [describe the scenario]
-
-**Step-by-step worked example:**
-Given: [concrete input — real words, real numbers, real data]
-Step 1: [calculation]
-Step 2: [calculation]  
-Step 3: [calculation]
-Result: [final answer with units/interpretation]
-
----
-
-## 📊 SECTION 3: END-TO-END WORKED EXAMPLE WITH REAL DATA
-Choose ONE concrete, realistic mini-dataset and walk through EVERY formula on it. Use real English sentences (not placeholders).
-
-Example format for NLP: Use sentences like "the cat sat on the mat" and "the cat is fat".
-Example format for Neural Networks: Use input [0.5, 0.8] with real weights.
-
-**The Data:**
-[Show the raw input clearly — sentences, numbers, vectors, whatever is appropriate]
-
-**Step 1: [Sub-topic 1 name]**
-[Perform the full calculation on the real data. Show every arithmetic step. Use a table for the result.]
-
-| [col1] | [col2] | [col3] |
-|--------|--------|--------|
-| [val]  | [val]  | [val]  |
-
-**Step 2: [Sub-topic 2 name]**
-[Continue the calculation, referencing values from Step 1. Show every step.]
-
-[Continue for ALL sub-topics in sequence — never skip a sub-topic]
-
-**Final Result & Interpretation:**
-[What do the numbers mean? What decision would we make based on them?]
-
----
-
-## 🔄 SECTION 4: VISUAL FLOWS & ARCHITECTURE DIAGRAMS
-For each sub-topic, draw the computation as an ASCII diagram showing the flow:
-
-\`\`\`
-[Example for BoW:]
-Raw Text → Tokenise → Vocabulary → Count Matrix → Bag of Words Vector
-  "the cat"    [the,cat]  [cat,is,    [[2,1,0,1],   [2,1,0,1]
-  "cat is big"            big,the]     [1,1,1,0]]
-
-[Example for Neural Network:]
-Input Layer        Hidden Layer       Output Layer
-  x₁ = 0.5  ──w₁₁=0.8──→  h₁ = σ(0.5×0.8 + 0.3×0.6) = σ(0.58) = 0.641
-  x₂ = 0.3  ──w₂₁=0.6──↗  
-             ──w₁₂=0.4──→  h₂ = σ(...)
-             ──w₂₂=0.9──↗                              ŷ = σ(...)
-\`\`\`
-
-Draw a separate diagram for EACH sub-topic showing:
-- The mathematical transformation at each step  
-- Actual computed values from Section 3
-- The direction of data flow with arrows
-
----
-
-## 📐 SECTION 5: MATHEMATICAL DERIVATIONS (Show the Math Behind the Formula)
-For each major formula:
-1. Start from FIRST PRINCIPLES — why does this formula make sense?
-2. Show the algebraic derivation step by step
-3. Explain the intuition of each step in plain English
-4. Show what happens at edge cases (zero division, infinity, etc.)
-
----
-
-## 🧮 SECTION 6: NUMERICAL SENSITIVITY ANALYSIS
-Pick 2–3 key formulas. Show what happens to the output when you:
-- Increase one input variable while holding others constant (with a mini-table)
-- Change the scale of the data
-- Hit boundary conditions
-
-\`\`\`
-Effect of vocabulary size on BoW sparsity:
-Vocab size │ Sentence length │ Non-zero % │ Memory impact
-     10    │       5         │    50%     │ low
-    100    │       5         │     5%     │ medium  
-  10,000   │       5         │   0.05%   │ high (sparse)
-\`\`\`
-
----
-
-## 📈 SECTION 7: GRAPHS & PLOTS (described with ASCII art)
-For each sub-topic, draw or describe:
-- The shape of the mathematical function (sigmoid curve, convergence curve, etc.)
-- A convergence/loss plot for iterative methods
-- A 2D scatter plot if relevant
-- Before/after transformation plots
-
-\`\`\`
-[Example loss curve:]
-Loss
- 1.0 │╲
- 0.8 │ ╲
- 0.6 │  ╲
- 0.4 │   ╲___
- 0.2 │       ─────────────  ← convergence
- 0.0 └──────────────────────────────── Epochs
-      0  5  10  15  20  25  30
-\`\`\`
-
----
-
-## 🔗 SECTION 8: FORMULA COMPARISON TABLE
-Create a master comparison table showing ALL formulas side by side:
-
-| Formula | What it computes | Input | Output | Range | When to prefer |
-|---------|-----------------|-------|--------|-------|---------------|
-| [name]  | [description]   | [type]| [type] | [e.g. 0–1] | [scenario] |
-
----
-
-## ⚡ SECTION 9: QUICK REFERENCE CHEAT SHEET
-A scannable one-page summary:
-
-**[Sub-topic 1]**
-• Formula: \`[compact formula]\`
-• Input: [type] → Output: [type]  
-• Key insight: [one sentence]
-• Watch out for: [one gotcha]
-
-[Repeat for every sub-topic]
-
----
-
-## 🧠 SECTION 10: MATHEMATICAL INTUITION BUILDER
-For each formula, answer:
-1. **"Why this formula and not something simpler?"** — what property does this formula have that makes it the right choice?
-2. **"What does a high/low value mean?"** — interpret the output in plain English
-3. **"What real decision does this enable?"** — how does a human/system act on this number?
-
----
-
-HARD REQUIREMENTS — violating any is an error:
-- Every formula MUST have a complete worked example with REAL NUMBERS (not placeholders like "x₁")  
-- Every sub-topic listed must have: its own formula(s), its own worked example, its own ASCII diagram
-- Section 3 must use ONE CONSISTENT dataset throughout — the same input flows through ALL sub-topic calculations
-- All formulas must use proper mathematical notation with superscripts/subscripts using Unicode (₁ ₂ ₃ ⁻¹ etc.)
-- Tables must be properly formatted markdown
-- ASCII diagrams must be inside fenced code blocks
-- Never truncate or abbreviate — complete every section fully
-- If the topic is a neural network: show forward pass with actual numbers, backpropagation chain rule steps, gradient descent update, loss function calculation, and a convergence plot
-- If the topic is NLP/text vectorisation: use 2–3 real English sentences throughout, show the complete vocabulary, the full matrix, and all derived scores` }
-      ]);
-      updateDay(k, { formulaSheet: text, generatedForTopic: day.topic });
-      if (!opts.silent) notify("✅ Formula Sheet generated!");
+      updateDay(k, { formulaSheet: result.markdown, generatedForTopic: day.topic });
+      if (!opts.silent) notify(`Reference sheet ready — ${result.sections.length} sections ✓`);
     } catch(e) {
-      if (!opts.silent) notify(`Formula Sheet: ${e.message}`, "err");
+      if (!opts.silent) notify(`Formula sheet: ${e.message}`, "err");
       else throw e;
     } finally {
+      setFsProgress(null);
       setBusyKey(busyKey, false);
       setPendingGen(p => { const n={...p}; delete n[busyKey]; return n; });
     }
@@ -8896,6 +10054,99 @@ Hard rules:
     }
   };
 
+  /* ═══════════════════════════════════════════════════════════════
+     LEARNING MAP
+     Reads everything already generated for the day and reorganises it
+     into a teachable tree: each node carries a plain-language
+     explanation, a worked example, the step-by-step, and a note on how
+     to teach it. Built for someone standing in front of a class who has
+     not taught this topic before.
+  ═══════════════════════════════════════════════════════════════ */
+  const genLearningMap = async (day, opts = {}) => {
+    const k = day.key;
+    const busyKey = `lm-${k}`;
+    setBusyKey(busyKey, true);
+    setPendingGen(p => ({ ...p, [busyKey]: { type: "learningMap", topic: day.topic, startedAt: Date.now() } }));
+    try {
+      const d = dayData[k] || {};
+      const clip = (s, n) => (typeof s === "string" ? s.slice(0, n) : "");
+      const sources = [
+        d.notebook      && `---NOTEBOOK---\n${clip(d.notebook, 5000)}`,
+        d.examples      && `---WORKED EXAMPLES---\n${clip(d.examples, 2200)}`,
+        d.formulaSheet  && `---FORMULAS---\n${clip(d.formulaSheet, 1400)}`,
+        d.assignment    && `---ASSIGNMENT---\n${clip(d.assignment, 1400)}`,
+        d.teachingGuide && `---TEACHING GUIDE---\n${clip(d.teachingGuide, 2000)}`,
+        d.subTopics     && `---SUB-TOPICS---\n${clip(d.subTopics, 900)}`,
+        Array.isArray(d.quiz) && d.quiz.length
+          ? `---QUIZ ASKS ABOUT---\n${d.quiz.slice(0, 10).map(q => q?.q).filter(Boolean).join("\n")}`
+          : "",
+      ].filter(Boolean).join("\n\n");
+
+      if (!sources.trim()) {
+        throw new Error("Generate the notebook first — the map is built from the day's content, not invented from the title.");
+      }
+
+      const map = await runLearningMapAgents({
+        topic: day.topic,
+        sources,
+        callAI,
+        onProgress: (p) => setLmProgress({ ...p, dayKey: k }),
+      });
+
+      updateDay(k, { learningMap: map, generatedForTopic: day.topic });
+      if (!opts.silent) {
+        notify(`Learning map ready — ${map.children.length} branches, ${lmCountNodes(map.children)} nodes ✓`);
+      }
+    } catch (e) {
+      if (!opts.silent) notify(`Learning map: ${e.message}`, "err");
+      else throw e;
+    } finally {
+      setLmProgress(null);
+      setBusyKey(busyKey, false);
+      setPendingGen(p => { const n = { ...p }; delete n[busyKey]; return n; });
+    }
+  };
+
+  /* A trainer types a node name; everything under it is written for them —
+     explanation, example, formula where relevant, and its own sub-nodes. */
+  const expandMapNode = useCallback(async (day, title, parentTitle) => {
+    const d = dayData[day.key] || {};
+    const ctx = d.notebook ? `\n\nDay material for context:\n${d.notebook.slice(0, 2500)}` : "";
+    const text = await callAI([
+      { role: "system", content:
+        "You write one node of a teaching map. Return ONLY valid JSON, no fences. " +
+        "Plain language for a complete beginner; define any term you use." },
+      { role: "user", content:
+`Write the teaching-map node for "${title}"${parentTitle ? `, which sits under "${parentTitle}"` : ""}, in the context of the lesson "${day.topic}".${ctx}
+
+Return exactly:
+{
+  "title": "${title}",
+  "kind": "concept" | "step" | "formula" | "example" | "pitfall" | "practice",
+  "summary": "one line under 90 characters",
+  "whyItMatters": "1-2 sentences on what this unlocks",
+  "explain": "4-6 short sentences, assume no prior knowledge, define every term as you use it",
+  "keyTerms": [{"term":"word","definition":"one plain sentence"}],
+  "board": "what to draw or write on the whiteboard, plain text, under 12 lines",
+  "steps": ["3-6 complete instructions"],
+  "example": "a fully worked example: input values, the working, the result",
+  "formula": "the formula with each symbol named, or empty string",
+  "analogy": "everyday comparison, or empty string",
+  "teachTip": "a short script: what to say, what to show, in order",
+  "askClass": "a question to put to the room, with the answer you are listening for",
+  "misconception": "the usual beginner mistake and its correction",
+  "timeMin": 5,
+  "children": [ 2 to 4 sub-nodes in this same shape, each with children: [] ]
+}
+
+If "${title}" is a formula or calculation, the formula and board fields must both be filled in. Output JSON only.` },
+    ], { maxTokens: 3000, temperature: 0.3 });
+
+    const node = parseLearningMap(text, true);
+    if (!node) throw new Error("Couldn't build that node — try a more specific name.");
+    return node;
+  }, [dayData, callAI]);
+
   const genAllForDay = async (day) => {
     // Sequential (not parallel) to avoid hammering rate limits.
     // Each step uses withRLResilience: 429 → pause 5s; 2×429 → auto-switch model.
@@ -8907,6 +10158,8 @@ Hard rules:
       { label: "Assignment",     fn: () => genAssignment(day,    { silent: true }) },
       { label: "Formula Sheet",  fn: () => genFormulaSheet(day,  { silent: true }) },
       { label: "Quiz",           fn: () => genQuiz(day,          { silent: true }) },
+      // Runs after Quiz: the map is assembled from everything above it.
+      { label: "Learning Map",   fn: () => genLearningMap(day,   { silent: true }) },
       { label: "Teaching Guide", fn: () => genTeachingGuide(day, { silent: true }) },
     ];
     notify(`Generating all content for Day ${day.dayNum} (sequential, rate-limit-safe)…`);
@@ -8920,7 +10173,7 @@ Hard rules:
         //   - 429 → 5s pause then retry
         //   - 2 × 429 in a row → auto-rotate model, then retry
         await withRLResilience(fn, { notifyFn: notify });
-        notify(`Day ${day.dayNum} [${i+1}/7]: ${label} ✓`);
+        notify(`Day ${day.dayNum} [${i+1}/${steps.length}]: ${label} ✓`);
       } catch (e) {
         // Only truly fatal errors (bad key, no internet) land here
         failed.push(`${label}: ${e.message}`);
@@ -9792,10 +11045,24 @@ Hard rules:
         {/* ── SIDEBAR ── */}
         <aside className={`lms-sidebar${mobileMenuOpen?" open":""}`} style={{ width:collapsed?58:210, flexShrink:0, background: darkMode ? "#111827" : "linear-gradient(180deg,#EDF1F7 0%,#E4E9F2 100%)", borderRight:`1.5px solid ${darkMode ? "#1f2937" : "#C4CDD9"}`, display:"flex", flexDirection:"column", transition:"width .2s", overflow:"hidden" }}>
           <div style={{ padding:"18px 12px 14px", display:"flex", alignItems:"center", gap:9, borderBottom:`1px solid ${darkMode ? "#1f2937" : "#C4CDD9"}` }}>
-            <div style={{ width:34, height:34, background:"linear-gradient(135deg,#8B5CF6,#6366F1,#14B8A6)", borderRadius:11, boxShadow:"0 4px 14px rgba(99,102,241,.4),inset 0 1px 0 rgba(255,255,255,.25)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-              <Ic n="brain" s={17} c="#fff" />
+            <div title={onBack ? "Back to your courses" : undefined} onClick={onBack || undefined} style={{ cursor: onBack ? "pointer" : "default", width:34, height:34, background:"linear-gradient(135deg,#8B5CF6,#6366F1,#14B8A6)", borderRadius:11, boxShadow:"0 4px 14px rgba(99,102,241,.4),inset 0 1px 0 rgba(255,255,255,.25)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M12 8.5 V12 M12 12 H6 V15.2 M12 12 H18 V15.2"
+                  stroke="rgba(255,255,255,.92)" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+                <circle cx="12" cy="5.6" r="3" fill="#fff"/>
+                <circle cx="6"  cy="18" r="2.4" fill="rgba(255,255,255,.9)"/>
+                <circle cx="18" cy="18" r="2.4" fill="rgba(255,255,255,.62)"/>
+              </svg>
             </div>
-            {!collapsed && <span style={{ fontWeight:800, fontSize:15, background:"linear-gradient(135deg,#8B5CF6,#6366F1)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", letterSpacing:"-.4px", whiteSpace:"nowrap", letterSpacing:"-.3px" }}>AI With ARBAJ</span>}
+            {!collapsed && (
+              <div style={{ minWidth:0 }}>
+                <div style={{ fontSize:9.5, fontWeight:800, letterSpacing:".13em", textTransform:"uppercase", color: darkMode ? "#4b5563" : "#94a3b8", whiteSpace:"nowrap" }}>Course</div>
+                <div style={{ fontWeight:750, fontSize:14, color: darkMode ? "#e5e7eb" : "#1e293b", letterSpacing:"-.2px", lineHeight:1.25, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1 }}
+                  title={courseName || "Untitled course"}>
+                  {courseName || "Loading…"}
+                </div>
+              </div>
+            )}
           </div>
           <nav style={{ flex:1, padding:"10px 6px", overflowY:"auto", display:"flex", flexDirection:"column", gap:2 }}>
             {[
@@ -9892,9 +11159,15 @@ Hard rules:
           <StudentProfilePanel
             profile={studentProfile}
             authName={auth?.name || ""}
+            authEmail={auth?.email || ""}
             onSave={saveStudentProfile}
             onClose={() => setProfileOpen(false)}
             darkMode={darkMode}
+            extraStats={[
+              { value: enrolledCourses.length, label: "Courses" },
+              { value: Object.values(studentActivity?.quizScores || {}).length, label: "Quizzes" },
+              { value: `${Math.round((Object.values(dayStatus||{}).filter(v=>v==="done").length / Math.max(1,planDays.length)) * 100)}%`, label: "Progress" },
+            ]}
           />
         )}
 
@@ -9909,7 +11182,6 @@ Hard rules:
             <button className="lms-btn lms-btn-ghost lms-mobile-menu-btn" style={{ padding:"6px 8px" }} onClick={()=>setMobileMenuOpen(p=>!p)}><Ic n="menu" s={16}/></button>
             <button className="lms-btn lms-btn-ghost lms-desktop-collapse-btn" style={{ padding:"6px 8px" }} onClick={()=>setCollapsed(p=>!p)}><Ic n="menu" s={16}/></button>
             <div style={{ flex:1, fontSize:13, color: darkMode ? "#94a3b8" : "#94a3b8", overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>
-              <span style={{ color: darkMode ? "#64748b" : "#475569" }}>AI With ARBAJ</span>{" › "}
               <span style={{ color: darkMode ? "#f1f5f9" : "#0f172a", fontWeight:600 }}>
                 {leaderboardOpen?"🏆 Leaderboard":page==="setup"?"Setup Plan":page==="calendar"?"Learning Calendar":page==="settings"?"Settings":page==="performance"?"👥 Student Performance":page==="attendance"?"📋 Attendance":page==="announcements"?"📢 Announcements":page==="ai-settings"?"🤖 AI Settings":page==="dashboard"?"📊 My Dashboard":selDay?`Day ${selDay.dayNum}: ${selDay.topic}`:""}
               </span>
@@ -9946,12 +11218,12 @@ Hard rules:
           <main style={{ flex:1, overflowY:"auto", padding:"24px 24px 80px", minHeight:0, background: darkMode ? "#0d1117" : "#EDF1F7" }}>
             <ErrorBoundary>
               {!leaderboardOpen && page==="dashboard" && studentMode && <StudentDashboard planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} trainerDayStatus={trainerDayStatus} studentActivity={studentActivity} dayData={dayData} startDate={startDate} courseId={courseId} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} enrolledCourses={enrolledCourses} pendingCourses={pendingCourses} sb={sb} studentId={studentId} groqKey={studentGroqKey} groqModel={studentGroqModel} notify={notify} />}
-              {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} groqKey={groqKey} groqModel={groqModel} dayMap={dayMap} genNotebook={genNotebook} genExamples={genExamples} genResources={genResources} genAssignment={genAssignment} genQuiz={genQuiz} genTeachingGuide={genTeachingGuide} darkMode={darkMode} />}
+              {!leaderboardOpen && page==="setup" && !studentMode && <SetupPage planText={planText} setPlanText={setPlanText} startDate={startDate} setStartDate={setStartDate} monfri={monfri} setMonfri={setMonfri} planDays={planDays} onParse={handleParsePlan} notify={notify} callAI={callAI} groqKey={effectiveGroqKey} groqModel={groqModel} dayMap={dayMap} genNotebook={genNotebook} genExamples={genExamples} genResources={genResources} genAssignment={genAssignment} genQuiz={genQuiz} genTeachingGuide={genTeachingGuide} darkMode={darkMode} />}
               {/* ── AGENT 3: AI Schedule Optimizer (Setup page) ── */}
               {!leaderboardOpen && page==="setup" && !studentMode && (
                 <AIScheduleOptimizer
                   planText={typeof planText === "string" ? planText : String(planText ?? "")}
-                  groqKey={groqKey}
+                  groqKey={effectiveGroqKey}
                   groqModel={groqModel}
                   onOptimized={(optimized) => {
                     // Guard: agent may return object/null — always set a string
@@ -9989,10 +11261,10 @@ Hard rules:
                   </div>
                 </div>
               )}
-              {!leaderboardOpen && page==="calendar" && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} darkMode={darkMode} onGenWeek={async(days,onProgress)=>{
+              {!leaderboardOpen && (page==="calendar" || (page==="day" && !selDay)) && <CalendarPage planDays={planDays} dayMap={dayMap} dayStatus={dayStatus} setDayStatus={setDayStatus} trainerDayStatus={trainerDayStatus} calYear={calYear} setCalYear={setCalYear} calMonth={calMonth} setCalMonth={setCalMonth} onSelectDay={d=>{ setSelDay(d); setPage("day"); }} notify={notify} busy={busy} dayData={dayData} studentMode={studentMode} dayOverrides={dayOverrides} setDayOverrides={setDayOverrides} onDeleteDay={!studentMode ? deleteDayAndShift : null} darkMode={darkMode} onGenWeek={async(days,onProgress)=>{
                 // Sequential, rate-limit-resilient week generation.
                 // 429 → pause 5s; 2×429 same model → auto-switch model; never aborts mid-batch.
-                const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genTeachingGuide,label:"Teaching Guide"}];
+                const gens=[{fn:genNotebook,label:"Notebook"},{fn:genExamples,label:"Examples"},{fn:genResources,label:"Resources"},{fn:genAssignment,label:"Assignment"},{fn:genQuiz,label:"Quiz"},{fn:genLearningMap,label:"Learning Map"},{fn:genTeachingGuide,label:"Teaching Guide"}];
                 let done=0; const total=days.length*gens.length; const failed=[];
                 // Reset RL state at the start of the week batch
                 _rlState.consecutiveRLs = 0;
@@ -10050,15 +11322,19 @@ Hard rules:
                   onGenResources={()=>genResources(selDay)}
                   onGenAssignment={()=>genAssignment(selDay)}
                   onGenFormulaSheet={()=>genFormulaSheet(selDay)}
+                  fsProgress={fsProgress}
                   onGenTeachingGuide={()=>genTeachingGuide(selDay)}
                   onGenQuiz={()=>genQuiz(selDay)}
+                  onGenLearningMap={()=>genLearningMap(selDay)}
+                  lmProgress={lmProgress}
+                  onExpandMapNode={expandMapNode}
                   onGenAll={()=>genAllForDay(selDay)}
                   onFileUpload={files=>handleFileUpload(selDay.key,files)}
                   onDeleteFile={id=>deleteUploadedFile(selDay.key,id)}
                   updateDay={updateDay} notify={notify}
                   pyodideReady={pyodideReady} pyodideLoading={pyodideLoading} onLoadPyodide={initPyodide}
                   studentMode={studentMode}
-                  groqKey={groqKey} groqModel={groqModel}
+                  groqKey={effectiveGroqKey} groqModel={groqModel}
                   studentGroqKey={studentGroqKey} studentGroqModel={studentGroqModel}
                   sb={sb} courseId={courseId} trainerId={trainerId} studentId={studentId}
                   trackActivity={studentMode ? trackActivity : null}
@@ -10120,7 +11396,7 @@ Hard rules:
                   courseId={courseId}
                   planDays={planDays}
                   dayMap={dayMap}
-                  groqKey={groqKey}
+                  groqKey={effectiveGroqKey}
                   groqModel={groqModel}
                   notify={notify}
                   darkMode={darkMode}
@@ -10134,7 +11410,7 @@ Hard rules:
                   planDays={planDays}
                   dayMap={dayMap}
                   dayData={dayData}
-                  groqKey={groqKey}
+                  groqKey={effectiveGroqKey}
                   groqModel={groqModel}
                   genNotebook={genNotebook}
                   genQuiz={genQuiz}
@@ -10166,13 +11442,22 @@ Hard rules:
               )}
               {/* ── AGENT 5: Automated Announcements (dedicated page) ── */}
               {!leaderboardOpen && page==="announcements" && !studentMode && courseId && (
+                <AnnouncementComposer
+                  sb={sb}
+                  courseId={courseId}
+                  courseName={courseName}
+                  notify={notify}
+                  darkMode={darkMode}
+                />
+              )}
+              {!leaderboardOpen && page==="announcements" && !studentMode && courseId && (
                 <AutomatedAnnouncementsAgent
                   sb={sb}
                   courseId={courseId}
                   trainerId={trainerId}
                   planDays={planDays}
                   dayMap={dayMap}
-                  groqKey={groqKey}
+                  groqKey={effectiveGroqKey}
                   groqModel={groqModel}
                   notify={notify}
                   darkMode={darkMode}
@@ -12443,7 +13728,7 @@ function DataGeneratorTab({ day, dayData, groqKey, groqModel, notify, updateDay,
 /* ═══════════════════════════════════════════════════════════════════
    FORMULA SHEET TAB  — Mathematical Formula & Visual Explainer
 ═══════════════════════════════════════════════════════════════════ */
-function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId }) {
+function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, notify, studentMode, trackActivity, sb, courseId, studentId, fsProgress }) {
   const k = day.key;
   const content = dayData?.formulaSheet;
   const [copied, setCopied] = useState(false);
@@ -12632,8 +13917,50 @@ function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, not
     });
   };
 
+  // Which agent is working, shown while the sheet is being built.
+  const agentStrip = (busy[`fm-${k}`] || fsProgress) && (
+    <div style={{
+      background:"linear-gradient(135deg,#1e1b3a,#161233)", border:"1px solid #352f5c",
+      borderRadius:14, padding:"14px 17px", marginBottom:16,
+    }}>
+      <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:11, flexWrap:"wrap" }}>
+        <span style={{ width:13, height:13, border:"2px solid rgba(167,139,250,.3)", borderTopColor:"#a78bfa",
+                       borderRadius:"50%", display:"inline-block", animation:"lms-spin .7s linear infinite" }} />
+        <span style={{ fontSize:13, fontWeight:800, color:"#ddd4ff" }}>Building the reference sheet</span>
+        {fsProgress?.total > 0 && (
+          <span style={{ marginLeft:"auto", fontSize:11.5, color:"#a79fc4" }}>
+            section {Math.min(fsProgress.done + 1, fsProgress.total)} of {fsProgress.total}
+          </span>
+        )}
+      </div>
+      <div style={{ display:"flex", gap:7, flexWrap:"wrap", marginBottom:10 }}>
+        {FS_AGENTS.map(a => {
+          const active = fsProgress?.agent?.id === a.id;
+          const passed = fsProgress && FS_AGENTS.findIndex(x => x.id === fsProgress.agent?.id) > FS_AGENTS.findIndex(x => x.id === a.id);
+          return (
+            <div key={a.id} style={{
+              display:"flex", alignItems:"center", gap:6, padding:"6px 11px", borderRadius:99,
+              background: active ? "linear-gradient(135deg,rgba(139,92,246,.35),rgba(109,40,217,.25))" : "rgba(255,255,255,.05)",
+              border:`1px solid ${active ? "#a78bfa" : "rgba(255,255,255,.09)"}`,
+              boxShadow: active ? "0 0 22px rgba(139,92,246,.4)" : "none",
+              opacity: passed ? .55 : 1, transition:"all .3s",
+            }}>
+              <span style={{ fontSize:13, lineHeight:1, color: passed ? "#4ade80" : undefined }}>{passed ? "✓" : a.icon}</span>
+              <span style={{ fontSize:11.8, fontWeight:700, color: active ? "#fff" : "#cfc6ec" }}>{a.name}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p style={{ fontSize:12.3, color:"#b3a9d4", fontStyle:"italic", lineHeight:1.55 }}>
+        {fsProgress?.detail || "Starting up…"}
+      </p>
+    </div>
+  );
+
   return (
     <div style={{ animation:"lms-in .2s ease" }}>
+
+      {agentStrip}
 
       {/* ── Header banner ── */}
       <div style={{
@@ -12952,7 +14279,1083 @@ function FormulaSheetTab({ day, dayData, busy, onGenFormulaSheet, updateDay, not
 
 /* ─────────────────────────────────────────────────────────────────── */
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
+/* ═══════════════════════════════════════════════════════════════════
+   LEARNING MAP
+   Every node opens: plain-language explanation, the steps to follow, a
+   worked example, the formula, an everyday analogy, what to say while
+   teaching it, and the mistake beginners make. Trainers can add, edit
+   and delete nodes; adding one by name writes the rest automatically.
+═══════════════════════════════════════════════════════════════════ */
+
+// Each top-level branch gets its own hue, so a wide map stays readable.
+const LM_HUES = [268, 200, 158, 24, 340, 46, 186, 300];
+
+function lmBranchColor(index, depth) {
+  const h = LM_HUES[index % LM_HUES.length];
+  const light = Math.min(64, 46 + depth * 7);
+  return {
+    hue: h,
+    solid: `hsl(${h} 68% ${light}%)`,
+    deep:  `hsl(${h} 72% ${Math.max(28, light - 16)}%)`,
+    glow:  `hsla(${h} 90% 60% / ${Math.max(0.14, 0.4 - depth * 0.08)})`,
+    edge:  `hsl(${h} 55% ${Math.min(72, light + 14)}%)`,
+    wash:  `hsla(${h} 70% 52% / .13)`,
+  };
+}
+
+const LM_KIND = {
+  concept:  { icon: "◆", label: "Concept" },
+  step:     { icon: "▸", label: "Step" },
+  formula:  { icon: "∑", label: "Formula" },
+  example:  { icon: "✎", label: "Example" },
+  pitfall:  { icon: "!", label: "Watch out" },
+  practice: { icon: "⚑", label: "Practice" },
+};
+
+function LearningMapNode({
+  node, index, depth, branchIndex, expanded, toggle, onSelect, selectedId,
+  isTrainer, onAddChild, onDelete, onEdit, query, busyNodeId,
+}) {
+  const kids = node.children || [];
+  const hasKids = kids.length > 0;
+  const isOpen = expanded.has(node.id);
+  const c = lmBranchColor(branchIndex, depth);
+  const kind = LM_KIND[node.kind] || LM_KIND.concept;
+  const isSel = selectedId === node.id;
+  const hit = query && (node.title + " " + node.summary).toLowerCase().includes(query.toLowerCase());
+  const isBusy = busyNodeId === node.id;
+
+  return (
+    <div
+      className="lm-branch"
+      // --lvl and --i drive the growth choreography: the trunk settles, its
+      // rails draw outward, then this level's cards arrive, then the next.
+      style={{ "--lvl": depth + 1, "--i": index }}
+    >
+      <div className="lm-cardwrap">
+        <div
+          className={`lm-card${isSel ? " lm-sel" : ""}${hit ? " lm-hit" : ""}`}
+          onClick={() => onSelect(node)}
+          role="button" tabIndex={0}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(node); } }}
+          style={{
+            "--c": c.solid, "--cd": c.deep, "--cg": c.glow, "--ce": c.edge, "--cw": c.wash,
+            borderColor: isSel ? c.edge : "rgba(255,255,255,.09)",
+          }}
+        >
+          <div className="lm-card-top">
+            <span className="lm-kind" style={{ background: c.wash, color: c.edge }}>{kind.icon}</span>
+            <span className="lm-title">{node.title}</span>
+            {isBusy && <span className="lm-spin" />}
+          </div>
+          {node.summary && <p className="lm-sum">{node.summary}</p>}
+
+          <div className="lm-chips">
+            {node.formula   && <span className="lm-chip">∑ formula</span>}
+            {node.example   && <span className="lm-chip">✎ example</span>}
+            {(node.steps || []).length > 0 && <span className="lm-chip">{node.steps.length} steps</span>}
+            {node.misconception && <span className="lm-chip lm-chip-warn">! pitfall</span>}
+            {node.timeMin > 0 && <span className="lm-chip lm-chip-time">{node.timeMin} min</span>}
+            {node._needsDetail && <span className="lm-chip lm-chip-warn">needs detail</span>}
+          </div>
+
+          <div className="lm-actions" onClick={e => e.stopPropagation()}>
+            {hasKids && (
+              <button className="lm-btn" onClick={() => toggle(node.id)} title={isOpen ? "Collapse" : "Expand"}>
+                {isOpen ? "−" : "+"} {kids.length}
+              </button>
+            )}
+            {isTrainer && (
+              <>
+                <button className="lm-btn" onClick={() => onAddChild(node)} title="Add a sub-topic">＋</button>
+                <button className="lm-btn" onClick={() => onEdit(node)} title="Edit this node">✎</button>
+                <button className="lm-btn lm-btn-del" onClick={() => onDelete(node)} title="Delete">✕</button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {hasKids && isOpen && (
+        <div className="lm-kids">
+          {kids.map((child, i) => (
+            <LearningMapNode
+              key={child.id} node={child} index={i} depth={depth + 1}
+              branchIndex={branchIndex} expanded={expanded} toggle={toggle}
+              onSelect={onSelect} selectedId={selectedId} isTrainer={isTrainer}
+              onAddChild={onAddChild} onDelete={onDelete} onEdit={onEdit}
+              query={query} busyNodeId={busyNodeId}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function LearningMapTab({
+  day, dayData, busy, onGenLearningMap, onExpandMapNode, updateDay, notify, studentMode, lmProgress,
+}) {
+  // Older rows, or any path that skipped the loader, can hand this over as
+  // a JSON string. Parse rather than crash on .children.
+  const map = useMemo(() => {
+    const raw = dayData?.learningMap;
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try { const p = JSON.parse(raw); return p && Array.isArray(p.children) ? p : null; }
+      catch { return null; }
+    }
+    return Array.isArray(raw.children) ? raw : null;
+  }, [dayData?.learningMap]);
+  const isTrainer = !studentMode;
+  const generating = busy[`lm-${day.key}`];
+
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [selected, setSelected] = useState(null);
+  const [zoom, setZoom]         = useState(1);
+  const [query, setQuery]       = useState("");
+  const [busyNodeId, setBusyNodeId] = useState(null);
+  const [editing, setEditing]   = useState(null);
+  const [tourIdx, setTourIdx]   = useState(-1);
+  const [teaching, setTeaching] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  // The map plays its build the first time it's opened out. Until then it
+  // sits collapsed to the trunk and its top-level branches.
+  const [forming, setForming]   = useState(false);
+  const [formKey, setFormKey]   = useState(0);
+  const [hasPlayed, setHasPlayed] = useState(false);
+
+  const innerRef  = useRef(null);
+  const canvasRef = useRef(null);
+
+  // Collapsed by default: the top-level branch cards show (they're the
+  // root's direct children, always rendered), but nothing beneath them is
+  // open. The full build plays on ⤢ Expand, not on load. An empty set means
+  // no branch is expanded, so no grandchildren are visible.
+  useEffect(() => {
+    if (!map?.children?.length) return;
+    setExpanded(new Set());
+    setHasPlayed(false);
+    setForming(false);
+  }, [map?.updatedAt, map?.children?.length]);
+
+  const treeDepth = useMemo(() => {
+    const d = (nodes, lvl) => nodes.reduce((mx, n) => Math.max(mx, d(n.children || [], lvl + 1)), lvl);
+    return d(map?.children || [], 0);
+  }, [map]);
+
+  // Open everything and play the growth. Used by ⤢ Expand and Replay.
+  const expandAndPlay = useCallback(() => {
+    if (!map?.children?.length) return;
+    const ids = [];
+    const walk = (nodes) => nodes.forEach(n => { ids.push(n.id); walk(n.children || []); });
+    walk(map.children);
+    setExpanded(new Set(ids));
+    setHasPlayed(true);
+    setFormKey(k => k + 1);
+    setForming(true);
+    const total = 620 + treeDepth * 460 + 700;
+    window.clearTimeout(window.__lmFormTimer);
+    window.__lmFormTimer = window.setTimeout(() => setForming(false), total);
+  }, [map, treeDepth]);
+
+  const replay = expandAndPlay;
+
+  /* ── Fixed viewport, content-only zoom ──
+     The stage is a fixed landscape box. Zoom scales only the inner tree,
+     never the box — so the outer frame stays put while the map grows or
+     shrinks inside it, and the box scrolls if the tree is larger. */
+  const ZMIN = 0.2, ZMAX = 2.5;
+  const clampZoom = (z) => Math.max(ZMIN, Math.min(ZMAX, +z.toFixed(3)));
+
+  const zoomRef = useRef(1);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+
+  const fitToView = useCallback(() => {
+    const inner = innerRef.current, canvas = canvasRef.current;
+    if (!inner || !canvas) return;
+    const w = inner.scrollWidth / (zoomRef.current || 1);
+    const h = inner.scrollHeight / (zoomRef.current || 1);
+    if (!w || !h) return;
+    const s = clampZoom(Math.min(1, (canvas.clientWidth - 48) / w, (canvas.clientHeight - 48) / h));
+    setZoom(s);
+  }, []);
+
+  // Fit once when a map first appears or the layout settles after a play.
+  useEffect(() => {
+    if (!map) return;
+    const id = requestAnimationFrame(() => requestAnimationFrame(fitToView));
+    return () => cancelAnimationFrame(id);
+  }, [map?.updatedAt, fullscreen]);
+
+  // Trackpad pinch (ctrl+wheel) and ctrl+scroll zoom, centred on the cursor.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e) => {
+      if (!e.ctrlKey) return;          // pinch on a trackpad arrives as ctrl+wheel
+      e.preventDefault();
+      setZoom(z => clampZoom(z - e.deltaY * 0.01));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Two-finger pinch on a touchscreen.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let startDist = 0, startZoom = 1;
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const onStart = (e) => { if (e.touches.length === 2) { startDist = dist(e.touches); startZoom = zoomRef.current; } };
+    const onMove = (e) => {
+      if (e.touches.length === 2 && startDist) {
+        e.preventDefault();
+        setZoom(clampZoom(startZoom * (dist(e.touches) / startDist)));
+      }
+    };
+    const onEnd = () => { startDist = 0; };
+    canvas.addEventListener("touchstart", onStart, { passive: false });
+    canvas.addEventListener("touchmove", onMove, { passive: false });
+    canvas.addEventListener("touchend", onEnd);
+    return () => {
+      canvas.removeEventListener("touchstart", onStart);
+      canvas.removeEventListener("touchmove", onMove);
+      canvas.removeEventListener("touchend", onEnd);
+    };
+  }, []);
+
+  // Esc leaves fullscreen.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e) => { if (e.key === "Escape") setFullscreen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
+  const setZoomManual = (fn) => setZoom(z => clampZoom(fn(z)));
+
+  const flat = useMemo(() => {
+    const out = [];
+    const walk = (nodes, depth, bi) => nodes.forEach((n, i) => {
+      out.push({ node: n, depth, branchIndex: depth === 0 ? i : bi });
+      walk(n.children || [], depth + 1, depth === 0 ? i : bi);
+    });
+    walk(map?.children || [], 0, 0);
+    return out;
+  }, [map]);
+
+  const toggle = useCallback((id) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }, []);
+
+  const totalMinutes = useMemo(
+    () => flat.reduce((sum, f) => sum + (Number(f.node.timeMin) || 0), 0),
+    [flat]
+  );
+
+  const expandAll  = () => setExpanded(new Set(flat.map(f => f.node.id)));
+  const collapseAll = () => setExpanded(new Set());
+
+  // Searching reveals matches rather than hiding everything else.
+  useEffect(() => {
+    if (!query.trim()) return;
+    const q = query.toLowerCase();
+    const toOpen = new Set(expanded);
+    const walk = (nodes, ancestors) => nodes.forEach(n => {
+      const match = (n.title + " " + n.summary + " " + n.explain).toLowerCase().includes(q);
+      if (match) ancestors.forEach(a => toOpen.add(a));
+      walk(n.children || [], [...ancestors, n.id]);
+    });
+    walk(map?.children || [], []);
+    setExpanded(toOpen);
+  }, [query]);
+
+  const persist = useCallback((children) => {
+    updateDay(day.key, {
+      learningMap: { ...(map || { version: 1, title: day.topic }), children, updatedAt: new Date().toISOString() },
+    });
+  }, [day.key, day.topic, map, updateDay]);
+
+  /* Trainer types a name; the explanation, example, formula and
+     sub-topics are written and dropped in underneath it. */
+  const addChild = useCallback(async (parent) => {
+    const name = window.prompt(
+      parent ? `New sub-topic under "${parent.title}":` : "New top-level topic:"
+    );
+    if (!name || !name.trim()) return;
+    const title = name.trim();
+
+    const stub = {
+      id: `lm_new_${Date.now().toString(36)}`,
+      title, kind: "concept", summary: "Writing this out…",
+      explain: "", steps: [], example: "", formula: "", analogy: "",
+      teachTip: "", misconception: "", children: [],
+    };
+
+    const withStub = parent
+      ? lmUpdateNode(map.children, parent.id, n => ({ ...n, children: [...(n.children || []), stub] }))
+      : [...(map?.children || []), stub];
+    persist(withStub);
+    if (parent) setExpanded(prev => new Set(prev).add(parent.id));
+    setBusyNodeId(stub.id);
+
+    try {
+      const full = await onExpandMapNode(day, title, parent?.title || day.topic);
+      const filled = { ...full, id: stub.id };
+      persist(lmUpdateNode(withStub, stub.id, () => filled));
+      setExpanded(prev => new Set(prev).add(stub.id));
+      notify(`"${title}" added with ${(filled.children || []).length} sub-topics ✓`);
+    } catch (e) {
+      persist(lmRemoveNode(withStub, stub.id));
+      notify(`Couldn't build that node: ${e.message}`, "err");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }, [map, day, persist, onExpandMapNode, notify]);
+
+  const removeNode = useCallback((node) => {
+    if (!window.confirm(`Delete "${node.title}" and everything under it?`)) return;
+    persist(lmRemoveNode(map.children, node.id));
+    if (selected?.id === node.id) setSelected(null);
+    notify("Node deleted");
+  }, [map, persist, selected, notify]);
+
+  const saveEdit = useCallback((patch) => {
+    persist(lmUpdateNode(map.children, editing.id, n => ({ ...n, ...patch })));
+    setEditing(null);
+    if (selected?.id === editing.id) setSelected(s => ({ ...s, ...patch }));
+    notify("Node updated ✓");
+  }, [map, editing, persist, selected, notify]);
+
+  // Guided tour: walks the map in teaching order, one node at a time.
+  const startTour = () => {
+    if (!flat.length) return;
+    expandAll();
+    setTourIdx(0);
+    setSelected(flat[0].node);
+  };
+  const tourStep = (dir) => {
+    const next = tourIdx + dir;
+    if (next < 0 || next >= flat.length) { setTourIdx(-1); return; }
+    setTourIdx(next);
+    setSelected(flat[next].node);
+  };
+
+  const styles = `
+    .lm-wrap{position:relative;border-radius:20px;overflow:hidden;display:flex;flex-direction:column;background:radial-gradient(1300px 560px at 18% -12%,#2a1f52 0%,#161129 46%,#0c0916 100%);border:1px solid #2a2145;}
+    /* Full screen: the map takes the whole viewport. */
+    .lm-wrap.lm-full{position:fixed;inset:0;z-index:9600;border-radius:0;border:none;}
+    .lm-wrap::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(760px 300px at 12% 42%,rgba(124,58,237,.14),transparent 70%);}
+    .lm-bar{position:relative;z-index:3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:13px 16px;background:rgba(255,255,255,.035);border-bottom:1px solid rgba(255,255,255,.07);backdrop-filter:blur(8px);}
+    .lm-tool{padding:7px 12px;border-radius:9px;border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#d9d2f5;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .16s;white-space:nowrap;}
+    .lm-tool:hover{background:rgba(255,255,255,.13);transform:translateY(-1px);}
+    .lm-tool:disabled{opacity:.4;cursor:not-allowed;transform:none;}
+    .lm-primary{background:linear-gradient(135deg,#7c3aed,#6d28d9);border:none;color:#fff;box-shadow:0 5px 18px rgba(124,58,237,.42);}
+    .lm-search{padding:7px 13px;border-radius:9px;border:1px solid rgba(255,255,255,.13);background:rgba(0,0,0,.28);color:#eee;font-size:12.5px;outline:none;min-width:140px;flex:1;}
+    /* No fixed height: the canvas grows to whatever the scaled tree needs,
+       and the zoom control shrinks the tree to fit instead of scrolling. */
+    /* The fixed stage. Height is locked to the space between the toolbar and
+       the bottom of the screen, so zooming changes only what's inside it —
+       the frame never moves. It scrolls both ways if the map is larger. */
+    .lm-stage{position:relative;z-index:2;flex:1;min-height:0;
+      height:calc(100vh - 340px);
+      overflow:auto;padding:30px;perspective:2200px;perspective-origin:50% 0;
+      background:radial-gradient(900px 420px at 50% 0%,rgba(124,58,237,.08),transparent 70%);
+      touch-action:none;}
+    .lm-full .lm-stage{height:calc(100vh - 128px);}
+    @media (max-width:900px){ .lm-stage{height:calc(100vh - 300px);} }
+    .lm-playhint{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:5;
+      padding:10px 20px;border-radius:99px;border:1px solid rgba(167,139,250,.5);cursor:pointer;
+      background:linear-gradient(135deg,rgba(139,92,246,.9),rgba(109,40,217,.9));color:#fff;
+      font-size:13px;font-weight:700;box-shadow:0 8px 26px rgba(124,58,237,.5);
+      animation:lm-hint-pulse 2.2s ease-in-out infinite;backdrop-filter:blur(6px);}
+    @keyframes lm-hint-pulse{0%,100%{transform:translateX(-50%) scale(1);}50%{transform:translateX(-50%) scale(1.05);}}
+    .lm-zoomgrp{display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.05);border-radius:11px;padding:3px;}
+    .lm-zoomval{font-size:11.5px;color:#b3a9d4;min-width:42px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600;}
+    .lm-inner{display:flex;flex-direction:column;align-items:center;transform-origin:top center;transition:transform .22s cubic-bezier(.2,.8,.3,1);transform-style:preserve-3d;width:max-content;margin:0 auto;will-change:transform;}
+
+    /* ── The trunk ── */
+    .lm-root{position:relative;flex:0 0 auto;max-width:262px;padding:22px 24px;border-radius:19px;color:#fff;
+      background:linear-gradient(150deg,#8b5cf6,#5b21b6 62%,#4c1d95);
+      box-shadow:0 26px 58px rgba(88,28,235,.5),inset 0 1px 0 rgba(255,255,255,.32),0 0 60px rgba(139,92,246,.3);
+      transform:translateZ(46px);}
+    .lm-root::after{content:"";position:absolute;left:50%;bottom:-15px;width:3px;height:15px;border-radius:3px;background:linear-gradient(180deg,#a78bfa,rgba(167,139,250,0));transform:translateX(-50%);}
+    .lm-root h3{font-size:18px;font-weight:800;line-height:1.28;margin-bottom:8px;letter-spacing:-.2px;}
+    .lm-root p{font-size:12.4px;line-height:1.62;color:rgba(255,255,255,.87);}
+    .lm-rootmeta{display:flex;gap:6px;flex-wrap:wrap;margin-top:11px;}
+    .lm-rootchip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:99px;background:rgba(255,255,255,.16);color:#efe9ff;}
+
+    /* Top-down tree: the trunk sits at the top, branches fan out beneath it,
+       each level dropping to the next. */
+    .lm-col{display:flex;flex-direction:row;align-items:flex-start;gap:22px;padding-top:44px;position:relative;}
+    .lm-col::before{content:"";position:absolute;top:0;left:50%;width:3px;height:22px;transform:translateX(-50%);transform-origin:top center;border-radius:3px;
+      background:linear-gradient(180deg,#c4b5fd,#8b5cf6);box-shadow:0 0 10px rgba(139,92,246,.55);}
+    .lm-branch{display:flex;flex-direction:column;align-items:center;position:relative;}
+    .lm-cardwrap{flex:0 0 auto;}
+    .lm-kids{display:flex;flex-direction:row;align-items:flex-start;gap:18px;padding-top:44px;position:relative;}
+
+    /* Rails, per child: a horizontal spine segment joining the siblings, then
+       a vertical drop into the card. First and last are clipped to half width
+       so the spine runs exactly between the outermost siblings' centres. */
+    /* Vertical drop into each card. Two layered backgrounds: the rail
+       itself, and a bright point that runs down it on a loop so the flow
+       from a topic to its sub-topics is visible at a glance. */
+    .lm-col>.lm-branch::before,
+    .lm-kids>.lm-branch::before{content:"";position:absolute;top:-28px;left:50%;width:4px;height:28px;transform:translateX(-50%);transform-origin:top center;border-radius:4px;
+      background-image:
+        radial-gradient(circle at 50% 50%,#fff 0%,var(--ce,#fff) 34%,transparent 62%),
+        linear-gradient(180deg,var(--ce,rgba(255,255,255,.55)),var(--c,rgba(255,255,255,.8)));
+      background-size:180% 44%,100% 100%;
+      background-repeat:no-repeat,no-repeat;
+      background-position:50% -80%,0 0;
+      box-shadow:0 0 12px var(--cg,rgba(255,255,255,.35));}
+    .lm-col>.lm-branch::after,
+    .lm-kids>.lm-branch::after{content:"";position:absolute;top:-24px;left:0;right:0;height:2.5px;transform-origin:center;border-radius:3px;
+      background:linear-gradient(90deg,rgba(255,255,255,.14),var(--ce,rgba(255,255,255,.45)),rgba(255,255,255,.14));
+      box-shadow:0 0 7px var(--cg,rgba(255,255,255,.18));}
+
+    /* The travelling point only runs once the map has finished assembling —
+       during the build these same pseudo-elements are drawing themselves. */
+    .lm-inner:not(.lm-forming) .lm-col::before,
+    .lm-inner:not(.lm-forming) .lm-col>.lm-branch::before,
+    .lm-inner:not(.lm-forming) .lm-kids>.lm-branch::before{
+      animation:lm-flow 2s linear infinite;
+      animation-delay:calc(var(--lvl,0) * 300ms + var(--i,0) * 170ms);}
+    @keyframes lm-flow{
+      0%{background-position:50% -80%,0 0;}
+      100%{background-position:50% 180%,0 0;}
+    }
+    .lm-col>.lm-branch:first-child::after,
+    .lm-kids>.lm-branch:first-child::after{left:50%;transform-origin:left center;}
+    .lm-col>.lm-branch:last-child::after,
+    .lm-kids>.lm-branch:last-child::after{right:50%;transform-origin:right center;}
+    .lm-col>.lm-branch:only-child::after,
+    .lm-kids>.lm-branch:only-child::after{display:none;}
+
+    /* ── Growth choreography ──
+       Everything is driven off --lvl (depth) and --i (position among
+       siblings), so the map assembles outward from the trunk: rails draw,
+       then the cards they lead to arrive, then the next level begins. */
+    .lm-forming .lm-root{animation:lm-trunk .62s cubic-bezier(.16,1,.3,1) both;}
+    .lm-forming .lm-cardwrap{animation:lm-pop .5s cubic-bezier(.2,1.3,.4,1) both;
+      animation-delay:calc(var(--lvl,1) * 460ms + var(--i,0) * 85ms);}
+    .lm-forming .lm-col::before{animation:lm-draw-y .3s ease-out both;animation-delay:420ms;}
+    .lm-forming .lm-col>.lm-branch::before,
+    .lm-forming .lm-kids>.lm-branch::before{animation:lm-draw-y .34s ease-out both;
+      animation-delay:calc(var(--lvl,1) * 460ms + var(--i,0) * 85ms - 190ms);}
+    .lm-forming .lm-col>.lm-branch::after,
+    .lm-forming .lm-kids>.lm-branch::after{animation:lm-draw-x .32s ease-out both;
+      animation-delay:calc(var(--lvl,1) * 460ms + var(--i,0) * 85ms - 240ms);}
+    @keyframes lm-trunk{
+      0%{opacity:0;transform:translateZ(46px) scale(.7) rotateY(-16deg);filter:blur(7px);}
+      60%{opacity:1;transform:translateZ(46px) scale(1.045) rotateY(2deg);filter:blur(0);}
+      100%{opacity:1;transform:translateZ(46px) scale(1) rotateY(0);}
+    }
+    @keyframes lm-pop{
+      0%{opacity:0;transform:translateY(-26px) scale(.74);filter:blur(5px);}
+      70%{opacity:1;transform:translateY(3px) scale(1.035);filter:blur(0);}
+      100%{opacity:1;transform:none;}
+    }
+    @keyframes lm-draw-x{from{transform:scaleX(0);opacity:0}to{transform:scaleX(1);opacity:1}}
+    @keyframes lm-draw-y{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}
+
+    /* Expanding a branch after the map has settled: quick, local, no delay. */
+    .lm-branch{animation:lm-rise .3s cubic-bezier(.2,.8,.3,1) both;}
+    .lm-forming .lm-branch{animation:none;}
+    @keyframes lm-rise{from{opacity:0;transform:translateY(-10px) scale(.96)}to{opacity:1;transform:none}}
+
+    /* ── Cards ── */
+    .lm-card{position:relative;width:246px;padding:13px 14px 11px;border-radius:15px;cursor:pointer;
+      background:linear-gradient(150deg,rgba(255,255,255,.1),rgba(255,255,255,.035));
+      border:1.5px solid rgba(255,255,255,.09);backdrop-filter:blur(10px);
+      box-shadow:0 12px 30px rgba(0,0,0,.44),inset 0 1px 0 rgba(255,255,255,.07),0 0 30px var(--cg);
+      transform-style:preserve-3d;transition:transform .22s cubic-bezier(.2,.8,.3,1),box-shadow .22s,border-color .22s;}
+    .lm-card::before{content:"";position:absolute;left:0;top:11px;bottom:11px;width:3.5px;border-radius:4px;background:linear-gradient(180deg,var(--ce),var(--c));box-shadow:0 0 14px var(--cg);}
+    .lm-card:hover{transform:translateY(-5px) translateZ(24px) rotateX(5deg) scale(1.035);box-shadow:0 26px 52px rgba(0,0,0,.58),0 0 52px var(--cg);border-color:var(--ce);}
+    .lm-card:focus-visible{outline:2px solid var(--ce);outline-offset:3px;}
+    .lm-sel{border-color:var(--ce) !important;box-shadow:0 18px 44px rgba(0,0,0,.52),0 0 0 2px var(--ce),0 0 52px var(--cg) !important;}
+    .lm-hit{animation:lm-pulse 1.5s ease-in-out infinite;}
+    .lm-card-top{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
+    .lm-kind{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;}
+    .lm-title{font-size:13.5px;font-weight:700;color:#f4f1ff;line-height:1.32;}
+    .lm-sum{font-size:11.8px;color:#a9a1c6;line-height:1.5;margin-bottom:8px;}
+    .lm-chips{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:7px;}
+    .lm-chip{font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;background:rgba(255,255,255,.08);color:#bbb2da;}
+    .lm-chip-warn{background:rgba(251,146,60,.18);color:#fdba74;}
+    .lm-chip-time{background:rgba(56,189,248,.16);color:#7dd3fc;}
+    .lm-actions{display:flex;gap:4px;flex-wrap:wrap;}
+    .lm-btn{padding:3px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#cfc6ec;font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;}
+    .lm-btn:hover{background:var(--c);color:#fff;border-color:transparent;}
+    .lm-btn-del:hover{background:#dc2626;}
+    .lm-spin{width:12px;height:12px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:lm-spin .7s linear infinite;margin-left:auto;}
+    @keyframes lm-spin{to{transform:rotate(360deg)}}
+    @keyframes lm-pulse{0%,100%{box-shadow:0 12px 30px rgba(0,0,0,.44),0 0 0 2px #fbbf24}50%{box-shadow:0 12px 30px rgba(0,0,0,.44),0 0 0 6px rgba(251,191,36,.22)}}
+
+    /* ── Detail drawer ── */
+    .lm-drawer{position:fixed;right:0;top:0;bottom:0;width:min(470px,100vw);z-index:9000;background:linear-gradient(160deg,#181231,#0e0a1c);
+      border-left:1px solid #2f2552;box-shadow:-26px 0 64px rgba(0,0,0,.58);overflow-y:auto;animation:lm-slide .32s cubic-bezier(.2,.8,.3,1);}
+    @keyframes lm-slide{from{transform:translateX(100%)}to{transform:none}}
+    .lm-dsec{padding:15px 20px;border-bottom:1px solid rgba(255,255,255,.06);}
+    .lm-dlabel{font-size:10.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:#8d82b8;margin-bottom:7px;}
+    .lm-dtext{font-size:13.5px;line-height:1.78;color:#ded8f3;white-space:pre-wrap;}
+    .lm-step{display:flex;gap:10px;margin-bottom:9px;}
+    .lm-stepn{width:22px;height:22px;border-radius:7px;background:rgba(124,58,237,.3);color:#c4b5fd;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .lm-code{background:rgba(0,0,0,.42);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px 14px;font-family:ui-monospace,monospace;font-size:12.4px;line-height:1.68;color:#a5f3d0;white-space:pre-wrap;overflow-x:auto;}
+    .lm-board{background:repeating-linear-gradient(0deg,rgba(255,255,255,.03) 0 1px,transparent 1px 24px),rgba(6,20,16,.75);
+      border:1px solid rgba(134,239,172,.22);border-radius:11px;padding:14px 16px;font-family:ui-monospace,monospace;
+      font-size:12.4px;line-height:1.75;color:#bbf7d0;white-space:pre;overflow-x:auto;}
+    .lm-term{display:inline-block;margin:0 5px 5px 0;padding:5px 10px;border-radius:9px;background:rgba(124,58,237,.16);border:1px solid rgba(167,139,250,.26);}
+    .lm-term b{color:#ddd4ff;font-size:12.2px;}
+    .lm-term span{display:block;color:#a79fc4;font-size:11.4px;line-height:1.5;margin-top:2px;}
+    .lm-empty{padding:58px 26px;text-align:center;position:relative;z-index:2;}
+
+    /* ── Agent progress ── */
+    .lm-agents{position:relative;z-index:3;padding:15px 18px;background:rgba(124,58,237,.09);border-bottom:1px solid rgba(167,139,250,.2);}
+    .lm-agenthead{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:800;color:#ddd4ff;margin-bottom:12px;flex-wrap:wrap;}
+    .lm-agentcount{margin-left:auto;font-size:11.5px;font-weight:600;color:#a79fc4;}
+    .lm-agentspin{width:13px;height:13px;border:2px solid rgba(167,139,250,.3);border-top-color:#a78bfa;border-radius:50%;animation:lm-spin .7s linear infinite;}
+    .lm-agentrow{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:11px;}
+    .lm-agent{display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:99px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);transition:all .3s;}
+    .lm-agent-on{background:linear-gradient(135deg,rgba(139,92,246,.35),rgba(109,40,217,.25));border-color:#a78bfa;box-shadow:0 0 22px rgba(139,92,246,.4);transform:translateY(-1px);}
+    .lm-agent-done{opacity:.55;}
+    .lm-agent-done .lm-agenticon{color:#4ade80;}
+    .lm-agenticon{font-size:13px;line-height:1;}
+    .lm-agentname{font-size:11.8px;font-weight:700;color:#cfc6ec;}
+    .lm-agent-on .lm-agentname{color:#fff;}
+    .lm-agentdetail{font-size:12.3px;color:#b3a9d4;line-height:1.55;font-style:italic;}
+
+    /* ── Teach mode ── */
+    .lm-teach{position:fixed;inset:0;z-index:9700;background:radial-gradient(1200px 700px at 50% -10%,#2b1f57,#120d24 55%,#08060f);
+      display:flex;flex-direction:column;animation:lm-fade .3s ease;}
+    @keyframes lm-fade{from{opacity:0}to{opacity:1}}
+    .lm-tprog{height:4px;background:rgba(255,255,255,.08);flex-shrink:0;}
+    .lm-tprog>div{height:100%;background:linear-gradient(90deg,#8b5cf6,#22d3ee);transition:width .4s cubic-bezier(.2,.8,.3,1);box-shadow:0 0 14px rgba(139,92,246,.7);}
+    .lm-tbody{flex:1;overflow-y:auto;padding:26px clamp(18px,6vw,72px) 20px;}
+    .lm-tkicker{font-size:11.5px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#a78bfa;margin-bottom:10px;}
+    .lm-th1{font-size:clamp(26px,4.6vw,46px);font-weight:800;color:#fff;line-height:1.12;letter-spacing:-.9px;margin-bottom:12px;}
+    .lm-tlead{font-size:clamp(15px,1.9vw,20px);line-height:1.65;color:#c9c1e8;max-width:66ch;}
+    .lm-tgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:15px;margin-top:24px;}
+    .lm-tpanel{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:15px;padding:17px 19px;animation:lm-rise .4s ease both;}
+    .lm-tpanel h4{font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#8d82b8;margin-bottom:10px;}
+    .lm-tpanel p,.lm-tpanel li{font-size:14.4px;line-height:1.75;color:#e2ddf6;}
+    .lm-tstep{display:flex;gap:11px;margin-bottom:11px;}
+    .lm-tstepn{width:25px;height:25px;border-radius:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .lm-tnav{flex-shrink:0;display:flex;align-items:center;gap:11px;padding:14px clamp(18px,6vw,72px);border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.3);backdrop-filter:blur(10px);flex-wrap:wrap;}
+    .lm-tbtn{padding:11px 22px;border-radius:11px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);color:#e8e3fa;font-size:14px;font-weight:700;cursor:pointer;transition:all .16s;}
+    .lm-tbtn:hover:not(:disabled){background:rgba(255,255,255,.15);transform:translateY(-1px);}
+    .lm-tbtn:disabled{opacity:.35;cursor:not-allowed;}
+
+    @media (max-width:720px){
+      .lm-drawer{width:100vw;top:auto;height:84vh;border-left:none;border-top:1px solid #2f2552;border-radius:20px 20px 0 0;animation:lm-up .3s cubic-bezier(.2,.8,.3,1);}
+      @keyframes lm-up{from{transform:translateY(100%)}to{transform:none}}
+      .lm-card{width:186px;}
+      .lm-kids,.lm-col{padding-top:32px;gap:12px;}
+      .lm-col>.lm-branch::before,.lm-kids>.lm-branch::before{top:-18px;height:18px;}
+      .lm-col>.lm-branch::after,.lm-kids>.lm-branch::after{top:-18px;}
+      .lm-col::before{height:16px;}
+    }
+    @media (prefers-reduced-motion:reduce){
+      .lm-branch,.lm-drawer,.lm-teach,.lm-tpanel{animation:none !important;}
+      .lm-forming .lm-root,.lm-forming .lm-cardwrap,
+      .lm-forming .lm-kids>.lm-branch::before,.lm-forming .lm-kids>.lm-branch::after,
+      .lm-inner:not(.lm-forming) .lm-col::before,
+      .lm-inner:not(.lm-forming) .lm-col>.lm-branch::before,
+      .lm-inner:not(.lm-forming) .lm-kids>.lm-branch::before{animation:none !important;}
+      .lm-card:hover{transform:none;}
+      .lm-hit{animation:none;box-shadow:0 0 0 2px #fbbf24;}
+    }
+  `;
+
+  // While the agents run, show what each one is doing. A multi-minute
+  // build with a bare spinner looks indistinguishable from a hang.
+  const agentPanel = (generating || lmProgress) && (
+    <div className="lm-agents">
+      <div className="lm-agenthead">
+        <span className="lm-agentspin" />
+        <span>Building the map</span>
+        {lmProgress?.total > 0 && (
+          <span className="lm-agentcount">branch {Math.min(lmProgress.done + 1, lmProgress.total)} of {lmProgress.total}</span>
+        )}
+      </div>
+      <div className="lm-agentrow">
+        {LM_AGENTS.map(a => {
+          const active = lmProgress?.agent?.id === a.id;
+          const passed = lmProgress && LM_AGENTS.findIndex(x => x.id === lmProgress.agent?.id) > LM_AGENTS.findIndex(x => x.id === a.id);
+          return (
+            <div key={a.id} className={`lm-agent${active ? " lm-agent-on" : ""}${passed ? " lm-agent-done" : ""}`}>
+              <span className="lm-agenticon">{passed ? "✓" : a.icon}</span>
+              <span className="lm-agentname">{a.name}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="lm-agentdetail">{lmProgress?.detail || "Starting up…"}</p>
+    </div>
+  );
+
+  if (!map) {
+    return (
+      <div className="lm-wrap">
+        <style>{styles}</style>
+        {agentPanel}
+        <div className="lm-empty">
+          <div style={{ fontSize:46, marginBottom:14 }}>🗺️</div>
+          <h3 style={{ fontSize:19, fontWeight:800, color:"#f3f0ff", marginBottom:9 }}>Learning map</h3>
+          <p style={{ fontSize:13.6, color:"#a79fc4", maxWidth:430, margin:"0 auto 20px", lineHeight:1.7 }}>
+            Turns everything generated for this day into a tree you can teach from. Every node opens
+            with a plain-language explanation, the steps, a worked example, and what to say while
+            teaching it — written for someone meeting the topic for the first time.
+          </p>
+          {isTrainer ? (
+            <button className="lm-tool" style={{ padding:"11px 22px", fontSize:14, background:"linear-gradient(135deg,#7c3aed,#6d28d9)", border:"none", color:"#fff" }}
+              disabled={generating} onClick={onGenLearningMap}>
+              {generating ? "Building the map…" : "Build learning map"}
+            </button>
+          ) : (
+            <p style={{ fontSize:13, color:"#7d739f" }}>Your trainer hasn't published the map for this day yet.</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const sel = selected;
+  const kindOf = sel && (LM_KIND[sel.kind] || LM_KIND.concept);
+
+  return (
+    <div className={`lm-wrap${fullscreen ? " lm-full" : ""}`}>
+      <style>{styles}</style>
+
+      <div className="lm-bar">
+        <button className="lm-tool lm-primary" onClick={() => { setTeaching(true); setTourIdx(0); setSelected(flat[0]?.node || null); }} disabled={!flat.length}>
+          ▶ Teach mode
+        </button>
+        <button className="lm-tool" onClick={expandAndPlay} title="Open every node and play the build">⤢ Expand all</button>
+        <button className="lm-tool" onClick={() => { setExpanded(new Set()); setForming(false); }} title="Collapse to the branches">Collapse</button>
+        <button className="lm-tool" onClick={startTour} disabled={!flat.length}>Walkthrough</button>
+        <input className="lm-search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search the map…" />
+        <span className="lm-zoomgrp">
+          <button className="lm-tool" onClick={() => setZoomManual(z => z - 0.15)} title="Zoom out">−</button>
+          <span className="lm-zoomval">{Math.round(zoom * 100)}%</span>
+          <button className="lm-tool" onClick={() => setZoomManual(z => z + 0.15)} title="Zoom in">+</button>
+          <button className="lm-tool" onClick={fitToView} title="Fit the whole map in view">Fit</button>
+        </span>
+        <button className="lm-tool lm-primary" onClick={() => setFullscreen(f => !f)} title={fullscreen ? "Exit full screen (Esc)" : "Full screen"}>
+          {fullscreen ? "✕ Exit" : "⛶ Full screen"}
+        </button>
+        {isTrainer && (
+          <>
+            <button className="lm-tool" onClick={() => addChild(null)}>＋ Topic</button>
+            <button className="lm-tool" disabled={generating} onClick={onGenLearningMap}>
+              {generating ? "Rebuilding…" : "↻ Rebuild"}
+            </button>
+          </>
+        )}
+      </div>
+
+      {agentPanel}
+
+      <div className="lm-stage" ref={canvasRef}>
+        {!hasPlayed && (
+          <button className="lm-playhint" onClick={expandAndPlay}>
+            ▶ Expand & play the full map
+          </button>
+        )}
+        <div
+          key={formKey}
+          ref={innerRef}
+          className={`lm-inner${forming ? " lm-forming" : ""}`}
+          style={{ transform:`scale(${zoom})` }}
+        >
+          <div className="lm-root">
+            <h3>{map.title || day.topic}</h3>
+            {map.overview && <p>{map.overview}</p>}
+            <div className="lm-rootmeta">
+              <span className="lm-rootchip">{map.children.length} branches</span>
+              <span className="lm-rootchip">{lmCountNodes(map.children)} nodes</span>
+              {totalMinutes > 0 && <span className="lm-rootchip">≈{totalMinutes} min</span>}
+            </div>
+          </div>
+          <div className="lm-col">
+            {map.children.map((n, i) => (
+              <LearningMapNode
+                key={n.id} node={n} index={i} depth={0} branchIndex={i}
+                expanded={expanded} toggle={toggle} onSelect={setSelected}
+                selectedId={sel?.id} isTrainer={isTrainer}
+                onAddChild={addChild} onDelete={removeNode} onEdit={setEditing}
+                query={query} busyNodeId={busyNodeId}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Detail drawer ── */}
+      {sel && (
+        <>
+          <div onClick={() => { setSelected(null); setTourIdx(-1); }}
+            style={{ position:"fixed", inset:0, background:"rgba(6,4,14,.55)", zIndex:8990, backdropFilter:"blur(2px)" }} />
+          <div className="lm-drawer">
+            <div style={{ padding:"18px 20px 14px", borderBottom:"1px solid rgba(255,255,255,.08)", position:"sticky", top:0, background:"linear-gradient(160deg,#171130,#150f2b)", zIndex:2 }}>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:10 }}>
+                <span style={{ fontSize:11, fontWeight:800, padding:"3px 9px", borderRadius:99, background:"rgba(124,58,237,.25)", color:"#c4b5fd", flexShrink:0 }}>
+                  {kindOf.icon} {kindOf.label}
+                </span>
+                <button onClick={() => { setSelected(null); setTourIdx(-1); }}
+                  style={{ marginLeft:"auto", background:"none", border:"none", color:"#8b80b5", fontSize:21, cursor:"pointer", lineHeight:1 }}>×</button>
+              </div>
+              <h3 style={{ fontSize:19, fontWeight:800, color:"#f3f0ff", marginTop:9, lineHeight:1.3 }}>{sel.title}</h3>
+              {sel.summary && <p style={{ fontSize:13, color:"#a79fc4", marginTop:5, lineHeight:1.6 }}>{sel.summary}</p>}
+              {tourIdx >= 0 && (
+                <div style={{ display:"flex", alignItems:"center", gap:9, marginTop:13 }}>
+                  <button className="lm-tool" onClick={() => tourStep(-1)}>← Back</button>
+                  <span style={{ fontSize:11.5, color:"#8b80b5" }}>{tourIdx + 1} of {flat.length}</span>
+                  <button className="lm-tool" onClick={() => tourStep(1)}>Next →</button>
+                </div>
+              )}
+            </div>
+
+            {sel.whyItMatters && (
+              <div className="lm-dsec" style={{ background:"rgba(124,58,237,.09)" }}>
+                <p className="lm-dlabel" style={{ color:"#c4b5fd" }}>Why it matters</p>
+                <p className="lm-dtext">{sel.whyItMatters}</p>
+              </div>
+            )}
+
+            {sel.explain && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">In plain words</p>
+                <p className="lm-dtext">{sel.explain}</p>
+              </div>
+            )}
+
+            {(sel.keyTerms || []).length > 0 && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Words to define first</p>
+                {sel.keyTerms.map((t, i) => (
+                  <span className="lm-term" key={i}><b>{t.term}</b><span>{t.definition}</span></span>
+                ))}
+              </div>
+            )}
+
+            {sel.board && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Draw this on the board</p>
+                <div className="lm-board">{sel.board}</div>
+              </div>
+            )}
+
+            {(sel.steps || []).length > 0 && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Step by step</p>
+                {sel.steps.map((s, i) => (
+                  <div className="lm-step" key={i}>
+                    <span className="lm-stepn">{i + 1}</span>
+                    <span className="lm-dtext" style={{ paddingTop:2 }}>{s}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {sel.formula && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Formula</p>
+                <div className="lm-code">{sel.formula}</div>
+              </div>
+            )}
+
+            {sel.example && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Worked example</p>
+                <div className="lm-code">{sel.example}</div>
+              </div>
+            )}
+
+            {sel.analogy && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Think of it like</p>
+                <p className="lm-dtext">{sel.analogy}</p>
+              </div>
+            )}
+
+            {sel.teachTip && (
+              <div className="lm-dsec" style={{ background:"rgba(34,197,94,.07)" }}>
+                <p className="lm-dlabel" style={{ color:"#86efac" }}>How to teach it</p>
+                <p className="lm-dtext">{sel.teachTip}</p>
+              </div>
+            )}
+
+            {sel.askClass && (
+              <div className="lm-dsec" style={{ background:"rgba(56,189,248,.08)" }}>
+                <p className="lm-dlabel" style={{ color:"#7dd3fc" }}>Ask the room</p>
+                <p className="lm-dtext">{sel.askClass}</p>
+              </div>
+            )}
+
+            {sel.misconception && (
+              <div className="lm-dsec" style={{ background:"rgba(251,146,60,.08)" }}>
+                <p className="lm-dlabel" style={{ color:"#fdba74" }}>Where beginners trip up</p>
+                <p className="lm-dtext">{sel.misconception}</p>
+              </div>
+            )}
+
+            {(sel.children || []).length > 0 && (
+              <div className="lm-dsec">
+                <p className="lm-dlabel">Breaks down into</p>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {sel.children.map(c => (
+                    <button key={c.id} className="lm-tool"
+                      onClick={() => { setExpanded(p => new Set(p).add(sel.id)); setSelected(c); }}>
+                      {c.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {isTrainer && (
+              <div className="lm-dsec" style={{ display:"flex", gap:7, flexWrap:"wrap" }}>
+                <button className="lm-tool" onClick={() => addChild(sel)}>＋ Add sub-topic</button>
+                <button className="lm-tool" onClick={() => setEditing(sel)}>✎ Edit</button>
+                <button className="lm-tool" onClick={() => removeNode(sel)} style={{ color:"#fca5a5" }}>✕ Delete</button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── Teach mode ── */}
+      {teaching && flat.length > 0 && (
+        <LearningMapTeachMode
+          steps={flat}
+          index={Math.max(0, Math.min(tourIdx, flat.length - 1))}
+          setIndex={(i) => { setTourIdx(i); setSelected(flat[i]?.node || null); }}
+          onExit={() => { setTeaching(false); setTourIdx(-1); }}
+          courseTopic={map.title || day.topic}
+        />
+      )}
+
+      {/* ── Trainer edit modal ── */}
+      {editing && (
+        <LearningMapEditor node={editing} onCancel={() => setEditing(null)} onSave={saveEdit} />
+      )}
+    </div>
+  );
+}
+
+/* Fullscreen presenter. Large type, one node per screen, in teaching
+   order — the map used as the lesson itself rather than as a reference.
+   Arrow keys and Escape work so nobody has to find the mouse mid-class. */
+export function LearningMapTeachMode({ steps, index, setIndex, onExit, courseTopic }) {
+  const cur = steps[index];
+  const node = cur?.node;
+  const pct = ((index + 1) / steps.length) * 100;
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") { e.preventDefault(); setIndex(Math.min(index + 1, steps.length - 1)); }
+      else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); setIndex(Math.max(index - 1, 0)); }
+      else if (e.key === "Escape") onExit();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, steps.length, setIndex, onExit]);
+
+  if (!node) return null;
+  const kind = LM_KIND[node.kind] || LM_KIND.concept;
+  const c = lmBranchColor(cur.branchIndex, cur.depth);
+
+  return (
+    <div className="lm-teach">
+      <div className="lm-tprog"><div style={{ width:`${pct}%` }} /></div>
+
+      <div className="lm-tbody" key={index}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:6 }}>
+          <span className="lm-tkicker" style={{ color:c.edge, margin:0 }}>
+            {kind.icon} {kind.label}
+          </span>
+          <span style={{ fontSize:11.5, color:"#7d739f" }}>
+            {courseTopic} · step {index + 1} of {steps.length}
+            {node.timeMin ? ` · ≈${node.timeMin} min` : ""}
+          </span>
+          <button className="lm-tbtn" style={{ marginLeft:"auto", padding:"7px 15px", fontSize:12.5 }} onClick={onExit}>Exit ✕</button>
+        </div>
+
+        <h1 className="lm-th1">{node.title}</h1>
+        {node._needsDetail && (
+          <div style={{ margin:"6px 0 4px", padding:"10px 15px", borderRadius:12, background:"rgba(251,146,60,.14)", border:"1px solid rgba(253,186,116,.35)", display:"inline-block" }}>
+            <span style={{ fontSize:13.5, color:"#fdba74", fontWeight:600 }}>⚠ Detail for this point wasn't generated — Rebuild the map, or edit this node to add it.</span>
+          </div>
+        )}
+        {node.whyItMatters && <p className="lm-tlead" style={{ color:"#b9aee0" }}>{node.whyItMatters}</p>}
+        {node.explain && <p className="lm-tlead" style={{ marginTop:12 }}>{node.explain}</p>}
+
+        {(node.keyTerms || []).length > 0 && (
+          <div style={{ marginTop:18, display:"flex", flexWrap:"wrap", gap:8 }}>
+            {node.keyTerms.map((t, i) => (
+              <span key={i} className="lm-term" style={{ margin:0 }}>
+                <b>{t.term}</b><span>{t.definition}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="lm-tgrid">
+          {node.board && (
+            <div className="lm-tpanel" style={{ gridColumn:"1 / -1" }}>
+              <h4 style={{ color:"#86efac" }}>Draw this on the board</h4>
+              <div className="lm-board">{node.board}</div>
+            </div>
+          )}
+
+          {(node.steps || []).length > 0 && (
+            <div className="lm-tpanel" style={{ animationDelay:"60ms" }}>
+              <h4>Walk through it</h4>
+              {node.steps.map((s, i) => (
+                <div className="lm-tstep" key={i}>
+                  <span className="lm-tstepn">{i + 1}</span>
+                  <p>{s}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {node.formula && (
+            <div className="lm-tpanel" style={{ animationDelay:"110ms" }}>
+              <h4>Formula</h4>
+              <div className="lm-code">{node.formula}</div>
+            </div>
+          )}
+
+          {node.example && (
+            <div className="lm-tpanel" style={{ animationDelay:"160ms" }}>
+              <h4>Worked example</h4>
+              <div className="lm-code">{node.example}</div>
+            </div>
+          )}
+
+          {node.analogy && (
+            <div className="lm-tpanel" style={{ animationDelay:"200ms" }}>
+              <h4>Think of it like</h4>
+              <p>{node.analogy}</p>
+            </div>
+          )}
+
+          {node.teachTip && (
+            <div className="lm-tpanel" style={{ animationDelay:"240ms", background:"rgba(34,197,94,.08)", borderColor:"rgba(134,239,172,.22)" }}>
+              <h4 style={{ color:"#86efac" }}>Say this</h4>
+              <p>{node.teachTip}</p>
+            </div>
+          )}
+
+          {node.askClass && (
+            <div className="lm-tpanel" style={{ animationDelay:"280ms", background:"rgba(56,189,248,.08)", borderColor:"rgba(125,211,252,.22)" }}>
+              <h4 style={{ color:"#7dd3fc" }}>Ask the room</h4>
+              <p>{node.askClass}</p>
+            </div>
+          )}
+
+          {node.misconception && (
+            <div className="lm-tpanel" style={{ animationDelay:"320ms", background:"rgba(251,146,60,.09)", borderColor:"rgba(253,186,116,.22)" }}>
+              <h4 style={{ color:"#fdba74" }}>Where they trip up</h4>
+              <p>{node.misconception}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="lm-tnav">
+        <button className="lm-tbtn" onClick={() => setIndex(Math.max(index - 1, 0))} disabled={index === 0}>← Back</button>
+        <button className="lm-tbtn" style={{ background:"linear-gradient(135deg,#7c3aed,#6d28d9)", border:"none" }}
+          onClick={() => setIndex(Math.min(index + 1, steps.length - 1))} disabled={index === steps.length - 1}>
+          Next →
+        </button>
+        <span style={{ fontSize:12.5, color:"#7d739f", marginLeft:6 }}>
+          Arrow keys to move · Esc to exit
+        </span>
+        <span style={{ marginLeft:"auto", fontSize:12.5, color:"#9a90c0", maxWidth:"46%", textAlign:"right", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+          {index + 1 < steps.length ? `Next: ${steps[index + 1].node.title}` : "Last step"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LearningMapEditor({ node, onCancel, onSave }) {
+  const [f, setF] = useState({
+    title: node.title || "", kind: node.kind || "concept", summary: node.summary || "",
+    explain: node.explain || "", steps: (node.steps || []).join("\n"),
+    example: node.example || "", formula: node.formula || "",
+    analogy: node.analogy || "", teachTip: node.teachTip || "", misconception: node.misconception || "",
+  });
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const field = { width:"100%", padding:"9px 12px", borderRadius:9, border:"1px solid rgba(255,255,255,.14)",
+                  background:"rgba(0,0,0,.3)", color:"#eee", fontSize:13, outline:"none", boxSizing:"border-box", fontFamily:"inherit" };
+  const label = { fontSize:10.5, fontWeight:800, letterSpacing:".1em", textTransform:"uppercase", color:"#8b80b5", margin:"13px 0 5px", display:"block" };
+
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:9500, background:"rgba(6,4,14,.7)", display:"flex", alignItems:"center", justifyContent:"center", padding:18 }}
+      onClick={onCancel}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background:"linear-gradient(160deg,#191233,#0f0b20)", border:"1px solid #33285a", borderRadius:18, padding:"22px 24px",
+                 width:"min(560px,100%)", maxHeight:"88vh", overflowY:"auto", boxShadow:"0 30px 70px rgba(0,0,0,.6)" }}>
+        <h3 style={{ fontSize:17, fontWeight:800, color:"#f3f0ff", marginBottom:4 }}>Edit node</h3>
+        <p style={{ fontSize:12.3, color:"#8b80b5" }}>Changes save to this day and are visible to students immediately.</p>
+
+        <label style={label}>Title</label>
+        <input style={field} value={f.title} onChange={e => set("title", e.target.value)} />
+
+        <label style={label}>Type</label>
+        <select style={field} value={f.kind} onChange={e => set("kind", e.target.value)}>
+          {Object.entries(LM_KIND).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+        </select>
+
+        <label style={label}>One-line summary</label>
+        <input style={field} value={f.summary} onChange={e => set("summary", e.target.value)} />
+
+        <label style={label}>Explanation (plain words)</label>
+        <textarea style={{ ...field, height:90, resize:"vertical" }} value={f.explain} onChange={e => set("explain", e.target.value)} />
+
+        <label style={label}>Steps — one per line</label>
+        <textarea style={{ ...field, height:70, resize:"vertical" }} value={f.steps} onChange={e => set("steps", e.target.value)} />
+
+        <label style={label}>Formula</label>
+        <input style={field} value={f.formula} onChange={e => set("formula", e.target.value)} />
+
+        <label style={label}>Worked example</label>
+        <textarea style={{ ...field, height:80, resize:"vertical" }} value={f.example} onChange={e => set("example", e.target.value)} />
+
+        <label style={label}>Analogy</label>
+        <input style={field} value={f.analogy} onChange={e => set("analogy", e.target.value)} />
+
+        <label style={label}>How to teach it</label>
+        <textarea style={{ ...field, height:70, resize:"vertical" }} value={f.teachTip} onChange={e => set("teachTip", e.target.value)} />
+
+        <label style={label}>Where beginners trip up</label>
+        <textarea style={{ ...field, height:60, resize:"vertical" }} value={f.misconception} onChange={e => set("misconception", e.target.value)} />
+
+        <div style={{ display:"flex", gap:9, marginTop:20, justifyContent:"flex-end" }}>
+          <button className="lm-tool" onClick={onCancel}>Cancel</button>
+          <button className="lm-tool"
+            style={{ background:"linear-gradient(135deg,#7c3aed,#6d28d9)", border:"none", color:"#fff", padding:"9px 20px" }}
+            onClick={() => onSave({
+              ...f,
+              steps: f.steps.split("\n").map(s => s.trim()).filter(Boolean),
+            })}>
+            Save changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenLearningMap, onExpandMapNode, lmProgress, fsProgress, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -12991,6 +15394,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
     { id:"assignment",label:"📝 Assignment" },
     { id:"formula",   label:"🧮 Formulas" },
     { id:"quiz",      label:"🎯 Quiz" },
+    // Sits after Quiz. Students see it once the trainer has built it.
+    ...(!studentMode || dayData?.learningMap ? [{ id:"map", label:"🗺️ Learning Map" }] : []),
     // Data Generator tab: always visible for trainers; for students only if trainer has published data
     ...(!studentMode || dayData?.dataGenerator ? [{ id:"data", label:"🗃️ Data Generator" }] : []),
     { id:"notes",     label:"🗒️ Notes" },
@@ -13551,10 +15956,25 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
           sb={sb}
           courseId={courseId}
           studentId={studentId}
+          fsProgress={fsProgress}
         />
       )}
 
       {/* ── QUIZ ── */}
+      {tab==="map" && (
+        <LearningMapTab
+          day={day}
+          dayData={dayData}
+          busy={busy}
+          onGenLearningMap={onGenLearningMap}
+          onExpandMapNode={onExpandMapNode}
+          lmProgress={lmProgress}
+          updateDay={updateDay}
+          notify={notify}
+          studentMode={studentMode}
+        />
+      )}
+
       {tab==="quiz" && (
         <QuizTab
           day={day}
@@ -16077,7 +18497,7 @@ function AdminDashboard({ sb, onLogout }) {
 ═══════════════════════════════════════════════════════════════════ */
 
 /* ═══════════════════════════════════════════════════════════
-   AI WITH ARBAJ LMS — LANDING PAGE
+   LANDING PAGE
    Style: Soft Neumorphism × Liquid Glass × Light App Shell
    Inspired by: extruded neumorphic surfaces, frosted glass
    overlays, and a clean soft-grey base (#EDF1F7)
@@ -16287,7 +18707,7 @@ function Blobs() {
 /* ── Terminal ───────────────────────────────────────────── */
 function Terminal() {
   const lines = [
-    { k:"cm", v:"# AI With ARBAJ — generate day content" },
+    { k:"cm", v:"# Generate a full day of course content" },
     { k:"bl" }, { k:"co", v:'topic = "Linear Regression"' }, { k:"co", v:"genNotebook(topic, count=3)" },
     { k:"bl" },
     { k:"ok", v:"✓ Notebook ready — 3 sub-topics" }, { k:"ok", v:"✓ Quiz generated — 10 MCQs" },
@@ -16371,7 +18791,7 @@ function BrowserMockup() {
     <div className="browser" style={{ position:"relative", zIndex:2 }}>
       <div className="bbar">
         <div className="bdots">{["#FF5F57","#FFBD2E","#28C840"].map(c=><div key={c} className="bdot" style={{ background:c }} />)}</div>
-        <div className="burl"><span style={{ color:C.teal }}>🔒</span><span>lms.aiwitharbaj.app</span></div>
+        <div className="burl"><span style={{ color:C.teal }}>🔒</span><span>{`lms.${APP_NAME.toLowerCase()}.app`}</span></div>
       </div>
       <div style={{ display:"flex", height:360, overflow:"hidden" }}>
         {/* Sidebar */}
@@ -16389,7 +18809,7 @@ function BrowserMockup() {
         </div>
         {/* Main content */}
         <div style={{ flex:1, padding:"18px 18px", background:C.shell, overflowY:"hidden" }}>
-          <div style={{ fontSize:13.5, fontWeight:800, color:C.text, marginBottom:14 }}>Good morning, Arbaj 👋</div>
+          <div style={{ fontSize:13.5, fontWeight:800, color:C.text, marginBottom:14 }}>Good morning 👋</div>
           <div style={{ display:"flex", gap:10, marginBottom:16 }}>
             {[
               { l:"Active Courses", v:"4",   tint:"violet", icon:"📖" },
@@ -16477,17 +18897,14 @@ function AppLogo({ size = "md", theme = "gradient", onClick, subtitle = null }) 
         display:"flex", alignItems:"center", justifyContent:"center",
         flexShrink:0,
       }}>
-        {/* Open book with a spark — represents AI-powered learning */}
-        <svg width={s.iconW * 0.6} height={s.iconH * 0.6} viewBox="0 0 20 20" fill="none">
-          {/* Book pages */}
-          <path d="M3 4.5C3 4.5 6 4 10 5.5C14 4 17 4.5 17 4.5V14.5C17 14.5 14 14 10 15.5C6 14 3 14.5 3 14.5V4.5Z"
-            stroke="rgba(255,255,255,0.9)" strokeWidth="1.3" strokeLinejoin="round" fill="rgba(255,255,255,0.12)"/>
-          {/* Spine line */}
-          <line x1="10" y1="5.5" x2="10" y2="15.5" stroke="rgba(255,255,255,0.7)" strokeWidth="1.1"/>
-          {/* AI spark / star */}
-          <circle cx="14.5" cy="3.5" r="1" fill="rgba(255,255,255,0.0)"/>
-          <path d="M14.5 1.5 L14.9 3.1 L16.5 3.5 L14.9 3.9 L14.5 5.5 L14.1 3.9 L12.5 3.5 L14.1 3.1 Z"
-            fill="rgba(255,255,255,0.95)" />
+        {/* A topic branching into sub-topics — the same shape the learning
+            map draws, and still legible at 16px. */}
+        <svg width={s.iconW * 0.58} height={s.iconH * 0.58} viewBox="0 0 24 24" fill="none">
+          <path d="M12 8.5 V12 M12 12 H6 V15.2 M12 12 H18 V15.2"
+            stroke="rgba(255,255,255,.92)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+          <circle cx="12" cy="5.6" r="3.1" fill="#fff"/>
+          <circle cx="6"  cy="18" r="2.5" fill="rgba(255,255,255,.9)"/>
+          <circle cx="18" cy="18" r="2.5" fill="rgba(255,255,255,.62)"/>
         </svg>
       </div>
 
@@ -16501,7 +18918,7 @@ function AppLogo({ size = "md", theme = "gradient", onClick, subtitle = null }) 
           letterSpacing:"-0.025em",
           ...t.textStyle,
         }}>
-          AI With ARBAJ
+          {APP_NAME}
         </span>
         {subtitle && (
           <span style={{
@@ -16553,7 +18970,7 @@ function LandingPage({ onGetStarted }) {
         <div style={{ position:"relative", zIndex:2, display:"flex", flexDirection:"column", alignItems:"center" }}>
           <div className="hbadge"><span className="bdot" />AI-Powered Learning Management</div>
           <h1 className="hh1">Build Rich Courses<br /><span className="gr">With One Click</span></h1>
-          <p className="hsub">AI With ARBAJ LMS turns any topic into a full course day — notebooks, quizzes, datasets, assignments, and teaching guides, generated by Groq AI in seconds.</p>
+          <p className="hsub">Turn any topic into a full course day — notebooks, quizzes, datasets, assignments, learning maps and teaching guides, generated in seconds.</p>
           <div className="hbtns">
             <button className="btn-p" onClick={onGetStarted}>Start Teaching Free →</button>
             
@@ -16764,7 +19181,7 @@ function LandingPage({ onGetStarted }) {
           <div style={{ textAlign:"center" }}>
             <div className="ey">Open & Transparent</div>
             <h2 className="h2t">Bring Your Own Key.<br />Pay Only What You Use.</h2>
-            <p className="h2s" style={{ margin:"0 auto" }}>AI With ARBAJ is open-source. Connect your Groq API key — the free tier covers most teaching use.</p>
+            <p className="h2s" style={{ margin:"0 auto" }}>Open-source. Connect your Groq API key — the free tier covers most teaching use.</p>
           </div>
         </Reveal>
         <div className="pgrid">
@@ -16822,8 +19239,7 @@ function LandingPage({ onGetStarted }) {
       {/* FOOTER */}
       <footer className="foot">
         <div>
-          <div style={{ fontWeight:800, fontSize:17, background:`linear-gradient(135deg,${C.violet},${C.blue})`, WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:5 }}>AI With ARBAJ</div>
-          <div className="fcopy">© {new Date().getFullYear()} AI With ARBAJ LMS · Open Source</div>
+          <div className="fcopy">© {new Date().getFullYear()} {APP_FULL} · Open Source</div>
         </div>
         <div className="flinks">
           <a href="#roles">Roles</a><a href="#features">Features</a><a href="#how">How it Works</a><a href="#tech">Technology</a>
@@ -16838,7 +19254,110 @@ function LandingPage({ onGetStarted }) {
    MAIN APP
 ═══════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════
+   iOS-STYLE DESIGN SYSTEM
+   Mounted once at the app root. Sets the type ramp, easing curves and a
+   set of finishing touches — spring-eased buttons, momentum-friendly
+   scrolling, focus rings, a lift on interactive cards — that apply across
+   every screen without touching each component. Everything here is
+   additive: it refines what's already there and respects reduced motion.
+═══════════════════════════════════════════════════════════════════ */
+const IOS_DS_CSS = `
+      :root{
+        /* Apple's system easing — the feel of the whole thing lives here */
+        --ios-spring: cubic-bezier(.34,1.56,.64,1);
+        --ios-ease:   cubic-bezier(.32,.72,0,1);
+        --ios-smooth: cubic-bezier(.4,0,.2,1);
+        --ios-dur:    .32s;
+      }
+
+      /* System font stack, the way iOS renders text */
+      body, button, input, textarea, select, .lms-input, .lms-btn{
+        font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI",system-ui,sans-serif;
+        -webkit-font-smoothing:antialiased;
+        -moz-osx-font-smoothing:grayscale;
+        text-rendering:optimizeLegibility;
+      }
+      body{ letter-spacing:-.011em; }
+
+      /* Momentum scrolling, no chunky scrollbars */
+      *{ -webkit-tap-highlight-color:transparent; }
+      *{ scrollbar-width:thin; scrollbar-color:rgba(140,140,160,.4) transparent; }
+      *::-webkit-scrollbar{ width:8px; height:8px; }
+      *::-webkit-scrollbar-thumb{ background:rgba(140,140,160,.34); border-radius:99px; border:2px solid transparent; background-clip:padding-box; }
+      *::-webkit-scrollbar-thumb:hover{ background:rgba(140,140,160,.55); background-clip:padding-box; }
+      *::-webkit-scrollbar-track{ background:transparent; }
+      .lms-scroll, main, aside, [style*="overflow"]{ -webkit-overflow-scrolling:touch; }
+
+      /* Buttons: spring press, subtle rise. Applies to the app's own classes. */
+      .lms-btn, button:not(.lm-tool):not(.csp-card):not(.lm-card){
+        transition: transform .18s var(--ios-spring), box-shadow .24s var(--ios-ease), background .2s var(--ios-ease), opacity .2s ease !important;
+        will-change: transform;
+      }
+      .lms-btn:active, button:not(.lm-tool):not([disabled]):active{
+        transform: scale(.955);
+      }
+      .lms-btn:not([disabled]):hover{ transform: translateY(-1px); }
+
+      /* Inputs: focus ring that grows, iOS-style */
+      .lms-input, input:not([type="checkbox"]):not([type="radio"]), textarea, select{
+        transition: border-color .2s var(--ios-ease), box-shadow .24s var(--ios-ease), background .2s var(--ios-ease) !important;
+      }
+      .lms-input:focus, input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus{
+        box-shadow: 0 0 0 4px rgba(99,102,241,.16);
+      }
+
+      /* Cards and panels get a gentle rise on hover */
+      .lms-card{
+        transition: transform .28s var(--ios-ease), box-shadow .3s var(--ios-ease) !important;
+        will-change: transform;
+      }
+
+      /* Modals and overlays fade + scale in like sheets */
+      @keyframes ios-sheet-in{ from{ opacity:0; transform: translateY(12px) scale(.985); } to{ opacity:1; transform:none; } }
+      @keyframes ios-fade-in{ from{ opacity:0; } to{ opacity:1; } }
+      @keyframes ios-pop-in{ from{ opacity:0; transform: scale(.9); } to{ opacity:1; transform:none; } }
+      @keyframes ios-slide-up{ from{ transform: translateY(100%); } to{ transform:none; } }
+
+      /* Tab / nav items ease their active state */
+      .lms-tab, .lms-nav-item, [role="tab"]{
+        transition: background .2s var(--ios-ease), color .2s var(--ios-ease), transform .18s var(--ios-spring) !important;
+      }
+
+      /* Toggles that look like iOS switches, applied to the app's switch class if present */
+      .ios-switch{ position:relative; width:50px; height:30px; border-radius:99px; background:#e5e5ea; transition:background .3s var(--ios-ease); cursor:pointer; flex-shrink:0; }
+      .ios-switch.on{ background:#34c759; }
+      .ios-switch::after{ content:""; position:absolute; top:2px; left:2px; width:26px; height:26px; border-radius:99px; background:#fff; box-shadow:0 2px 6px rgba(0,0,0,.2),0 0 1px rgba(0,0,0,.1); transition:transform .32s var(--ios-spring); }
+      .ios-switch.on::after{ transform:translateX(20px); }
+
+      /* Segmented control, the iOS settings pattern */
+      .ios-seg{ display:inline-flex; background:rgba(120,120,128,.16); border-radius:11px; padding:2px; gap:2px; }
+      .ios-seg button{ border:none; background:transparent; padding:7px 15px; border-radius:9px; font-size:13.5px; font-weight:600; color:#1c1c1e; cursor:pointer; transition:all .26s var(--ios-ease); }
+      .ios-seg button.on{ background:#fff; box-shadow:0 1px 4px rgba(0,0,0,.12),0 0 1px rgba(0,0,0,.08); }
+
+      /* Anything tagged as pressable gets the spring */
+      .ios-press{ transition: transform .18s var(--ios-spring) !important; }
+      .ios-press:active{ transform: scale(.96); }
+
+      /* Smooth the app's existing fade-in keyframe */
+      @keyframes lms-in{ from{ opacity:0; transform: translateY(8px); } to{ opacity:1; transform:none; } }
+
+      @media (prefers-reduced-motion: reduce){
+        *, *::before, *::after{ animation-duration:.001ms !important; transition-duration:.001ms !important; }
+      }
+`;
+
 export default function LMSApp() {
+  // The design-system stylesheet is injected into <head> once, so it
+  // applies on every role branch without wrapping each return.
+  useEffect(() => {
+    if (document.getElementById("ios-design-system")) return;
+    const style = document.createElement("style");
+    style.id = "ios-design-system";
+    style.textContent = IOS_DS_CSS;
+    document.head.appendChild(style);
+  }, []);
+
   // Supabase client — created once from env vars, shared by all roles
   const [sb, setSb] = useState(() =>
     _SB_URL && _SB_KEY ? makeSupabase(_SB_URL, _SB_KEY) : null
@@ -16847,6 +19366,26 @@ export default function LMSApp() {
   const [auth, setAuth]                       = useState(getAuthState());
   const [currentCourseId, setCurrentCourseId] = useState(null);
   const [courseView, setCourseView]           = useState(false);
+  // Trainer profile — durable, mirrored locally, shown from the shell header.
+  const [trainerProfile, setTrainerProfile]   = useState({});
+  const [trainerProfileOpen, setTrainerProfileOpen] = useState(false);
+  useEffect(() => {
+    if (auth?.role !== "trainer" || !auth?.id) return;
+    setTrainerProfile(profileMirrorRead("trainer", auth.id) || {});
+    let alive = true;
+    sbGetProfile(sb, "trainer", auth.id).then(p => { if (alive && p) setTrainerProfile(prev => ({ ...prev, ...p })); }).catch(() => {});
+    return () => { alive = false; };
+  }, [sb, auth?.id, auth?.role]);
+  const saveTrainerProfile = async (updates) => {
+    const next = { ...trainerProfile, ...updates };
+    setTrainerProfile(next);
+    if (auth?.id) {
+      const res = await sbSaveProfile(sb, "trainer", auth.id, next);
+      if (res && !res.ok && !res.queued) throw (res.error || new Error("Save failed"));
+    }
+  };
+  const trainerAvatar = trainerProfile.photoUrl;
+  const trainerInitials = (trainerProfile.displayName || auth?.name || "T").trim().split(/\s+/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
   // A pending QR scan, captured at module load so it survives remounts.
   const [attScan, setAttScan]                 = useState(() => !!readAttParams());
 
@@ -16948,13 +19487,27 @@ export default function LMSApp() {
             />
           <div style={{ display:"flex", gap:10, alignItems:"center" }}>
             {courseView && currentCourseId && (
-              <button onClick={()=>setCourseView(false)} style={{ padding:"8px 20px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", color:"#8B5CF6", border:"1px solid #fff", borderRadius:99, cursor:"pointer", fontWeight:700, fontSize:13, display:"flex", alignItems:"center", gap:6, boxShadow:"6px 6px 14px #C4CDD9,-4px -4px 10px #fff" }}>
+              <button onClick={()=>setCourseView(false)} className="ios-press" style={{ padding:"8px 20px", background:"linear-gradient(145deg,#EDF1F7,#E4E9F2)", color:"#8B5CF6", border:"1px solid #fff", borderRadius:99, cursor:"pointer", fontWeight:700, fontSize:13, display:"flex", alignItems:"center", gap:6, boxShadow:"6px 6px 14px #C4CDD9,-4px -4px 10px #fff" }}>
                 ← Switch Course
               </button>
             )}
-            <button onClick={handleLogout} style={{ padding:"8px 20px", background:"linear-gradient(135deg,#f43f5e,#e879f9)", color:"white", border:"none", borderRadius:99, cursor:"pointer", fontWeight:700, boxShadow:"6px 6px 14px #C4CDD9,-3px -3px 10px #fff,0 4px 16px rgba(244,63,94,.3)" }}>Logout</button>
+            <button onClick={()=>setTrainerProfileOpen(true)} className="ios-press" title="Your profile"
+              style={{ display:"flex", alignItems:"center", gap:9, padding:"5px 14px 5px 5px", background:"rgba(255,255,255,.7)", border:"1px solid #fff", borderRadius:99, cursor:"pointer", boxShadow:"4px 4px 12px #C4CDD9,-3px -3px 8px #fff" }}>
+              <span style={{ width:34, height:34, borderRadius:99, overflow:"hidden", background:"linear-gradient(135deg,#8B5CF6,#6366F1)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                {trainerAvatar ? <img src={trainerAvatar} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} /> : <span style={{ color:"#fff", fontWeight:800, fontSize:13.5 }}>{trainerInitials}</span>}
+              </span>
+              <span style={{ fontWeight:700, fontSize:13.5, color:"#334155", maxWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {trainerProfile.displayName || auth.name}
+              </span>
+            </button>
+            <button onClick={handleLogout} className="ios-press" style={{ padding:"8px 20px", background:"linear-gradient(135deg,#f43f5e,#e879f9)", color:"white", border:"none", borderRadius:99, cursor:"pointer", fontWeight:700, boxShadow:"6px 6px 14px #C4CDD9,-3px -3px 10px #fff,0 4px 16px rgba(244,63,94,.3)" }}>Logout</button>
           </div>
         </div>
+
+        {trainerProfileOpen && (
+          <ProfilePanel role="trainer" profile={trainerProfile} authName={auth?.name || ""} authEmail={auth?.username || ""}
+            onSave={saveTrainerProfile} onClose={()=>setTrainerProfileOpen(false)} darkMode={false} />
+        )}
         {courseView && currentCourseId ? (
           <OriginalLMSApp courseId={currentCourseId} onBack={()=>setCourseView(false)} sb={sb} trainerId={auth?.id} />
         ) : (
