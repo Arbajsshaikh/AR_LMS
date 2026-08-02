@@ -12,6 +12,7 @@ import {
   PlatformIntelligenceAgent,
 } from "./LMS_Agents";
 import { runBoardLessonAgents, BoardLessonPanel, compactLesson, lessonBytes } from "./LMS_Board";
+import { NotesPanel, DoubtHeatmap, runNotesAgent } from "./LMS_Learn";
 
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
@@ -1507,7 +1508,7 @@ const COURSE_SETTINGS_KEY = "__course_settings__";
 // Content types stored as JSON rather than markdown/plain text. Anything
 // listed here is parsed back into an object on load; anything not listed
 // comes back as the string it was saved as.
-const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap", "boardLesson", "boardThumbs", "boardAvatar"]);
+const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardCards", "boardCardsOff", "boardNotes"]);
 
 async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
@@ -5801,6 +5802,19 @@ function TrainerStudentPerformance({ sb, courseId, planDays, dayMap = {}, darkMo
       </div>
 
       {/* ── Student list ── */}
+      {/* Where the class actually gets stuck, from every board question asked */}
+      <div style={{ marginBottom:16 }}>
+        <ErrorBoundary>
+          <DoubtHeatmap
+            allActivity={activityMap}
+            students={students}
+            dayMap={dayMap}
+            planDays={planDays}
+            darkMode={darkMode}
+          />
+        </ErrorBoundary>
+      </div>
+
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
         {students.map(s => {
           const sum      = summaryFor(s);
@@ -9222,6 +9236,20 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         case "practical":
           next.practicals = { ...(prev.practicals||{}), [dayKey]: ((prev.practicals||{})[dayKey]||0) + 1 };
           break;
+        case "boardDoubt": {
+          // Capped so a chatty session can never bloat the activity row.
+          const prevD = prev.boardDoubts || [];
+          next.boardDoubts = [...prevD, { dayKey, ...payload }].slice(-120);
+          break;
+        }
+        case "checkpoint": {
+          const key = `${dayKey}:${payload.beat}`;
+          next.checkpoints = { ...(prev.checkpoints || {}), [key]: { score: payload.score, missed: payload.missed, at: Date.now() } };
+          break;
+        }
+        case "flashcards":
+          next.flashcards = { ...(prev.flashcards || {}), [dayKey]: payload };
+          break;
         case "resourceView":
           next.resourceViews = { ...(prev.resourceViews||{}), [dayKey]: true };
           break;
@@ -9282,7 +9310,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
           lightDayData[k] = light;
         }
 
@@ -9311,7 +9339,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
           lightDayData[k] = light;
         }
         sbQueuePush({
@@ -9492,7 +9520,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardAvatarPhoto"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardAvatarPhoto", "boardCards", "boardCardsOff", "boardCode", "boardNotes"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -9624,6 +9652,36 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       }
     } catch(e) {
       if (!opts.silent) notify(`Board lesson: ${e.message}`, "err");
+      else throw e;
+    } finally {
+      setBusyKey(busyKey, false);
+      setPendingGen(p => { const n={...p}; delete n[busyKey]; return n; });
+    }
+  };
+
+  /* ── HANDWRITTEN NOTES ─────────────────────────────────────────────
+     Written by AI from the board lesson plus the topic itself, so the
+     notes carry everything that was taught AND the detail a lecture had
+     no time for. Runs after the board lesson in Generate All.        */
+  const genHandwrittenNotes = async (day, opts={}) => {
+    const k = day.key;
+    const busyKey = `notes-${k}`;
+    setBusyKey(busyKey, true);
+    setPendingGen(p => ({ ...p, [busyKey]: { type: "boardNotes", topic: day.topic, startedAt: Date.now() } }));
+    try {
+      const notes = await runNotesAgent({
+        topic: day.topic,
+        subTopics: (dayData[k]?.subTopics || "").trim(),
+        lesson: dayData[k]?.boardLesson || null,
+        callAI,
+        onProgress: ({ label }) =>
+          setPendingGen(p => ({ ...p, [busyKey]: { ...(p[busyKey]||{}), type: "boardNotes", topic: day.topic, note: label } })),
+      });
+      if (!notes?.blocks?.length) throw new Error("The notes came back empty — try again or switch model");
+      updateDay(k, { boardNotes: notes, generatedForTopic: day.topic });
+      if (!opts.silent) notify(`Handwritten notes ready — ${notes.blocks.length} blocks`);
+    } catch(e) {
+      if (!opts.silent) notify(`Notes: ${e.message}`, "err");
       else throw e;
     } finally {
       setBusyKey(busyKey, false);
@@ -10272,6 +10330,8 @@ If "${title}" is a formula or calculation, the formula and board fields must bot
     // The process NEVER stops mid-way due to a rate-limit — it always finishes all 6 steps.
     const steps = [
       { label: "Board Lesson",   fn: () => genBoardLesson(day,   { silent: true }) },
+      // Reads the board it was just given, so it must follow it.
+      { label: "Handwritten Notes", fn: () => genHandwrittenNotes(day, { silent: true }) },
       { label: "Notebook",       fn: () => genNotebook(day,      { silent: true }) },
       { label: "Examples",       fn: () => genExamples(day,      { silent: true }) },
       { label: "Resources",      fn: () => genResources(day,     { silent: true }) },
@@ -11438,7 +11498,13 @@ If "${title}" is a formula or calculation, the formula and board fields must bot
                   })()}
                   onRunCode={code=>runCode(selDay,code)}
                   onGenBoardLesson={()=>genBoardLesson(selDay)}
+                  onGenNotes={()=>genHandwrittenNotes(selDay)}
                   callAI={callAI}
+                  // DL_GUARD is a mutable module object synced by an effect, so
+                  // reading it during render can lag a tick. Derive the flag from
+                  // the same state the effect does.
+                  downloadsLocked={!!courseSettings?.downloadLocked && studentMode}
+                  canDownload={canDownload}
                   onGenNotebook={()=>genNotebook(selDay)}
                   onGenExamples={()=>genExamples(selDay)}
                   onGenResources={()=>genResources(selDay)}
@@ -15535,7 +15601,7 @@ function LearningMapEditor({ node, onCancel, onSave }) {
   );
 }
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenBoardLesson, callAI, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenLearningMap, onExpandMapNode, lmProgress, fsProgress, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenBoardLesson, onGenNotes, callAI, downloadsLocked, canDownload, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenLearningMap, onExpandMapNode, lmProgress, fsProgress, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -15569,6 +15635,7 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
   const TABS = [
     // Sits before Notebook: the lecture comes first, the notebook is the write-up.
     ...(!studentMode || dayData?.boardLesson ? [{ id:"board", label:"🧑‍🏫 Board Lesson" }] : []),
+    ...(!studentMode || dayData?.boardLesson || dayData?.boardNotes ? [{ id:"handnotes", label:"📝 Handwritten Notes" }] : []),
     { id:"notebook",  label:"📓 Notebook" },
     { id:"compiler",  label:"💻 Compiler" },
     { id:"examples",  label:"⚡ Examples" },
@@ -15854,6 +15921,38 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
             groqKey={studentMode ? studentGroqKey : groqKey}
             studentId={studentId}
             trackActivity={trackActivity}
+            downloadsLocked={downloadsLocked}
+            canDownload={canDownload}
+          />
+        </ErrorBoundary>
+      )}
+
+      {/* ── STUDY — recall, notes, checkpoints, code and algorithms ── */}
+      {tab==="handnotes" && (
+        <ErrorBoundary>
+          <NotesPanel
+            day={day}
+            dayKey={k}
+            dayData={dayData}
+            updateDay={updateDay}
+            lesson={dayData?.boardLesson}
+            callAI={
+              studentMode
+                ? (studentGroqKey
+                    ? (messages, opts) => callGroq(studentGroqKey, studentGroqModel || GROQ_MODELS[1], messages, opts)
+                    : null)
+                : callAI
+            }
+            groqKey={studentMode ? studentGroqKey : groqKey}
+            studentMode={studentMode}
+            darkMode={darkMode}
+            notify={notify}
+            trackActivity={trackActivity}
+            studentId={studentId}
+            canDownload={canDownload}
+            downloadsLocked={downloadsLocked}
+            busy={busy}
+            onGenerate={onGenNotes}
           />
         </ErrorBoundary>
       )}
