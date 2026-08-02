@@ -11,6 +11,7 @@ import {
   DynamicQuizGenerator,
   PlatformIntelligenceAgent,
 } from "./LMS_Agents";
+import { runBoardLessonAgents, BoardLessonPanel, compactLesson, lessonBytes } from "./LMS_Board";
 
 /* ═══════════════════════════════════════════════════════════════════
    CONSTANTS
@@ -1506,7 +1507,7 @@ const COURSE_SETTINGS_KEY = "__course_settings__";
 // Content types stored as JSON rather than markdown/plain text. Anything
 // listed here is parsed back into an object on load; anything not listed
 // comes back as the string it was saved as.
-const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap"]);
+const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap", "boardLesson", "boardThumbs", "boardAvatar"]);
 
 async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
@@ -9281,7 +9282,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, ...light } = v;
           lightDayData[k] = light;
         }
 
@@ -9310,7 +9311,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, ...light } = v;
           lightDayData[k] = light;
         }
         sbQueuePush({
@@ -9491,7 +9492,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardAvatarPhoto"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -9589,6 +9590,46 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
   }, [runAI]);
   // Kept as a distinct name for the batch call sites; same guarantees.
   const callAIResilient = callAI;
+
+  /* ── BOARD LESSON ──────────────────────────────────────────────────
+     Runs before the notebook. Takes its topic from day.topic and its
+     sub-topics from the shared subTopics field, exactly like every other
+     generator here, and goes through callAI so the same Groq keys,
+     model fallback and rate-limit handling apply.                      */
+  const genBoardLesson = async (day, opts={}) => {
+    const k = day.key;
+    const busyKey = `board-${k}`;
+    setBusyKey(busyKey, true);
+    setPendingGen(p => ({ ...p, [busyKey]: { type: "boardLesson", topic: day.topic, startedAt: Date.now() } }));
+    try {
+      const subTopics = (dayData[k]?.subTopics || "").trim();
+      const beats = Math.max(3, Math.min(8, parseInt(dayData[k]?.boardBeats) || 5));
+      const lesson = await runBoardLessonAgents({
+        topic: day.topic,
+        subTopics,
+        beats,
+        callAI,
+        onProgress: ({ step, of, label }) => {
+          setPendingGen(p => ({ ...p, [busyKey]: { ...(p[busyKey]||{}), type: "boardLesson", topic: day.topic, note: `${step}/${of} — ${label}` } }));
+        },
+      });
+      if (!lesson?.segments?.length) throw new Error("The lesson came back empty — try again or switch model");
+      // Only the script and board instructions are stored. Students re-render
+      // the board from these, so no image data has to travel.
+      const stored = compactLesson(lesson);
+      updateDay(k, { boardLesson: stored, generatedForTopic: day.topic });
+      if (!opts.silent) {
+        const kb = Math.max(1, Math.round(lessonBytes(stored) / 1024));
+        notify(`Board lesson ready — ${stored.segments.length} segments, ${lesson.corrected || 0} corrected, ${kb} KB saved`);
+      }
+    } catch(e) {
+      if (!opts.silent) notify(`Board lesson: ${e.message}`, "err");
+      else throw e;
+    } finally {
+      setBusyKey(busyKey, false);
+      setPendingGen(p => { const n={...p}; delete n[busyKey]; return n; });
+    }
+  };
 
   const genNotebook = async (day, opts={}) => {
     const k = day.key;
@@ -10230,6 +10271,7 @@ If "${title}" is a formula or calculation, the formula and board fields must bot
     // Each step uses withRLResilience: 429 → pause 5s; 2×429 → auto-switch model.
     // The process NEVER stops mid-way due to a rate-limit — it always finishes all 6 steps.
     const steps = [
+      { label: "Board Lesson",   fn: () => genBoardLesson(day,   { silent: true }) },
       { label: "Notebook",       fn: () => genNotebook(day,      { silent: true }) },
       { label: "Examples",       fn: () => genExamples(day,      { silent: true }) },
       { label: "Resources",      fn: () => genResources(day,     { silent: true }) },
@@ -11395,6 +11437,8 @@ If "${title}" is a formula or calculation, the formula and board fields must bot
                     return null;
                   })()}
                   onRunCode={code=>runCode(selDay,code)}
+                  onGenBoardLesson={()=>genBoardLesson(selDay)}
+                  callAI={callAI}
                   onGenNotebook={()=>genNotebook(selDay)}
                   onGenExamples={()=>genExamples(selDay)}
                   onGenResources={()=>genResources(selDay)}
@@ -15491,7 +15535,7 @@ function LearningMapEditor({ node, onCancel, onSave }) {
   );
 }
 
-function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenLearningMap, onExpandMapNode, lmProgress, fsProgress, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
+function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {}, busy, pendingGen, codeEdit, setCodeEdit, codeOutput, onBack, onPrevDay, onNextDay, onRunCode, onGenBoardLesson, callAI, onGenNotebook, onGenExamples, onGenResources, onGenAssignment, onGenFormulaSheet, onGenTeachingGuide, onGenQuiz, onGenLearningMap, onExpandMapNode, lmProgress, fsProgress, onGenAll, onFileUpload, onDeleteFile, updateDay, notify, pyodideReady, pyodideLoading, onLoadPyodide, studentMode, onEditTopic, groqKey, groqModel, studentGroqKey, studentGroqModel, sb, courseId, trainerId, studentId, trackActivity, studentActivity, darkMode, setDarkMode }) {
   const [tab, setTab] = useState("notebook");
   const [exportOpen, setExportOpen] = useState(false);
   const [editingTopic, setEditingTopic] = useState(false);
@@ -15523,6 +15567,8 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
   }, [dayData.codeBlocks, day.key]);
 
   const TABS = [
+    // Sits before Notebook: the lecture comes first, the notebook is the write-up.
+    ...(!studentMode || dayData?.boardLesson ? [{ id:"board", label:"🧑‍🏫 Board Lesson" }] : []),
     { id:"notebook",  label:"📓 Notebook" },
     { id:"compiler",  label:"💻 Compiler" },
     { id:"examples",  label:"⚡ Examples" },
@@ -15779,6 +15825,38 @@ function DayPage({ day, dayData, dayStatus, setDayStatus, trainerDayStatus = {},
         background: "transparent",
         transition: "background .3s",
       }}>
+
+      {/* ── BOARD LESSON — animated chalkboard, before the notebook ── */}
+      {tab==="board" && (
+        <ErrorBoundary>
+          <BoardLessonPanel
+            day={day}
+            dayKey={k}
+            dayData={dayData}
+            updateDay={updateDay}
+            notify={notify}
+            studentMode={studentMode}
+            darkMode={darkMode}
+            busy={busy}
+            onGenerate={onGenBoardLesson}
+            // Students have their own key; callAI reads the trainer pool, so
+            // route student questions through their own key instead.
+            callAI={
+              studentMode
+                ? (studentGroqKey
+                    // `opts` carries maxTokens. Dropping it let callGroq fall back
+                    // to 8000, which Groq rejects outright on a small per-minute
+                    // budget with "request too large for model".
+                    ? (messages, opts) => callGroq(studentGroqKey, studentGroqModel || GROQ_MODELS[1], messages, opts)
+                    : null)
+                : callAI
+            }
+            groqKey={studentMode ? studentGroqKey : groqKey}
+            studentId={studentId}
+            trackActivity={trackActivity}
+          />
+        </ErrorBoundary>
+      )}
 
       {/* ── NOTEBOOK ── */}
       {tab==="notebook" && (
