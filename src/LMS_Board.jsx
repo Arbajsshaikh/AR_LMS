@@ -43,6 +43,28 @@ const GROQ_VOICES = [
   "Quinn-PlayAI", "Thunder-PlayAI", "Indigo-PlayAI", "Deedee-PlayAI"
 ];
 
+/* Languages the board can teach in. `bcp` picks a matching browser voice for
+   narration (Groq's PlayAI voices are English-only, so anything but English
+   falls back to the browser's own speech synthesis). The chalk font only has
+   Latin glyphs (see FONT_SRC above), so the drawn strokes always stay in
+   English — translation covers what is SAID, the caption, the transcript and
+   doubt answers, not the handwriting on the board itself. */
+const LANGUAGES = [
+  { code: "en", label: "English", bcp: "en" },
+  { code: "es", label: "Spanish", bcp: "es" },
+  { code: "fr", label: "French", bcp: "fr" },
+  { code: "de", label: "German", bcp: "de" },
+  { code: "hi", label: "Hindi", bcp: "hi" },
+  { code: "ar", label: "Arabic", bcp: "ar" },
+  { code: "pt", label: "Portuguese", bcp: "pt" },
+  { code: "zh", label: "Chinese", bcp: "zh" },
+  { code: "ja", label: "Japanese", bcp: "ja" },
+  { code: "ru", label: "Russian", bcp: "ru" },
+  { code: "id", label: "Indonesian", bcp: "id" },
+  { code: "tr", label: "Turkish", bcp: "tr" },
+];
+const langLabel = code => LANGUAGES.find(l => l.code === code)?.label || code;
+
 /* ------------------------------------------------------------------- random */
 function mulberry(seed) {
   let a = seed >>> 0;
@@ -55,7 +77,7 @@ function mulberry(seed) {
 }
 let SEED = 1;
 export const resetSeed = (v = 1) => { SEED = v; };
-export { BW, BH, mulberry, buildTimeline, chalkSegment, makeBoardTexture, textStrokes, measure, deTex, CHALK, chalkOf, COL };
+export { BW, BH, mulberry, buildTimeline, chalkSegment, makeBoardTexture, textStrokes, measure, deTex, CHALK, chalkOf, COL, LANGUAGES };
 const nextRnd = () => mulberry((SEED = (SEED * 1103515245 + 12345) & 0x7fffffff));
 
 /* ==========================================================================
@@ -1352,7 +1374,18 @@ Return JSON only: {"segments":[{"say":"...","blocks":[...]}]}
 - If the question reveals a likely misunderstanding, name that misunderstanding in pink and correct it.
 - If it is quantitative, show the numbers on the board, not just in speech.
 - End with one sentence that hands back to the lesson.
-` + DSL_SPEC
+` + DSL_SPEC,
+
+  translate:
+    `You are a precise translator for spoken classroom narration. You will be given a JSON array of
+strings — sentences a teacher says out loud while teaching a lesson — and a target language.
+Translate every string into that target language.
+Return JSON only: {"lines":["translation of line 1","translation of line 2", ...]}
+- Return exactly as many lines as you were given, in the same order — never merge, split, skip or add lines.
+- Keep numbers, symbols, formulas, variable names and units exactly as written (e.g. "x²", "5 km/h", "y = mx + b").
+- Translate naturally, the way a real teacher speaking that language would say it out loud — not a literal word-for-word rendering.
+- Keep the same register: plain, second-person, spoken, not formal written prose.
+- If a line is empty, return it as an empty string.`
 };
 
 /* ── Deterministic repair pass ────────────────────────────────────────
@@ -1929,6 +1962,55 @@ Return JSON only.`;
   return segments;
 }
 
+/** Translate a batch of spoken lines into another language — same callAI,
+ *  same key, no separate translation service. Sent as one JSON array so the
+ *  whole lesson (or a whole doubt answer) costs a single request instead of
+ *  one per sentence. Falls back line-by-line if the batch call ever comes
+ *  back short, so a partial failure never scrambles the order. */
+export async function translateBoardLines({ lines, targetLang, callAI }) {
+  const clean = (Array.isArray(lines) ? lines : []).map(l => String(l ?? ""));
+  if (!clean.length || !callAI) return clean;
+
+  const askBatch = async (batch) => {
+    const msgs = [
+      { role: "system", content: BOARD_SYS.translate },
+      { role: "user", content: `Target language: ${targetLang}\n\n${JSON.stringify(batch)}` }
+    ];
+    let raw;
+    try {
+      raw = await callAI(msgs, { maxTokens: 4000, temperature: 0.2, responseFormat: { type: "json_object" } });
+    } catch (e) {
+      if (!/response_format|json_object|json mode/i.test(String(e?.message || ""))) throw e;
+      raw = await callAI(msgs, { maxTokens: 4000, temperature: 0.2 });
+    }
+    try {
+      const m = String(raw || "").match(/\{[\s\S]*\}/);
+      const d = JSON.parse(m ? m[0] : raw);
+      if (Array.isArray(d.lines)) return d.lines.map(x => String(x ?? ""));
+    } catch { /* fall through */ }
+    return null;
+  };
+
+  // Chunk so one very long lesson can't blow the response token budget.
+  const CHUNK = 40;
+  const out = new Array(clean.length);
+  for (let i = 0; i < clean.length; i += CHUNK) {
+    const batch = clean.slice(i, i + CHUNK);
+    let translated = await askBatch(batch);
+    if (!translated || translated.length !== batch.length) {
+      // Retry once, one line at a time — slower, but never drops a line.
+      translated = [];
+      for (const line of batch) {
+        if (!line.trim()) { translated.push(""); continue; }
+        const single = await askBatch([line]);
+        translated.push(single && single[0] ? single[0] : line);
+      }
+    }
+    for (let j = 0; j < batch.length; j++) out[i + j] = translated[j] ?? batch[j];
+  }
+  return out;
+}
+
 /* ==========================================================================
    8. PANEL — the day tab. Styled with the LMS's own lms-btn classes.
    ========================================================================== */
@@ -1996,6 +2078,40 @@ export function BoardLessonPanel({
   }, [downloadsLocked, videoURL]);
   const [voice, setVoice] = useState("Fritz-PlayAI");
   const [expanded, setExpanded] = useState(false);
+
+  /* ---- translation ----
+     `translations` caches, per lesson build + language, the translated
+     "say" line for every segment (by segment index, same order as
+     lesson.segments / timeline's `orig` index). Doubt answers get their
+     own small cache keyed by the question text. */
+  const [lang, setLang] = useState("en");
+  const [translating, setTranslating] = useState(false);
+  const [translations, setTranslations] = useState({});   // { [cacheKey]: string[] }
+  const [doubtTranslations, setDoubtTranslations] = useState({}); // { [logIndex]: string }
+  const transCacheKey = lang !== "en" && lesson?.builtAt ? `${lesson.builtAt}:${lang}` : null;
+  const activeTranslation = transCacheKey ? translations[transCacheKey] : null;
+
+  useEffect(() => {
+    if (!transCacheKey || activeTranslation || !callAI || !lesson?.segments?.length) return;
+    let cancelled = false;
+    setTranslating(true);
+    translateBoardLines({
+      lines: lesson.segments.map(s => s.say || ""),
+      targetLang: langLabel(lang),
+      callAI
+    }).then(lines => {
+      if (cancelled) return;
+      setTranslations(t => ({ ...t, [transCacheKey]: lines }));
+    }).catch(() => {
+      if (!cancelled) notify?.("Translation failed — showing English instead", "err");
+    }).finally(() => { if (!cancelled) setTranslating(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line
+  }, [transCacheKey, callAI, lesson?.segments?.length]);
+
+  /* the line actually shown/spoken for timeline segment index `origIdx` */
+  const sayFor = (origIdx, fallback) =>
+    (activeTranslation && activeTranslation[origIdx]) ? activeTranslation[origIdx] : fallback;
   const [rate, setRate] = useState(1);
   const rateRef = useRef(1);
   useEffect(() => {
@@ -2263,9 +2379,11 @@ export function BoardLessonPanel({
     if (S.audioCtx.state === "suspended") S.audioCtx.resume();
     return S.audioCtx;
   }
-  async function speak(text) {
+  async function speak(text, speakLang = "en") {
     const S = R.current; S.talking = true;
-    if (groqKey) {
+    // Groq's PlayAI voices only speak English, so a translated line skips
+    // straight to the browser's own multilingual voices below.
+    if (groqKey && speakLang === "en") {
       try {
         const res = await fetch("https://api.groq.com/openai/v1/audio/speech", {
           method: "POST",
@@ -2288,9 +2406,13 @@ export function BoardLessonPanel({
       if (!window.speechSynthesis) { setTimeout(() => { S.talking = false; resolve(0); }, 1800); return; }
       const u = new SpeechSynthesisUtterance(text);
       u.rate = Math.max(0.1, Math.min(10, 0.98 * rateRef.current));
+      const bcp = (LANGUAGES.find(l => l.code === speakLang) || LANGUAGES[0]).bcp;
       const vs = window.speechSynthesis.getVoices();
-      const pick = vs.find(v => /en-(GB|US)/.test(v.lang) && /Google|Daniel|Samantha|Natural/i.test(v.name)) || vs.find(v => v.lang.startsWith("en"));
+      const pick = speakLang === "en"
+        ? (vs.find(v => /en-(GB|US)/.test(v.lang) && /Google|Daniel|Samantha|Natural/i.test(v.name)) || vs.find(v => v.lang.startsWith("en")))
+        : (vs.find(v => v.lang.toLowerCase().startsWith(bcp)) || null);
       if (pick) u.voice = pick;
+      u.lang = pick?.lang || bcp;
       u.onend = () => { S.talking = false; resolve(0); };
       u.onerror = () => { S.talking = false; resolve(0); };
       window.speechSynthesis.speak(u);
@@ -2317,13 +2439,14 @@ export function BoardLessonPanel({
       S.idxRef = k;
       const seg = list[k];
       if (seg.orig != null) { S.origIdx = seg.orig; setSegIdx(seg.orig); }
-      setCaption(seg.say);
-      if (seg.say) setTranscript(t => (t[t.length - 1] === seg.say ? t : [...t, seg.say]));
+      const shown = sayFor(seg.orig, seg.say);
+      setCaption(shown);
+      if (shown) setTranscript(t => (t[t.length - 1] === shown ? t : [...t, shown]));
       S.strokes = seg.strokes || []; S.si = 0; S.sp = 0; S.drawing = true;
       const total = S.strokes.reduce((a, s) => a + (s.len || 0), 0);
-      S.baseSpeed = Math.max(220, total / Math.max(1.6, estMs(seg.say) / 1000 * 0.86));
+      S.baseSpeed = Math.max(220, total / Math.max(1.6, estMs(shown) / 1000 * 0.86));
       S.speed = S.baseSpeed * rateRef.current;
-      const spoken = speak(seg.say);
+      const spoken = speak(shown, lang);
       setTimeout(() => {
         if (S.currentDuration && total > 0) {
           S.baseSpeed = Math.max(220, total / Math.max(1.4, (S.currentDuration / 1000) * 0.84));
@@ -2387,10 +2510,21 @@ export function BoardLessonPanel({
     halt(); setStatus("doubt"); setDoubtBusy(true); setDoubtText("");
     setDoubtLog(l => [...l, { q: question, a: "…" }]);
     try {
-      const segs = await answerBoardDoubt({
+      let segs = await answerBoardDoubt({
         question, topic: day?.topic || "", subTopics,
         currentlySaying: timeline[here]?.say || "", callAI
       });
+      let bridgeSay = "Right — back to where we were.";
+      if (lang !== "en") {
+        try {
+          const lines = await translateBoardLines({
+            lines: [...segs.map(s => s.say || ""), bridgeSay],
+            targetLang: langLabel(lang), callAI
+          });
+          segs = segs.map((s, i) => ({ ...s, say: lines[i] || s.say }));
+          bridgeSay = lines[segs.length] || bridgeSay;
+        } catch { /* keep the English answer if translation fails */ }
+      }
       setDoubtLog(l => l.map((d, i) => i === l.length - 1 ? { ...d, a: segs.map(s => s.say).join(" ") } : d));
       // Where the student stalled — this is what the trainer's heatmap reads.
       if (trackActivity) {
@@ -2409,7 +2543,7 @@ export function BoardLessonPanel({
       const answer = buildTimeline([{ say: "", blocks: [{ kind: "newpage" }] }, ...segs]).timeline;
       const rest = timeline.slice(here + 1).map((s, i) => ({ ...s, orig: here + 1 + i }));
       const bridge = rest.length
-        ? buildTimeline([{ say: "Right — back to where we were.", blocks: [{ kind: "newpage" }, { kind: "heading", text: "Back to the lesson" }] }]).timeline
+        ? buildTimeline([{ say: bridgeSay, blocks: [{ kind: "newpage" }, { kind: "heading", text: "Back to the lesson" }] }]).timeline
         : [];
       // Release the input BEFORE playing. Awaiting playback held doubtBusy
       // true for the entire remaining lecture, so a second question was
@@ -2732,7 +2866,7 @@ export function BoardLessonPanel({
             Your trainer published this lesson. Play it, and stop it any time to ask a question.
           </span>
         )}
-        {groqKey && (
+        {groqKey && lang === "en" && (
           <div style={chip}>
             <span style={label}>Voice</span>
             <select value={voice} onChange={e => setVoice(e.target.value)}
@@ -2741,6 +2875,20 @@ export function BoardLessonPanel({
                 .map(v => <option key={v} value={v}>{v.replace("-PlayAI", "")}</option>)}
             </select>
           </div>
+        )}
+        {lesson && (
+          <div style={chip} title="Translates what's said, the captions, the transcript and doubt answers. The handwriting on the board stays in English.">
+            <span style={label}>Teach in</span>
+            <select value={lang} onChange={e => setLang(e.target.value)}
+              disabled={!callAI && lang === "en"}
+              style={{ border: "none", background: "transparent", fontSize: 12.5, fontWeight: 700, color: darkMode ? "#93c5fd" : "#1e40af", outline: "none" }}>
+              {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+            </select>
+            {translating && <BSpin s={12} />}
+          </div>
+        )}
+        {lang !== "en" && !callAI && (
+          <span style={{ fontSize: 11.5, color: "#b45309" }}>Translation needs an AI key — add one in Settings › AI keys</span>
         )}
       </div>
 
@@ -2966,7 +3114,9 @@ export function BoardLessonPanel({
 
           {/* caption */}
           <div style={{ background: darkMode ? "#0f172a" : "#f8fafc", border: `1px solid ${darkMode ? "#1e293b" : "#e2e8f0"}`, borderRadius: 12, padding: "12px 16px", marginBottom: 12, minHeight: 60 }}>
-            <div style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", color: "#94a3b8", marginBottom: 4, fontFamily: "ui-monospace, monospace" }}>Saying now</div>
+            <div style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", color: "#94a3b8", marginBottom: 4, fontFamily: "ui-monospace, monospace" }}>
+              Saying now{lang !== "en" ? ` · ${langLabel(lang)}` : ""}
+            </div>
             <div style={{ fontSize: 14, lineHeight: 1.6, color: darkMode ? "#e2e8f0" : "#1e293b" }}>{caption || "—"}</div>
           </div>
 
