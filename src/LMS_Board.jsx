@@ -54,6 +54,8 @@ function mulberry(seed) {
   };
 }
 let SEED = 1;
+export const resetSeed = (v = 1) => { SEED = v; };
+export { BW, BH, mulberry, buildTimeline, chalkSegment, makeBoardTexture, textStrokes, measure, deTex, CHALK, chalkOf, COL };
 const nextRnd = () => mulberry((SEED = (SEED * 1103515245 + 12345) & 0x7fffffff));
 
 /* ==========================================================================
@@ -1835,6 +1837,7 @@ const P_SEND = "M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z", P_DL = "M21 15v4a2 2 0 01
 const P_VID = "M23 7l-7 5 7 5V7zM14 5H3a2 2 0 00-2 2v10a2 2 0 002 2h11a2 2 0 002-2V7a2 2 0 00-2-2z";
 const P_STOP = "M5 5h14v14H5z", P_RESET = "M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8M3 3v5h5";
 const P_PREV = "M19 20L9 12l10-8v16zM5 19V5";
+const P_LOCK = "M5 11h14a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a2 2 0 012-2zm3 0V7a4 4 0 018 0v4";
 const P_EXPAND = "M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3";
 const P_SHRINK = "M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3";
 const BSpin = ({ s = 14 }) => (
@@ -1848,8 +1851,12 @@ const BSpin = ({ s = 14 }) => (
 
 export function BoardLessonPanel({
   day, dayKey, dayData, updateDay, notify, studentMode, darkMode,
-  busy, onGenerate, callAI, groqKey, trackActivity, studentId
+  busy, onGenerate, callAI, groqKey, trackActivity, studentId,
+  canDownload, downloadsLocked
 }) {
+  // Every export here funnels through the host's guard, the same one the
+  // rest of the LMS uses, so locking a course is still a single switch.
+  const mayDownload = (silent = false) => (canDownload ? canDownload(silent) : true);
   const lesson = dayData?.boardLesson || null;
   const subTopics = (dayData?.subTopics || "").trim();
   const busyKey = `board-${dayKey}`;
@@ -1875,6 +1882,13 @@ export function BoardLessonPanel({
   const [listening, setListening] = useState(false);
   const [recording, setRecording] = useState(false);
   const [videoURL, setVideoURL] = useState("");
+  useEffect(() => {
+    // If the trainer locks the course mid-session, revoke any file already
+    // prepared so the link cannot still be used.
+    if (!downloadsLocked || !videoURL) return;
+    try { URL.revokeObjectURL(videoURL); } catch { }
+    setVideoURL("");
+  }, [downloadsLocked, videoURL]);
   const [voice, setVoice] = useState("Fritz-PlayAI");
   const [expanded, setExpanded] = useState(false);
   const [rate, setRate] = useState(1);
@@ -2284,6 +2298,17 @@ export function BoardLessonPanel({
         currentlySaying: timeline[here]?.say || "", callAI
       });
       setDoubtLog(l => l.map((d, i) => i === l.length - 1 ? { ...d, a: segs.map(s => s.say).join(" ") } : d));
+      // Where the student stalled — this is what the trainer's heatmap reads.
+      if (trackActivity) {
+        const ch = chapters.reduce((acc, c) => (here >= c.index ? c : acc), null);
+        trackActivity("boardDoubt", dayKey, {
+          q: String(question).slice(0, 160),
+          seg: here,
+          beat: lesson?.segments?.[here]?.b ?? null,
+          chapter: ch?.title || null,
+          at: Date.now()
+        });
+      }
       // Kept so the exported wall includes what was drawn while answering.
       setDoubtBoards(prev => [...prev, { say: "", blocks: [{ kind: "newpage" }] }, ...segs]);
       snapshot();
@@ -2350,6 +2375,7 @@ export function BoardLessonPanel({
 
   /* ---- export ---- */
   function startRecording() {
+    if (!mayDownload()) return;
     const c = exportRef.current; c.width = 1280; c.height = 720;
     ensureAudio();
     const S = R.current;
@@ -2369,6 +2395,7 @@ export function BoardLessonPanel({
   }
   function stopRecording() { try { recRef.current.mr?.stop(); } catch { } }
   function savePages() {
+    if (!mayDownload()) return;
     const list = pages.length ? pages : (() => {
       const t = document.createElement("canvas"); t.width = BW; t.height = BH;
       const x = t.getContext("2d"); x.drawImage(bgRef.current, 0, 0); x.drawImage(layerRef.current, 0, 0);
@@ -2380,6 +2407,7 @@ export function BoardLessonPanel({
     });
   }
   function saveTranscript() {
+    if (!mayDownload()) return;
     const L = lesson || {};
     const txt = [
       `Day ${day?.dayNum || ""}: ${L.lessonTitle || day?.topic || ""}`,
@@ -2428,6 +2456,7 @@ export function BoardLessonPanel({
   const [exporting, setExporting] = useState(false);
   function downloadWall() {
     if (!lesson?.segments?.length) return;
+    if (!mayDownload()) return;
     setExporting(true);
     // Yield a frame so the button can show its spinner before the big render.
     setTimeout(() => {
@@ -2803,14 +2832,24 @@ export function BoardLessonPanel({
             </div>
             <button className="lms-btn lms-btn-ghost" onClick={wipe}><BIc d={P_WIPE} />Wipe board</button>
             <div style={{ flex: 1 }} />
-            {!recording
-              ? <button className="lms-btn lms-btn-ghost" onClick={startRecording}><BIc d={P_VID} />Record video</button>
-              : <button className="lms-btn lms-btn-ghost" onClick={stopRecording}><BIc d={P_STOP} />Stop &amp; save</button>}
-            {videoURL && <a className="lms-btn lms-btn-ghost" href={videoURL} download={`Day${day?.dayNum || 1}_board_lesson.webm`}><BIc d={P_DL} />Download video</a>}
-            <button className="lms-btn lms-btn-ghost" disabled={exporting} onClick={downloadWall}>
-              {exporting ? <BSpin /> : <BIc d={P_DL} />}Whole board (1 PNG)
-            </button>
-            <button className="lms-btn lms-btn-ghost" disabled={!transcript.length} onClick={saveTranscript}><BIc d={P_DL} />Transcript</button>
+            {downloadsLocked ? (
+              // View-only: the lesson plays in full, nothing leaves the browser.
+              <span title="Your trainer has turned off downloads for this course"
+                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "#94a3b8", padding: "0 4px" }}>
+                <BIc d={P_LOCK} s={13} />View only — downloads are off for this course
+              </span>
+            ) : (
+              <>
+                {!recording
+                  ? <button className="lms-btn lms-btn-ghost" onClick={startRecording}><BIc d={P_VID} />Record video</button>
+                  : <button className="lms-btn lms-btn-ghost" onClick={stopRecording}><BIc d={P_STOP} />Stop &amp; save</button>}
+                {videoURL && <a className="lms-btn lms-btn-ghost" href={videoURL} download={`Day${day?.dayNum || 1}_board_lesson.webm`}><BIc d={P_DL} />Download video</a>}
+                <button className="lms-btn lms-btn-ghost" disabled={exporting} onClick={downloadWall}>
+                  {exporting ? <BSpin /> : <BIc d={P_DL} />}Whole board (1 PNG)
+                </button>
+                <button className="lms-btn lms-btn-ghost" disabled={!transcript.length} onClick={saveTranscript}><BIc d={P_DL} />Transcript</button>
+              </>
+            )}
           </div>
 
           <div style={{ height: 4, borderRadius: 99, background: darkMode ? "#1e293b" : "#e2e8f0", overflow: "hidden", marginBottom: 12 }}>
