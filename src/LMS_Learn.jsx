@@ -401,21 +401,40 @@ export function NotesPanel({
 
   // Render the AI notes if they exist, otherwise fall back to the board itself.
   const source = notes?.blocks?.length ? notes : (lesson?.segments?.length ? lesson : null);
+  // Read inside the timeout without making the effect depend on identity.
+  const sourceRef = useRef(null);
+  sourceRef.current = source;
+
+  /* Depend on CONTENT, not object identity. Every Supabase sync hands back a
+     freshly parsed dayData, so `source` is a new object each time even when
+     nothing changed — that re-ran this effect on a timer, blanked the image
+     and re-rendered every page. The result was a visible blink. */
+  const sig = notes?.blocks?.length
+    ? `n:${notes.builtAt || 0}:${notes.blocks.length}`
+    : lesson?.segments?.length
+      ? `b:${lesson.builtAt || 0}:${lesson.segments.length}`
+      : "";
+  const doneSig = useRef("");
 
   useEffect(() => {
-    if (view !== "notes" || !source) { setPreview(""); return; }
-    setRendering(true);
-    // Yield a frame so the message paints before the render blocks the thread.
+    if (view !== "notes" || !sig) return;
+    if (doneSig.current === sig) return;           // already drawn this exact content
+    // Only show the placeholder on a first render; on a redraw keep the old
+    // page on screen until the new one is ready, so nothing flashes.
+    if (!doneSig.current) setRendering(true);
     const t = setTimeout(() => {
       try {
-        const out = renderNotesSheet(source);
-        sheetRef.current = out;
-        setPreview(out ? out.canvas.toDataURL("image/png") : "");
-      } catch { setPreview(""); }
+        const out = renderNotesSheet(sourceRef.current);
+        if (out) {
+          sheetRef.current = out;
+          setPreview(out.canvas.toDataURL("image/png"));
+          doneSig.current = sig;
+        }
+      } catch { /* keep whatever was already on screen */ }
       setRendering(false);
     }, 30);
     return () => clearTimeout(t);
-  }, [view, notes?.builtAt, lesson?.builtAt, source]);
+  }, [view, sig]);
 
   function download() {
     if (!mayDownload()) return;
