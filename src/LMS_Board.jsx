@@ -905,6 +905,25 @@ function makeBoardTexture(w = BW, h = BH) {
   return c;
 }
 
+/* Export-quality stroke: identical geometry and colour, drawn as one path
+   with a soft halo instead of thousands of random grain specks. The speckle
+   is incompressible noise and was 75% of the exported PNG; dropping it costs
+   texture, not a single letter of content. */
+function flatStroke(ctx, st, scale = 1, ox = 0, oy = 0) {
+  const path = () => {
+    ctx.beginPath();
+    st.p.forEach(([x, y], k) => {
+      const px = ox + x * scale, py = oy + y * scale;
+      k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+  };
+  ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = st.c;
+  ctx.globalAlpha = 0.22; ctx.lineWidth = Math.max(1, st.w * scale * 1.9);
+  path(); ctx.stroke();
+  ctx.globalAlpha = 1; ctx.lineWidth = Math.max(1, st.w * scale);
+  path(); ctx.stroke();
+}
+
 function chalkSegment(ctx, x0, y0, x1, y1, w, color, rnd) {
   ctx.strokeStyle = color; ctx.lineCap = "round"; ctx.lineJoin = "round";
   ctx.globalAlpha = 0.30; ctx.lineWidth = w * 1.85;
@@ -1499,75 +1518,44 @@ export function compactLesson(lesson) {
    480px wide at q0.5 is roughly 15-25 KB a page — a preview, not the
    artefact. Students re-render the real board from the script, so these
    are only for showing the day at a glance without loading a lesson. */
-export function renderBoardThumbs(segments, { width = 480, quality = 0.5, maxPages = 6 } = {}) {
-  const pages = [];
-  try {
-    SEED = 1;
-    const { timeline } = buildTimeline(segments);
-    const layer = document.createElement("canvas"); layer.width = BW; layer.height = BH;
-    const lc = layer.getContext("2d");
-    const bg = makeBoardTexture();
-    const shot = () => {
-      if (pages.length >= maxPages) return;
-      const c = document.createElement("canvas");
-      c.width = width; c.height = Math.round(width * BH / BW);
-      const x = c.getContext("2d");
-      x.drawImage(bg, 0, 0, c.width, c.height);
-      x.drawImage(layer, 0, 0, c.width, c.height);
-      pages.push(c.toDataURL("image/jpeg", quality));
-    };
-    let i = 0, ink = false;
-    for (const t of timeline) for (const st of (t.strokes || [])) {
-      if (st.brk) { if (ink) shot(); lc.clearRect(0, 0, BW, BH); ink = false; continue; }
-      const r = mulberry(++i * 7919);
-      for (let j = 1; j < st.p.length; j++)
-        chalkSegment(lc, st.p[j - 1][0], st.p[j - 1][1], st.p[j][0], st.p[j][1], st.w, st.c, r);
-      ink = true;
-    }
-    if (ink) shot();
-  } catch { /* a thumbnail is never worth failing a save over */ }
-  return pages;
-}
+
 
 /* ONE giant blackboard. Every page of the lecture, plus every board drawn
    while answering a question, tiled into a single continuous slate — no
    frames, no gaps, no seams. Three rows by default; the grid grows sideways
    as the lecture gets longer, which is how a real wall of boards fills up. */
-export function renderBoardWall(segments, doubtSegments = [], { rows = 3, minCols = 4, panelWidth = 900, hardMax = 16000 } = {}) {
-  // Ink only. The background is drawn once, underneath everything.
-  const inkPages = list => {
+function cleanSlate(w, h) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const x = c.getContext("2d");
+  const g = x.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, "#2b4038"); g.addColorStop(0.45, "#22352d"); g.addColorStop(1, "#1a2a24");
+  x.fillStyle = g; x.fillRect(0, 0, w, h);
+  return c;
+}
+
+export function renderBoardWall(segments, doubtSegments = [], { rows = 3, minCols = 4, panelWidth = 900, hardMax = 16000, grain = false } = {}) {
+  /* Split into pages WITHOUT rasterising. Drawing each page full-size and
+     scaling it down resampled every edge into soft intermediate pixels,
+     which compress badly — the strokes are drawn straight at final scale
+     instead, so edges stay crisp and the file stays small. */
+  const pagesOf = list => {
     if (!list || !list.length) return [];
-    SEED = 1;
+    resetSeed(1);
     const { timeline } = buildTimeline(list);
-    const layer = document.createElement("canvas"); layer.width = BW; layer.height = BH;
-    const lc = layer.getContext("2d");
-    const out = [];
-    const shot = () => {
-      const c = document.createElement("canvas"); c.width = BW; c.height = BH;
-      c.getContext("2d").drawImage(layer, 0, 0);
-      out.push(c);
-    };
-    let n = 0, ink = false;
+    const pages = [[]];
     for (const t of timeline) for (const st of (t.strokes || [])) {
-      if (st.brk) { if (ink) shot(); lc.clearRect(0, 0, BW, BH); ink = false; continue; }
-      const r = mulberry(++n * 131);
-      for (let j = 1; j < st.p.length; j++)
-        chalkSegment(lc, st.p[j - 1][0], st.p[j - 1][1], st.p[j][0], st.p[j][1], st.w, st.c, r);
-      ink = true;
+      if (st.brk) { if (pages[pages.length - 1].length) pages.push([]); continue; }
+      pages[pages.length - 1].push(st);
     }
-    if (ink) shot();
-    return out;
+    return pages.filter(p => p.length);
   };
 
-  const pages = [...inkPages(segments), ...inkPages(doubtSegments)];
+  const pages = [...pagesOf(segments), ...pagesOf(doubtSegments)];
   if (!pages.length) return null;
 
   const cols = Math.max(minCols, Math.ceil(pages.length / rows));
   const usedRows = Math.min(rows, Math.ceil(pages.length / cols)) || 1;
   const fullW = cols * BW, fullH = usedRows * BH;
-  // Keep each panel legible rather than fitting a fixed overall width — a long
-  // lecture is a wider wall, not a smaller one. Capped so the canvas stays
-  // within what browsers will allocate.
   const target = Math.min(hardMax, cols * panelWidth);
   const scale = Math.min(1, target / fullW);
 
@@ -1576,17 +1564,134 @@ export function renderBoardWall(segments, doubtSegments = [], { rows = 3, minCol
   wall.height = Math.round(fullH * scale);
   const x = wall.getContext("2d");
 
-  // One slate for the whole wall, generated at final size so there is no
-  // repeating vignette and no tile boundary anywhere.
-  x.drawImage(makeBoardTexture(wall.width, wall.height), 0, 0);
+  // One slate across the whole wall, so there is no seam between panels.
+  x.drawImage((grain ? makeBoardTexture : cleanSlate)(wall.width, wall.height), 0, 0);
 
+  let n = 0;
   pages.forEach((pg, i) => {
-    const c = i % cols, r = Math.floor(i / cols);
-    x.drawImage(pg, Math.round(c * BW * scale), Math.round(r * BH * scale),
-      Math.round(BW * scale), Math.round(BH * scale));
+    const ox = (i % cols) * BW * scale, oy = Math.floor(i / cols) * BH * scale;
+    for (const st of pg) {
+      if (grain) {
+        const r = mulberry(++n * 131);
+        for (let j = 1; j < st.p.length; j++)
+          chalkSegment(x, ox + st.p[j - 1][0] * scale, oy + st.p[j - 1][1] * scale,
+            ox + st.p[j][0] * scale, oy + st.p[j][1] * scale, Math.max(1, st.w * scale), st.c, r);
+      } else flatStroke(x, st, scale, ox, oy);
+    }
   });
 
   return { canvas: wall, pages: pages.length, cols, rows: usedRows, scale };
+}
+
+/* ── ZERO-EGRESS EXPORT ───────────────────────────────────────────────
+   The board is vector data. Shipping a 1 MB raster to every student is
+   waste when the drawing instructions are ~30 KB and their browser can
+   redraw it perfectly. This packages the strokes plus a tiny renderer
+   into one self-contained HTML file: opens offline, zooms without
+   blurring, and saves the big PNG locally if they ever want one.
+   Nothing is fetched when it opens — no network, no egress.          */
+export function buildBoardHTML(lesson, doubtSegments = [], { title = "Board" } = {}) {
+  const pagesOf = list => {
+    if (!list || !list.length) return [];
+    resetSeed(1);
+    const { timeline } = buildTimeline(list);
+    const out = [[]];
+    for (const t of timeline) for (const st of (t.strokes || [])) {
+      if (st.brk) { if (out[out.length - 1].length) out.push([]); continue; }
+      out[out.length - 1].push(st);
+    }
+    return out.filter(p => p.length);
+  };
+  const pages = [...pagesOf(lesson?.segments), ...pagesOf(doubtSegments)];
+  if (!pages.length) return null;
+
+  /* Strokes are stored smoothed, which multiplies the point count fivefold.
+     Ramer-Douglas-Peucker drops every point that sits within half a pixel of
+     the line it lies on — the curve is unchanged to the eye, the file is a
+     fraction of the size. Coordinates then round to whole pixels, which is
+     below what a 1600px-wide board can show. */
+  const rdp = (pts, eps) => {
+    if (pts.length < 3) return pts;
+    let maxD = 0, idx = 0;
+    const [ax, ay] = pts[0], [bx, by] = pts[pts.length - 1];
+    const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const d = Math.abs(dy * pts[i][0] - dx * pts[i][1] + bx * ay - by * ax) / len;
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD <= eps) return [pts[0], pts[pts.length - 1]];
+    return [...rdp(pts.slice(0, idx + 1), eps).slice(0, -1), ...rdp(pts.slice(idx), eps)];
+  };
+
+  const palette = [];
+  const cid = c => { let i = palette.indexOf(c); if (i < 0) { palette.push(c); i = palette.length - 1; } return i; };
+  // Points as a delta-encoded base-36 string: far shorter than a JSON array
+  // of pairs, and decoded in three lines at the other end.
+  const enc = pts => {
+    let out = "", px = 0, py = 0;
+    for (const [x, y] of pts) {
+      const ix = Math.round(x), iy = Math.round(y);
+      out += (ix - px).toString(36) + "," + (iy - py).toString(36) + ";";
+      px = ix; py = iy;
+    }
+    return out;
+  };
+  const data = pages.map(pg => pg.map(st => [
+    cid(st.c), Math.round(st.w * 10) / 10, enc(rdp(st.p, 0.5))
+  ]));
+
+  const payload = JSON.stringify({ w: BW, h: BH, palette, pages: data });
+  const esc = t => String(t).replace(/[<>&]/g, m => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+
+  return `<!doctype html><meta charset="utf-8"><title>${esc(title)}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{margin:0;background:#0d0f12;color:#e7e5e4;font:14px system-ui,sans-serif}
+ header{display:flex;gap:12px;align-items:center;padding:12px 16px;position:sticky;top:0;background:#0d0f12;border-bottom:1px solid #1f2937;flex-wrap:wrap}
+ h1{font:600 16px Georgia,serif;margin:0}
+ button{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer}
+ button:hover{border-color:#3b82f6}
+ canvas{width:100%;display:block;border-radius:8px;margin:0 0 18px}
+ #wrap{padding:16px;max-width:1500px;margin:0 auto}
+ small{color:#78716c}
+</style>
+<header>
+ <h1>${esc(title)}</h1><small id="meta"></small>
+ <span style="flex:1"></span>
+ <button id="png">Save as PNG</button>
+</header>
+<div id="wrap"></div>
+<script>
+const D=${payload};
+document.getElementById('meta').textContent=D.pages.length+' boards \\u00b7 offline copy';
+function slate(x,w,h){const g=x.createLinearGradient(0,0,w,h);
+ g.addColorStop(0,'#2b4038');g.addColorStop(.45,'#22352d');g.addColorStop(1,'#1a2a24');
+ x.fillStyle=g;x.fillRect(0,0,w,h);}
+function dec(str){const out=[];let px=0,py=0;
+ for(const seg of str.split(';')){if(!seg)continue;const[a,b]=seg.split(',');
+  px+=parseInt(a,36);py+=parseInt(b,36);out.push([px,py]);}return out;}
+function draw(x,pg,s,ox,oy){x.lineCap='round';x.lineJoin='round';
+ for(const[c,w,ps]of pg){const p=dec(ps);const path=()=>{x.beginPath();
+   for(let i=0;i<p.length;i++){const X=ox+p[i][0]*s,Y=oy+p[i][1]*s;i?x.lineTo(X,Y):x.moveTo(X,Y);}};
+  x.strokeStyle=D.palette[c];
+  x.globalAlpha=.22;x.lineWidth=Math.max(1,w*s*1.9);path();x.stroke();
+  x.globalAlpha=1;x.lineWidth=Math.max(1,w*s);path();x.stroke();}}
+const wrap=document.getElementById('wrap');
+D.pages.forEach((pg,i)=>{const c=document.createElement('canvas');
+ c.width=D.w;c.height=D.h;const x=c.getContext('2d');
+ slate(x,D.w,D.h);draw(x,pg,1,0,0);wrap.appendChild(c);});
+document.getElementById('png').onclick=()=>{
+ const rows=3,cols=Math.max(4,Math.ceil(D.pages.length/rows));
+ const used=Math.min(rows,Math.ceil(D.pages.length/cols))||1;
+ const s=Math.min(1,Math.min(16000,cols*900)/(cols*D.w));
+ const c=document.createElement('canvas');
+ c.width=Math.round(cols*D.w*s);c.height=Math.round(used*D.h*s);
+ const x=c.getContext('2d');slate(x,c.width,c.height);
+ D.pages.forEach((pg,i)=>draw(x,pg,s,(i%cols)*D.w*s,Math.floor(i/cols)*D.h*s));
+ c.toBlob(b=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download=${JSON.stringify(title)}.replace(/\\s+/g,'_')+'.png';a.click();});
+};
+</script>`;
 }
 
 export const lessonBytes = obj => {
@@ -1925,20 +2030,9 @@ export function BoardLessonPanel({
     tlRef: [], idxRef: 0, origIdx: 0, gen: 0, cancelled: false, currentDuration: 0, recording: false
   });
 
-  /* Trainer only: once a lesson exists, store a handful of small preview
-     images alongside it. Guarded so it runs once per build, never for a
-     student, and never if the trainer turned previews off.            */
-  useEffect(() => {
-    if (studentMode || !lesson?.segments?.length) return;
-    if (dayData?.boardPreviewsOff) return;
-    if (dayData?.boardThumbsAt === lesson.builtAt) return;
-    const id = setTimeout(() => {
-      const thumbs = renderBoardThumbs(lesson.segments, { width: 480, quality: 0.5, maxPages: 6 });
-      if (thumbs.length) updateDay(dayKey, { boardThumbs: thumbs, boardThumbsAt: lesson.builtAt });
-    }, 400);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line
-  }, [lesson?.builtAt, studentMode, dayData?.boardPreviewsOff]);
+  /* Preview thumbnails were removed. Six JPEGs a day, re-downloaded by every
+     student on every sync, cost far more egress than the entire lesson script
+     — and the board redraws identically from that script anyway. */
 
   /* timeline is rebuilt whenever the stored lesson changes */
   const [timeline, setTimeline] = useState([]);
@@ -2454,6 +2548,29 @@ export function BoardLessonPanel({
   const activeIdx = chapters.reduce((acc, c, n) => (segIdx >= c.index ? n : acc), -1);
 
   const [exporting, setExporting] = useState(false);
+
+  /* The offline copy. Built from the strokes already in memory, so it costs
+     nothing to serve and nothing to download beyond the file itself. */
+  function downloadOffline() {
+    if (!lesson?.segments?.length) return;
+    // Deliberately NOT behind mayDownload(). This file is built from strokes
+    // already in the browser and fetches nothing when opened, so it costs no
+    // egress — which is what the course lock is there to control.
+    try {
+      const html = buildBoardHTML(lesson, doubtBoards, {
+        title: `${lesson.lessonTitle || day?.topic || "Board"} — Day ${day?.dayNum || 1}`
+      });
+      if (!html) { notify?.("Nothing on the board yet", "err"); return; }
+      const blob = new Blob([html], { type: "text/html" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `Day${day?.dayNum || 1}_board.html`;
+      a.click();
+      const kb = Math.max(1, Math.round(blob.size / 1024));
+      notify?.(`Offline board saved — ${kb} KB, opens without internet`);
+    } catch (e) { notify?.("Export failed — " + e.message, "err"); }
+  }
+
   function downloadWall() {
     if (!lesson?.segments?.length) return;
     if (!mayDownload()) return;
@@ -2606,22 +2723,9 @@ export function BoardLessonPanel({
           </>
         )}
         {!studentMode && lesson && (
-          <>
-            <label style={{ ...chip, cursor: "pointer" }}>
-              <input type="checkbox" checked={!dayData?.boardPreviewsOff}
-                onChange={e => updateDay(dayKey, { boardPreviewsOff: !e.target.checked })}
-                style={{ margin: 0, width: 14, height: 14, accentColor: "#3b82f6" }} />
-              <span style={label}>Save board previews</span>
-            </label>
-            <span style={{ fontSize: 11.5, color: "#94a3b8", fontFamily: "ui-monospace, monospace" }}>
-              {(() => {
-                const j = lessonBytes(lesson);
-                const t = (dayData?.boardThumbs || []).reduce((a, d) => a + Math.round(d.length * 0.75), 0);
-                const kb = v => v < 1024 ? `${v} B` : `${(v / 1024).toFixed(0)} KB`;
-                return `stored: ${kb(j)} script${t ? ` + ${kb(t)} previews` : ""}`;
-              })()}
-            </span>
-          </>
+          <span style={{ fontSize: 11.5, color: "#94a3b8", fontFamily: "ui-monospace, monospace" }}>
+            {(() => { const b = lessonBytes(lesson); return `stored: ${b < 1024 ? b + " B" : (b / 1024).toFixed(0) + " KB"}`; })()}
+          </span>
         )}
         {studentMode && lesson && (
           <span style={{ fontSize: 12, color: "#64748b" }}>
@@ -2832,11 +2936,15 @@ export function BoardLessonPanel({
             </div>
             <button className="lms-btn lms-btn-ghost" onClick={wipe}><BIc d={P_WIPE} />Wipe board</button>
             <div style={{ flex: 1 }} />
+            {/* Always available: the offline copy is made on the student's own
+                machine and pulls nothing when opened. */}
+            <button className="lms-btn lms-btn-blue" onClick={downloadOffline}>
+              <BIc d={P_DL} />Offline board (KB)
+            </button>
             {downloadsLocked ? (
-              // View-only: the lesson plays in full, nothing leaves the browser.
-              <span title="Your trainer has turned off downloads for this course"
+              <span title="Your trainer has turned off file downloads for this course"
                 style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "#94a3b8", padding: "0 4px" }}>
-                <BIc d={P_LOCK} s={13} />View only — downloads are off for this course
+                <BIc d={P_LOCK} s={13} />Video, PNG and transcript are off for this course
               </span>
             ) : (
               <>
