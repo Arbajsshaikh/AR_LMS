@@ -843,7 +843,7 @@ async function sbRegisterTrainer(sb, name, username, password) {
 
 // ── COURSES ───────────────────────────────────────────────────────
 async function sbGetCourses(sb) {
-  return (await sb.select("lms_courses", "order=created_at.asc")) || [];
+  return (await sb.select("lms_courses", "select=id,name,trainer_id,created_at,updated_at&order=created_at.asc&limit=500")) || [];
 }
 
 async function sbGetCoursesByTrainer(sb, trainerId) {
@@ -965,7 +965,7 @@ async function sbSetCurrentCourseId(sb, trainerId, courseId) {
 
 // ── STUDENTS ──────────────────────────────────────────────────────
 async function sbGetStudents(sb) {
-  return (await sb.select("lms_students", "order=created_at.asc")) || [];
+  return (await sb.select("lms_students", "select=id,name,email,approved,trainer_id,enrolled_course_ids,pendingCourseIds,created_at&order=created_at.asc&limit=1000")) || [];
 }
 
 async function sbSaveStudent(sb, student) {
@@ -1455,7 +1455,7 @@ async function sbGetCourseName(sb, courseId) {
 }
 
 async function sbGetAttendanceRecords(sb, courseId) {
-  const rows = await sb.select("lms_attendance_records", `course_id=eq.${encodeURIComponent(courseId)}&order=scanned_at.asc&limit=5000`);
+  const rows = await sb.select("lms_attendance_records", `course_id=eq.${encodeURIComponent(courseId)}&select=session_id,student_id,student_name,scanned_at&order=scanned_at.asc&limit=5000`);
   return rows || [];
 }
 
@@ -1508,7 +1508,7 @@ const COURSE_SETTINGS_KEY = "__course_settings__";
 // Content types stored as JSON rather than markdown/plain text. Anything
 // listed here is parsed back into an object on load; anything not listed
 // comes back as the string it was saved as.
-const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardCards", "boardCardsOff", "boardNotes"]);
+const JSON_CONTENT_TYPES = new Set(["quiz", "dataGenerator", "learningMap", "boardLesson", "boardAvatar", "boardCards", "boardCardsOff", "boardNotes"]);
 
 async function sbSaveDayContent(sb, courseId, dayKey, contentType, content, trainerId) {
   const id = `${courseId}__${dayKey}__${contentType}`;
@@ -1552,7 +1552,7 @@ async function sbGetCourseSettings(sb, courseId) {
 async function sbGetDayContent(sb, courseId, dayKey) {
   const rows = await sb.select(
     "lms_day_content",
-    `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}`
+    `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}&select=content_type,content`
   );
   const result = {};
   for (const row of (rows || [])) {
@@ -1567,15 +1567,34 @@ async function sbGetDayContent(sb, courseId, dayKey) {
   return result;
 }
 
-async function sbGetAllDayContent(sb, courseId) {
-  const rows = await sb.select(
-    "lms_day_content",
-    `course_id=eq.${encodeURIComponent(courseId)}&order=day_key.asc`
-  );
+/* Content types that are large and never needed to render a day list.
+   They are fetched per-day, on demand, instead of in the bulk sync. */
+// boardThumbs is no longer written, but existing rows must still be excluded
+// from the bulk sync or old courses keep paying for them.
+const HEAVY_CONTENT_TYPES = ["boardThumbs", "boardAvatarPhoto", "uploadedFiles"];
+
+/**
+ * Bulk day content.
+ *  - `select=` so the row's other columns never travel.
+ *  - heavy types excluded; they load per-day when a day is actually opened.
+ *  - `since` makes a poll transfer nothing at all when nothing changed,
+ *    which is the difference between a few bytes and the whole course
+ *    every 15 seconds.
+ */
+async function sbGetAllDayContent(sb, courseId, { since = null } = {}) {
+  const parts = [
+    `course_id=eq.${encodeURIComponent(courseId)}`,
+    `select=day_key,content_type,content,updated_at`,
+    `content_type=not.in.(${HEAVY_CONTENT_TYPES.join(",")})`,
+    `order=day_key.asc`,
+  ];
+  if (since) parts.push(`updated_at=gt.${encodeURIComponent(since)}`);
+  const rows = await sb.select("lms_day_content", parts.join("&"));
   const byDay = {};
   for (const row of (rows || [])) {
     // The reserved settings row lives in this table but is not a day.
     if (row.day_key === COURSE_SETTINGS_KEY) continue;
+    if (row.updated_at && row.updated_at > (byDay.__watermark__ || "")) byDay.__watermark__ = row.updated_at;
     if (!byDay[row.day_key]) byDay[row.day_key] = {};
     try {
       byDay[row.day_key][row.content_type] = JSON_CONTENT_TYPES.has(row.content_type)
@@ -9028,7 +9047,13 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           if (course.dayStatus) setTrainerDayStatus(course.dayStatus);
           if (course.dayOverrides)          setDayOverrides(course.dayOverrides);
         }
-        const contentByDay = await sbGetAllDayContent(sb, courseId);
+        // Ask only for what changed. On a quiet course this returns an empty
+        // array, so a poll costs one small request instead of the whole course.
+        const contentByDay = await sbGetAllDayContent(sb, courseId, { since: contentWatermarkRef.current });
+        const mark = contentByDay.__watermark__;
+        if (mark) contentWatermarkRef.current = mark;
+        delete contentByDay.__watermark__;
+        const changedKeys = Object.keys(contentByDay);
         // FIX: merge course.dayData so days only in the course row are included
         // Also include extra/special override day keys so their files are fetched
         const overrideDayKeys = Object.entries(course?.dayOverrides || {})
@@ -9050,10 +9075,17 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
           }
           return next;
         });
-        if (mergedKeys.length > 0) {
+        // Files only for days we have not already pulled, or whose content
+        // just changed. Re-querying every day on every poll was N requests a
+        // tick for no new data.
+        const needFiles = mergedKeys.filter(
+          k => !filesFetchedRef.current.has(k) || changedKeys.includes(k)
+        );
+        if (needFiles.length > 0) {
           const fileResults = await Promise.allSettled(
-            mergedKeys.map(k => sbGetFilesForDay(sb, courseId, k).then(files => ({ k, files })))
+            needFiles.map(k => sbGetFilesForDay(sb, courseId, k).then(files => ({ k, files })))
           );
+          needFiles.forEach(k => filesFetchedRef.current.add(k));
           setDayData(prev => {
             const next = { ...prev };
             fileResults.forEach(r => {
@@ -9207,6 +9239,12 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
      trackActivity(type, dayKey, payload) — merges into studentActivity state
      and schedules a debounced upsert to lms_student_activity.
      Only runs for students; no-op for trainers. */
+  /* Polling used to re-download the whole course every 15s. These two keep
+     an idle poll at zero bytes: the watermark asks only for rows changed
+     since the last sync, and filesFetched stops day-file queries repeating. */
+  const contentWatermarkRef = useRef(null);
+  const filesFetchedRef = useRef(new Set());
+
   const trackActivity = useCallback((type, dayKey, payload) => {
     if (!studentMode || !studentId || !courseId) return;
     setStudentActivity(prev => {
@@ -9310,7 +9348,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
           lightDayData[k] = light;
         }
 
@@ -9339,7 +9377,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const lightDayData = {};
         for (const [k, v] of Object.entries(dayData)) {
           if (!v || typeof v !== "object") { lightDayData[k] = {}; continue; }
-          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardThumbs, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
+          const { uploadedFiles, notebook, examples, resources, assignment, quiz, teachingGuide, dataGenerator, formulaSheet, learningMap, boardLesson, boardAvatarPhoto, boardCards, boardCardsOff, boardCode, boardNotes, ...light } = v;
           lightDayData[k] = light;
         }
         sbQueuePush({
@@ -9520,7 +9558,7 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
   // FIX #4: updateDay persists AI content to lms_day_content immediately (not via debounce)
   // so students see it as soon as the trainer saves, and it doesn't bloat the course JSONB row.
-  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap", "boardLesson", "boardThumbs", "boardAvatar", "boardAvatarPhoto", "boardCards", "boardCardsOff", "boardCode", "boardNotes"];
+  const AI_CONTENT_TYPES = ["notebook", "examples", "resources", "assignment", "quiz", "teachingGuide", "generatedForTopic", "dataGenerator", "formulaSheet", "learningMap", "boardLesson", "boardAvatar", "boardAvatarPhoto", "boardCards", "boardCardsOff", "boardCode", "boardNotes"];
 
   const updateDay = useCallback((key, patch) => {
     setDayData(prev => {
@@ -17431,7 +17469,8 @@ function SettingsPage({ aiProvider, setAiProvider, groqKey, setGroqKey, groqMode
     setTestSb(true); setSbStatus(null);
     try {
       if (!sb) throw new Error("No Supabase connection — enter credentials in the main app config");
-      const rows = await sb.select("lms_courses", "limit=1");
+      // select=id so a health check costs bytes, not a whole course row.
+      const rows = await sb.select("lms_courses", "select=id&limit=1");
       setSbStatus({ read: true, rowCount: rows.length });
       // Test write
       const testRow = { id: "__connection_test__", name: "test", trainer_id: trainerId, plan_text: "", plan_days: [], start_date: "", monfri: true, day_status: {}, day_data: {}, day_map: {}, cal_year: 2024, cal_month: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
@@ -18041,9 +18080,11 @@ function AdminDashboard({ sb, onLogout }) {
     setLoading(true);
     try {
       const [trRows, stRows, coRows] = await Promise.all([
-        sb.select("lms_trainers", "order=created_at.desc"),
-        sb.select("lms_students", "order=created_at.desc"),
-        sb.select("lms_courses",  "order=created_at.desc"),
+        // Projections + caps: the admin list shows names and dates, so the
+        // profile blobs and course plans have no reason to travel.
+        sb.select("lms_trainers", "select=id,name,email,created_at&order=created_at.desc&limit=500"),
+        sb.select("lms_students", "select=id,name,email,approved,trainer_id,enrolled_course_ids,created_at&order=created_at.desc&limit=1000"),
+        sb.select("lms_courses",  "select=id,name,trainer_id,created_at,updated_at&order=created_at.desc&limit=500"),
       ]);
       setTrainers(trRows || []);
       setStudents((stRows || []).map(dbRowToStudent));
