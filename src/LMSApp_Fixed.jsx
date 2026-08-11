@@ -558,11 +558,16 @@ const ADMIN_USER     = { id: "admin_1", name: "Admin", role: "admin", approved: 
 ═══════════════════════════════════════════════════════════════════ */
 function makeSupabase(url, key) {
   if (!url || !key) return null;
+  // EGRESS: no global "return=representation". That header made every POST,
+  // PATCH and DELETE echo the whole row back — so a trainer autosave paid the
+  // full plan_days + day_data blob on the way out AND on the way back. Writes
+  // now return nothing by default; the one caller that needs a value asks for
+  // exactly the column it needs via updateReturning().
   const h = {
     "apikey": key,
     "Authorization": `Bearer ${key}`,
     "Content-Type": "application/json",
-    "Prefer": "return=representation"
+    "Prefer": "return=minimal"
   };
 
   // A write that dies on a flaky connection used to be swallowed by a
@@ -626,19 +631,25 @@ function makeSupabase(url, key) {
       return req("GET", `${table}${filter ? "?" + filter : ""}`);
     },
     async upsert(table, row) {
-      return req("POST", table, row, { "Prefer": "resolution=merge-duplicates,return=representation" });
+      // No caller reads this result — return nothing instead of the whole row.
+      return req("POST", table, row, { "Prefer": "resolution=merge-duplicates,return=minimal" });
     },
-    // Returns the updated row(s) so callers can read back the authoritative
-    // updated_at instead of guessing it — the old guess permanently disabled
-    // every subsequent save.
     async update(table, filter, patch) {
-      return req("PATCH", `${table}?${filter}`, patch, { "Prefer": "return=representation" });
+      return req("PATCH", `${table}?${filter}`, patch, { "Prefer": "return=minimal" });
+    },
+    // Returns ONLY the named columns so callers can read back the authoritative
+    // updated_at instead of guessing it — the old guess permanently disabled
+    // every subsequent save. `cols` keeps the response a few bytes, not a course.
+    async updateReturning(table, filter, patch, cols = "*") {
+      const sep = filter ? "&" : "";
+      return req("PATCH", `${table}?${filter}${sep}select=${encodeURIComponent(cols)}`, patch,
+        { "Prefer": "return=representation" });
     },
     async delete(table, filter) {
       return req("DELETE", `${table}?${filter}`);
     },
     async upsertMany(table, rows) {
-      return req("POST", table, rows, { "Prefer": "resolution=merge-duplicates,return=representation" });
+      return req("POST", table, rows, { "Prefer": "resolution=merge-duplicates,return=minimal" });
     }
   };
 }
@@ -742,6 +753,51 @@ function saveAuthState(state) {
 }
 function getSbCreds() { return { url: _SB_URL, key: _SB_KEY }; }
 function saveSbCreds() { /* no-op: credentials are in .env */ }
+
+/* ═══════════════════════════════════════════════════════════════════
+   VISIBILITY-GATED POLLING
+   Every interval in this app used to keep firing in a backgrounded tab.
+   A student who left the LMS open in an unfocused tab overnight pulled the
+   whole course row every 15 seconds for eight hours and never looked at one
+   byte of it — that was a large share of the egress bill.
+
+   startVisiblePoll skips ticks while the tab is hidden and fires once
+   immediately when it comes back, so the data on screen is never stale.
+   Drop-in replacement for `setInterval` + `clearInterval` in an effect:
+       return startVisiblePoll(fn, 15000);
+═══════════════════════════════════════════════════════════════════ */
+/* Poll intervals in one place so the cost of the app is legible instead of
+   scattered across twelve magic numbers. These are fallbacks — the student
+   view prefers Realtime and only polls when the socket is down. */
+const POLL_STUDENT_SYNC_MS   = 45000;  // was 15s, and it ran even hidden
+const POLL_STUDENTS_LIST_MS  = 20000;  // trainer's pending-request list
+const POLL_NOTIFICATIONS_MS  = 60000;  // was 25s
+const POLL_ENROLL_GUARD_MS   = 30000;  // was 5s
+const POLL_COURSE_SETTINGS_MS= 120000; // was 30s; a download-lock toggle is rare
+const POLL_ADMIN_MS          = 60000;  // was 25s
+const POLL_ATTENDANCE_MS     = 3000;   // was 1.5s; QR window is 60s
+/* How long to wait for Realtime to confirm a subscription before deciding it
+   is not available and falling back to polling. */
+const REALTIME_PROOF_MS      = 8000;
+/* Slow backstop that runs even when Realtime looks healthy, so a silently
+   dead subscription can never strand a student on stale content. */
+const POLL_SAFETY_NET_MS     = 300000; // 5 minutes
+
+function startVisiblePoll(fn, ms, { runNow = false } = {}) {
+  let stopped = false;
+  const visible = () =>
+    typeof document === "undefined" || document.visibilityState === "visible";
+  const tick = () => { if (!stopped && visible()) fn(); };
+  if (runNow) tick();
+  const iv = setInterval(tick, ms);
+  const onVis = () => { if (visible()) tick(); };
+  try { document.addEventListener("visibilitychange", onVis); } catch {}
+  return () => {
+    stopped = true;
+    clearInterval(iv);
+    try { document.removeEventListener("visibilitychange", onVis); } catch {}
+  };
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    ID GENERATOR
@@ -852,8 +908,15 @@ async function sbGetCoursesByTrainer(sb, trainerId) {
   return (rows || []).map(dbRowToCourse);
 }
 
-async function sbGetCourseData(sb, courseId) {
-  const rows = await sb.select("lms_courses", `id=eq.${encodeURIComponent(courseId)}&limit=1`);
+/* Columns a student's read-only view actually renders. plan_text (the raw
+   syllabus prompt) and day_map (deprecated, derived client-side) are never
+   read on that path, so there is no reason to ship them 45 seconds apart. */
+const COURSE_COLS_STUDENT =
+  "id,name,trainer_id,plan_days,start_date,monfri,day_status,day_data,day_overrides,cal_year,cal_month,created_at,updated_at";
+
+async function sbGetCourseData(sb, courseId, cols = null) {
+  const proj = cols ? `&select=${encodeURIComponent(cols)}` : "";
+  const rows = await sb.select("lms_courses", `id=eq.${encodeURIComponent(courseId)}&limit=1${proj}`);
   const row = rows?.[0];
   if (!row) return null;
   return dbRowToCourse(row);
@@ -914,7 +977,11 @@ async function sbSaveCourseData(sb, courseId, patch) {
     if (patch[jsKey] !== undefined) dbPatch[dbCol] = patch[jsKey];
   }
   dbPatch.updated_at = new Date().toISOString();
-  const rows = await sb.update("lms_courses", `id=eq.${encodeURIComponent(courseId)}`, dbPatch);
+  // EGRESS: ask for the single column we actually use. This PATCH used to
+  // return plan_days + day_data + day_status in full on every 1.2s autosave.
+  const rows = await sb.updateReturning(
+    "lms_courses", `id=eq.${encodeURIComponent(courseId)}`, dbPatch, "updated_at"
+  );
   // Hand back what the database actually stored. The caller uses this to
   // detect real concurrent edits; previously it compared against a locally
   // generated timestamp that was always fractionally older than the row's
@@ -969,6 +1036,9 @@ async function sbGetStudents(sb) {
 }
 
 async function sbSaveStudent(sb, student) {
+  // Any enrollment change must be visible on the very next read, not up to
+  // 5s later — drop the coalescing cache before the write lands.
+  sbInvalidateStudentsCache();
   await sb.upsert("lms_students", studentToDbRow(student));
 }
 
@@ -1012,9 +1082,17 @@ async function sbDeleteStudent(sb, studentId) {
 // them) and fall back to q1 (trainer_id) + q4 (requested_course_id). That means
 // the first-registration cross-trainer case still works via q4, and the
 // post-login additional-course case works via trainer_id if trainer matches.
+/* EGRESS: this helper fans out to four queries, each of which was SELECT * on
+   up to 500 student rows — password hashes, profile blobs and all — and it is
+   called on a repeating poll from two different components. Nothing on those
+   screens reads the hash or the profile, so they no longer travel. */
+const STUDENT_LIST_COLS =
+  "id,name,email,trainer_id,approved,approved_at,pending_course_ids,enrolled_course_ids,requested_course_id,requested_course_name,requested_at,created_at";
+
 async function sbGetStudentsForCourse(sb, courseId, trainerId) {
+  const PROJ = `&select=${encodeURIComponent(STUDENT_LIST_COLS)}`;
   const q1 = trainerId
-    ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500`)
+    ? sb.select("lms_students", `trainer_id=eq.${encodeURIComponent(trainerId)}&order=created_at.asc&limit=500${PROJ}`)
     : Promise.resolve([]);
 
   // Supabase PostgREST JSONB containment: pending_course_ids @> '[{"courseId":"..."}]'
@@ -1030,19 +1108,19 @@ async function sbGetStudentsForCourse(sb, courseId, trainerId) {
   const jsonbValueEncoded = encodeURIComponent(jsonbValue);
   const q2 = sb.select(
     "lms_students",
-    `pending_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500`
+    `pending_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500${PROJ}`
   );
 
   // Also query enrolled_course_ids JSONB so approved students show up too
   const q3 = sb.select(
     "lms_students",
-    `enrolled_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500`
+    `enrolled_course_ids=cs.${jsonbValueEncoded}&order=created_at.asc&limit=500${PROJ}`
   );
 
   // Legacy path: requested_course_id plain column
   const q4 = sb.select(
     "lms_students",
-    `requested_course_id=eq.${encodeURIComponent(courseId)}&order=created_at.asc&limit=500`
+    `requested_course_id=eq.${encodeURIComponent(courseId)}&order=created_at.asc&limit=500${PROJ}`
   );
 
   const results = await Promise.allSettled([q1, q2, q3, q4]);
@@ -1058,6 +1136,26 @@ async function sbGetStudentsForCourse(sb, courseId, trainerId) {
   }
   return merged.map(dbRowToStudent);
 }
+
+/* EGRESS: the sidebar badge and the students panel each ran their own copy of
+   the poll above, on the same timer, for the same course — eight queries every
+   tick where four would do. This coalesces callers that ask within a few
+   seconds of each other onto a single in-flight request. */
+const _studentsCache = new Map();   // key -> { at, promise }
+const STUDENTS_CACHE_MS = 5000;
+
+function sbGetStudentsForCourseCached(sb, courseId, trainerId) {
+  const key = `${courseId}::${trainerId || ""}`;
+  const hit = _studentsCache.get(key);
+  if (hit && Date.now() - hit.at < STUDENTS_CACHE_MS) return hit.promise;
+  const promise = sbGetStudentsForCourse(sb, courseId, trainerId)
+    .catch(e => { _studentsCache.delete(key); throw e; });
+  _studentsCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
+/* Call after any write that changes enrollment so the next read is fresh. */
+function sbInvalidateStudentsCache() { _studentsCache.clear(); }
 
 // ── LEADERBOARD — fetch all approved students for a course + their day content ──
 // ── STUDENT ACTIVITY TRACKING ──────────────────────────────────────
@@ -1207,12 +1305,17 @@ async function sbGetLeaderboardData(sb, courseId, planDays) {
 }
 
 function studentToDbRow(s) {
+  const hash = s.passwordHash || s.password_hash || null;
   return {
     id: s.id,
     name: s.name,
     email: s.email,
-    // FIX #3: persist hashed password
-    password_hash: s.passwordHash || s.password_hash || null,
+    /* FIX #3: persist hashed password.
+       Guard: only send this column when we actually hold a hash. List views
+       now fetch students without password_hash (it is dead weight on every
+       poll), and an unguarded `password_hash: null` in a merge-duplicates
+       upsert would silently wipe the real hash and lock the student out. */
+    ...(hash ? { password_hash: hash } : {}),
     trainer_id: s.trainerId || s.trainer_id || null,
     approved: s.approved || false,
     approved_at: s.approvedAt || s.approved_at || null,
@@ -1277,7 +1380,29 @@ function getStudentEnrolledCourses(student) {
 // This fixes the "InvalidJWT exp claim check failed" error students see on download.
 async function sbGetFilesForDay(sb, courseId, dayKey) {
   const creds = getSbCreds();
-  const rows = await sb.select("lms_day_files", `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}&order=created_at.asc`);
+  /* EGRESS: data_url holds a base64 blob for legacy uploads — often megabytes
+     per row. The old query was SELECT *, so every storage-backed file dragged
+     its dead base64 column along even though the line below overwrites it with
+     a fresh signed URL and throws the blob away. Pull metadata only, then
+     backfill data_url for the legacy rows that genuinely have no storage_path. */
+  const meta = await sb.select(
+    "lms_day_files",
+    `course_id=eq.${encodeURIComponent(courseId)}&day_key=eq.${encodeURIComponent(dayKey)}` +
+    `&select=id,name,type,size,storage_path,created_at&order=created_at.asc`
+  );
+
+  const legacyIds = (meta || []).filter(r => !r.storage_path).map(r => r.id);
+  const legacyById = {};
+  if (legacyIds.length) {
+    const legacyRows = await sb.select(
+      "lms_day_files",
+      `id=in.(${legacyIds.map(i => `"${i}"`).join(",")})&select=id,data_url`
+    ).catch(() => []);
+    for (const r of (legacyRows || [])) legacyById[r.id] = r.data_url;
+  }
+
+  const rows = (meta || []).map(r => ({ ...r, data_url: legacyById[r.id] ?? null }));
+
   return Promise.all((rows || []).map(async r => {
     let dataUrl = r.data_url; // fallback: base64 or null
     // If file lives in Storage, always get a fresh signed URL (1h TTL) — never use the stored one
@@ -1460,7 +1585,7 @@ async function sbGetAttendanceRecords(sb, courseId) {
 }
 
 async function sbGetAttendanceBySession(sb, sessionId) {
-  const rows = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(sessionId)}&order=scanned_at.asc`);
+  const rows = await sb.select("lms_attendance_records", `session_id=eq.${encodeURIComponent(sessionId)}&order=scanned_at.asc&select=id,session_id,student_id,student_name,scanned_at`);
   return rows || [];
 }
 
@@ -1818,9 +1943,11 @@ async function sbBroadcastAnnouncement(sb, { courseId, courseName, title, body }
 async function sbGetNotifications(sb, studentId, limit = 30) {
   if (!sb || !studentId) return [];
   try {
+    // Projected: the bell renders title/body/read/type/date and nothing else.
     const rows = await sb.select(
       "lms_notifications",
-      `student_id=eq.${encodeURIComponent(studentId)}&order=created_at.desc&limit=${limit}`
+      `student_id=eq.${encodeURIComponent(studentId)}&order=created_at.desc&limit=${limit}` +
+      `&select=id,type,title,body,read,created_at`
     );
     return rows || [];
   } catch (e) {
@@ -5933,7 +6060,7 @@ function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen
       // Use the shared helper that queries trainer_id + JSONB pending_course_ids
       // + JSONB enrolled_course_ids + legacy requested_course_id in parallel.
       // This guarantees cross-trainer requests are never missed.
-      sbGetStudentsForCourse(sb, courseId, trainerId)
+      sbGetStudentsForCourseCached(sb, courseId, trainerId)
         .then(students => {
           const count = students.filter(s => {
             const inPending    = Array.isArray(s.pendingCourseIds) && s.pendingCourseIds.some(p => p.courseId === courseId);
@@ -5946,8 +6073,8 @@ function StudentsNavBtn({ sb, courseId, trainerId, studentsOpen, setStudentsOpen
     };
 
     fetchCount();
-    const interval = setInterval(fetchCount, 8000); // poll every 8 s
-    return () => clearInterval(interval);
+    // Visibility-gated and slower: a hidden tab paid for this every 8s.
+    return startVisiblePoll(fetchCount, POLL_STUDENTS_LIST_MS);
   }, [studentsOpen, sb, courseId, trainerId]);
 
   return (
@@ -5978,7 +6105,7 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen, da
     // sbGetStudentsForCourse queries ALL 4 paths in parallel (trainer_id,
     // pending JSONB, enrolled JSONB, legacy requested_course_id) so
     // cross-trainer requests are never missed.
-    sbGetStudentsForCourse(sb, courseId, trainerId)
+    sbGetStudentsForCourseCached(sb, courseId, trainerId)
       .then(students => {
         setList(students.filter(s => {
           const inPending      = Array.isArray(s.pendingCourseIds)  && s.pendingCourseIds.some(p => p.courseId === courseId);
@@ -5993,8 +6120,8 @@ function StudentsPanel({ sb, courseId, trainerId, collapsed, setStudentsOpen, da
 
   useEffect(() => {
     fetchList(); // load immediately on open
-    const interval = setInterval(fetchList, 8000); // auto-refresh every 8 s
-    return () => clearInterval(interval);
+    // Shares its round-trip with the sidebar badge via the 5s coalescing cache.
+    return startVisiblePoll(fetchList, POLL_STUDENTS_LIST_MS);
   }, [fetchList]);
 
   const approved = list.filter(s => Array.isArray(s.enrolledCourseIds) ? s.enrolledCourseIds.some(e => e.courseId === courseId) : (s.approved && s.requestedCourseId === courseId));
@@ -6150,10 +6277,10 @@ function StudentNotifications({ sb, studentId, onCourseApproved }) {
 
   useEffect(() => {
     load();
-    const iv = setInterval(load, 25000);
+    const stop = startVisiblePoll(load, POLL_NOTIFICATIONS_MS);
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
-    return () => { clearInterval(iv); window.removeEventListener("focus", onFocus); };
+    return () => { stop(); window.removeEventListener("focus", onFocus); };
   }, [load]);
 
   const askPermission = async () => {
@@ -6311,9 +6438,15 @@ function StudentCourseView({ sb, auth, handleLogout }) {
   // out immediately so they can't keep viewing content after being removed.
   useEffect(() => {
     if (!sb || !auth?.id) return;
-    const interval = setInterval(async () => {
+    const guardTick = async () => {
       try {
-        const rows = await sb.select("lms_students", `id=eq.${encodeURIComponent(auth.id)}&limit=1`);
+        // Projected: this poll only needs the enrolment arrays, never the
+        // password hash or profile blob it used to pull with SELECT *.
+        const rows = await sb.select(
+          "lms_students",
+          `id=eq.${encodeURIComponent(auth.id)}&limit=1` +
+          `&select=id,name,email,approved,trainer_id,enrolled_course_ids,pending_course_ids,requested_course_id,requested_course_name`
+        );
         const student = rows?.[0] ? dbRowToStudent(rows[0]) : null;
         if (!student) {
           // Student record deleted entirely — log out immediately
@@ -6347,8 +6480,10 @@ function StudentCourseView({ sb, auth, handleLogout }) {
       } catch {
         // Network blip — skip this poll, try again next interval
       }
-    }, 5000);
-    return () => clearInterval(interval);
+    };
+    // Was every 5s, hidden tab included. Removal is a rare, trainer-initiated
+    // event; 30s while actually on screen is still immediate enough.
+    return startVisiblePoll(guardTick, POLL_ENROLL_GUARD_MS);
   }, [sb, auth?.id]);
 
   // Load all available courses whenever enrollment panel opens.
@@ -7556,7 +7691,7 @@ function AttendancePage({ sb, courseId, trainerId, planDays = [], dayMap = {}, d
       } catch {}
     };
     poll();
-    pollRef.current = setInterval(poll, 1500);
+    pollRef.current = setInterval(poll, POLL_ATTENDANCE_MS);
     return () => clearInterval(pollRef.current);
   }, [session, sb, courseId]);
 
@@ -9026,8 +9161,34 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
     // Helper: full re-fetch of course + content + files
     const syncStudentView = async () => {
       try {
-        const course = await sbGetCourseData(sb, courseId);
-        if (course) {
+        /* EGRESS: cheap change probe. Ask Postgres for one timestamp column
+           first; only pull the course row when that timestamp has actually
+           moved. On a quiet course a poll now costs a few dozen bytes rather
+           than the entire syllabus. The cached row is reused so everything
+           downstream (dayData merge, override keys, file fetch) behaves
+           exactly as it did when we refetched every time. */
+        let course = courseCacheRef.current.course;
+        let changed = true;
+        try {
+          const stampRows = await sb.select(
+            "lms_courses",
+            `id=eq.${encodeURIComponent(courseId)}&select=updated_at&limit=1`
+          );
+          const stamp = stampRows?.[0]?.updated_at || null;
+          changed = !course || !stamp || stamp !== courseCacheRef.current.stamp;
+          if (changed) {
+            course = await sbGetCourseData(sb, courseId, COURSE_COLS_STUDENT);
+            courseCacheRef.current = { stamp, course };
+          }
+        } catch {
+          // Probe failed — fall back to the old unconditional fetch so a
+          // transient error can never leave a student on stale content.
+          course = await sbGetCourseData(sb, courseId, COURSE_COLS_STUDENT);
+          courseCacheRef.current = { stamp: course?.updatedAt || null, course };
+          changed = true;
+        }
+
+        if (course && changed) {
           if (course.planDays?.length)      setPlanDays(course.planDays);
           if (course.startDate)             setStartDate(course.startDate);
           if (course.monfri !== undefined)  setMonfri(course.monfri);
@@ -9104,17 +9265,55 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
 
     syncStudentView(); // initial load
 
-    // Try Supabase Realtime first (instant, zero-cost)
-    let realtimeCleanup = null;
-    let fallbackInterval = null;
-    let realtimeConnected = false;
+    /* ════ Realtime, with a proof-of-life gate ════
+       The original subscription spoke the LEGACY Realtime v1 protocol:
+       topics shaped "realtime:public:<table>:<col>=eq.<val>", an empty join
+       payload, and changes delivered as bare INSERT/UPDATE/DELETE events.
+       Supabase retired that protocol. Current Realtime expects one join per
+       channel carrying a `config.postgres_changes` array, an access_token for
+       RLS, and it wraps every change in a "postgres_changes" event.
+
+       This matters more than it looks. Repairing the credentials bug alone
+       would have let the socket OPEN successfully — which flipped the old
+       `realtimeConnected` flag and suppressed the fallback poll — while not a
+       single change event ever arrived. Students would have gone SILENT
+       instead of merely expensive: a worse bug than the one being fixed.
+
+       So the fallback is only stood down once the server has actually
+       CONFIRMED both subscriptions (phx_reply with status "ok"). No
+       confirmation inside REALTIME_PROOF_MS means Realtime is not usable on
+       this project, and we poll instead.
+
+       NOTE: Postgres changes are only emitted for tables in the
+       `supabase_realtime` publication. See the ALTER PUBLICATION statements
+       added to supabase_schema_fixed-3.sql — without them the socket connects
+       AND confirms but never fires, which is what the safety net below is for. */
+    /* A trainer generating a day writes one row per content type, so a single
+       user action can fire six or more change events within a second. Without
+       this, each one would trigger its own full sync — turning the Realtime
+       fix back into a burst of redundant reads. Coalesce them. */
+    let syncDebounce = null;
+    const syncSoon = () => {
+      clearTimeout(syncDebounce);
+      syncDebounce = setTimeout(syncStudentView, 600);
+    };
+
+    let realtimeCleanup  = null;
+    let fallbackInterval = null;   // holds a stop() fn from startVisiblePoll
+    let safetyNet        = null;
+    let proofTimer       = null;
+    let confirmed        = 0;
+
+    const armFallback = () => {
+      if (!fallbackInterval) fallbackInterval = startVisiblePoll(syncStudentView, POLL_STUDENT_SYNC_MS);
+    };
 
     const tryRealtime = async () => {
       try {
-        // Supabase Realtime via native WebSocket — no extra dependency
-        const { sbUrl, sbKey } = (() => {
-          try { return JSON.parse(sessionStorage.getItem("lms_sb_creds") || "{}"); } catch { return {}; }
-        })();
+        const { url: sbUrl, key: sbKey } = getSbCreds();
+        // EGRESS BUG: this used to read sessionStorage["lms_sb_creds"], a key
+        // nothing has written since credentials moved to .env — so it threw
+        // "no creds" on every mount and every student ran the poll forever.
         if (!sbUrl || !sbKey) throw new Error("no creds");
 
         const wsUrl = sbUrl.replace("https://", "wss://").replace("http://", "ws://")
@@ -9122,63 +9321,85 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
         const ws = new WebSocket(wsUrl);
         let heartbeat;
 
+        // Both channels must confirm before we trust Realtime enough to stop polling.
+        const JOIN_REFS = { "1": "lms_day_content", "2": "lms_courses" };
+
         ws.onopen = () => {
-          realtimeConnected = true;
-          // Subscribe to lms_day_content changes for this course
-          const sub = {
-            topic: `realtime:public:lms_day_content:course_id=eq.${courseId}`,
-            event: "phx_join", payload: {}, ref: "1"
-          };
-          ws.send(JSON.stringify(sub));
-          // Subscribe to lms_courses changes for this course
-          const sub2 = {
-            topic: `realtime:public:lms_courses:id=eq.${courseId}`,
-            event: "phx_join", payload: {}, ref: "2"
-          };
-          ws.send(JSON.stringify(sub2));
-          // Heartbeat every 25s to keep connection alive
+          const join = (ref, table, filter) => ws.send(JSON.stringify({
+            topic: `realtime:lms:${table}:${courseId}`,
+            event: "phx_join",
+            ref,
+            payload: {
+              config: { postgres_changes: [{ event: "*", schema: "public", table, filter }] },
+              access_token: sbKey,
+            },
+          }));
+          join("1", "lms_day_content", `course_id=eq.${courseId}`);
+          join("2", "lms_courses",     `id=eq.${courseId}`);
+
           heartbeat = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: "hb" }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: "hb" }));
+            }
           }, 25000);
+
+          // Proof of life — silence here means Realtime isn't usable.
+          proofTimer = setTimeout(() => { if (confirmed < 2) armFallback(); }, REALTIME_PROOF_MS);
         };
 
         ws.onmessage = (e) => {
-          try {
-            const msg = JSON.parse(e.data);
-            if (msg.event === "INSERT" || msg.event === "UPDATE" || msg.event === "DELETE") {
-              syncStudentView(); // re-fetch on any DB change
+          let msg;
+          try { msg = JSON.parse(e.data); } catch { return; }
+
+          // Subscription confirmations decide whether polling can stop.
+          if (msg.event === "phx_reply" && JOIN_REFS[msg.ref]) {
+            if (msg.payload?.status === "ok") {
+              confirmed++;
+              if (confirmed >= 2 && fallbackInterval) { fallbackInterval(); fallbackInterval = null; }
+            } else {
+              // Join rejected: RLS, missing publication, or a bad filter.
+              armFallback();
             }
-          } catch {}
+            return;
+          }
+
+          // Current protocol wraps changes in "postgres_changes"; the bare
+          // event names are kept so an older project still works.
+          if (msg.event === "postgres_changes" ||
+              msg.event === "INSERT" || msg.event === "UPDATE" || msg.event === "DELETE") {
+            syncSoon();
+          }
         };
 
-        ws.onerror = () => {
-          realtimeConnected = false;
-          clearInterval(heartbeat);
-          // Fall back to polling on realtime error
-          if (!fallbackInterval) fallbackInterval = setInterval(syncStudentView, 15000);
-        };
-
-        ws.onclose = () => {
-          realtimeConnected = false;
-          clearInterval(heartbeat);
-          if (!fallbackInterval) fallbackInterval = setInterval(syncStudentView, 15000);
-        };
+        ws.onerror = () => { clearInterval(heartbeat); armFallback(); };
+        ws.onclose = () => { clearInterval(heartbeat); armFallback(); };
 
         realtimeCleanup = () => {
           clearInterval(heartbeat);
+          clearTimeout(proofTimer);
           if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
         };
       } catch {
-        // Realtime unavailable — use polling fallback
-        if (!fallbackInterval) fallbackInterval = setInterval(syncStudentView, 15000);
+        armFallback();
       }
     };
 
     tryRealtime();
 
+    /* Safety net. Even a confirmed subscription can go quiet — a dropped
+       replication slot, a table left out of the publication, a corporate proxy
+       that silently eats frames. One slow tick guarantees a student is never
+       stranded on stale content. With the updated_at probe in syncStudentView,
+       a tick on an unchanged course costs a single tiny row, so five minutes
+       of insurance is very close to free. */
+    safetyNet = startVisiblePoll(syncStudentView, POLL_SAFETY_NET_MS);
+
     return () => {
       if (realtimeCleanup) realtimeCleanup();
-      if (fallbackInterval) clearInterval(fallbackInterval);
+      if (fallbackInterval) fallbackInterval();
+      if (safetyNet) safetyNet();
+      clearTimeout(proofTimer);
+      clearTimeout(syncDebounce);
     };
   }, [studentMode, sb, courseId]);
 
@@ -9244,6 +9465,10 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
      since the last sync, and filesFetched stops day-file queries repeating. */
   const contentWatermarkRef = useRef(null);
   const filesFetchedRef = useRef(new Set());
+  // EGRESS: last course row we pulled, plus its updated_at. Lets a poll ask
+  // "did anything change?" (a ~50 byte answer) instead of unconditionally
+  // dragging plan_days + day_data + day_status across the wire every time.
+  const courseCacheRef = useRef({ stamp: null, course: null });
 
   const trackActivity = useCallback((type, dayKey, payload) => {
     if (!studentMode || !studentId || !courseId) return;
@@ -9482,8 +9707,8 @@ function OriginalLMSApp({ courseId = null, onBack = null, studentMode = false, s
       const s = await sbGetCourseSettings(sb, courseId).catch(() => null);
       if (alive && s) setCourseSettings(prev => ({ ...prev, ...s }));
     };
-    const iv = setInterval(poll, 30000);
-    return () => { alive = false; clearInterval(iv); };
+    const stop = startVisiblePoll(poll, POLL_COURSE_SETTINGS_MS);
+    return () => { alive = false; stop(); };
   }, [studentMode, sb, courseId]);
 
   /* ════ Rebuild dayMap ════ */
@@ -18095,8 +18320,9 @@ function AdminDashboard({ sb, onLogout }) {
 
   useEffect(() => { fetchAll(); }, [sb]);
   useEffect(() => {
-    const t = setInterval(fetchAll, 25000);
-    return () => clearInterval(t);
+    // 1000 student rows + 500 courses + 500 trainers, previously every 25s
+    // whether or not anyone was looking at the tab.
+    return startVisiblePoll(fetchAll, POLL_ADMIN_MS);
   }, [sb]);
 
   /* ── Trainer actions ── */
