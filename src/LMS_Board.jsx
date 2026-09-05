@@ -32,7 +32,7 @@ const COL = {
 };
 
 const GROQ_TEXT_MODELS = [
-  "llama-3.3-70b-versatile", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+ "openai/gpt-oss-120b", "openai/gpt-oss-20b",
   "moonshotai/kimi-k2-instruct", "qwen/qwen3-32b",
   "meta-llama/llama-4-maverick-17b-128e-instruct",
   "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"
