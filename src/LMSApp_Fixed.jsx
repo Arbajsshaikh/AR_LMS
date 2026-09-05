@@ -23,8 +23,6 @@ import { NotesPanel, DoubtHeatmap, runNotesAgent } from "./LMS_Learn";
 // openai/gpt-oss-20b    : 131k ctx, 65k max completion — fast + capable
 // openai/gpt-oss-120b   : 131k ctx, 65k max completion — highest quality
 const GROQ_MODELS = [
-  "llama-3.1-8b-instant",
-  "llama-3.3-70b-versatile",
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
 ];
